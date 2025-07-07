@@ -1,0 +1,3 @@
+CREATE TABLE students (id INT, name STRING)
+INSERT INTO students VALUES ('1', 'Saiyam')
+INSERT INTO students VALUES ('2', 'Rohit')
