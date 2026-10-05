@@ -1,4 +1,5 @@
 #include "vector/validity_mask.h"
+#include <cstring>
 
 #include "test_util.h"
 
@@ -207,6 +208,94 @@ TEST(ValidityMask, RandomOperationsMatchBoolVectorModel) {
         for (idx_t i = 0; i < cap; i++)
             ASSERT_EQ(m.IsValid(i), model[i]);
     }
+}
+
+TEST(ValidityMask, FromBufferReadsExistingWords) {
+    auto words = Buffer::Allocate(4 * sizeof(uint64_t));
+    auto* w = words->As<uint64_t>();
+    w[0] = ~uint64_t{0};
+    w[1] = ~uint64_t{0} & ~(uint64_t{1} << 5); // row 69 invalid
+    w[2] = 0;                                  // rows 128..191 invalid
+    w[3] = ~uint64_t{0};
+    ValidityMask m = ValidityMask::FromBuffer(words, 256);
+    EXPECT_FALSE(m.AllValid());
+    EXPECT_TRUE(m.IsValid(0));
+    EXPECT_TRUE(m.IsValid(68));
+    EXPECT_FALSE(m.IsValid(69));
+    EXPECT_TRUE(m.IsValid(70));
+    EXPECT_FALSE(m.IsValid(128));
+    EXPECT_FALSE(m.IsValid(191));
+    EXPECT_TRUE(m.IsValid(192));
+    EXPECT_EQ(m.CountValid(256), 256u - 1 - 64);
+}
+
+TEST(ValidityMask, FromBufferOverAViewReadsAtTheViewOffset) {
+    auto parent = Buffer::Allocate(4 * sizeof(uint64_t));
+    auto* w = parent->As<uint64_t>();
+    w[0] = ~uint64_t{0};
+    w[1] = ~uint64_t{0};
+    w[2] = ~uint64_t{0} & ~uint64_t{1}; // row 0 of the second half invalid
+    w[3] = ~uint64_t{0};
+    auto second_half = Buffer::View(parent, 2 * sizeof(uint64_t), 2 * sizeof(uint64_t));
+    ValidityMask m = ValidityMask::FromBuffer(second_half, 128);
+    EXPECT_FALSE(m.IsValid(0));
+    EXPECT_TRUE(m.IsValid(1));
+    EXPECT_EQ(m.CountValid(128), 127u);
+}
+
+TEST(ValidityMaskDeathTest, FromBufferRejectsATooSmallBuffer) {
+    auto words = Buffer::Allocate(8);
+    EXPECT_DEATH(ValidityMask::FromBuffer(words, 65), "CDB_CHECK");
+}
+
+#if defined(CDB_ENABLE_ASSERTS)
+TEST(ValidityMaskDeathTest, MutatingAMaskOverReadOnlyStorageAborts) {
+    auto parent = Buffer::Allocate(2 * sizeof(uint64_t));
+    std::memset(parent->data(), 0xFF, parent->size());
+    ValidityMask m = ValidityMask::FromBuffer(Buffer::View(parent, 0, parent->size()), 128);
+    EXPECT_DEATH(m.SetInvalid(3), "CDB_ASSERT");
+    EXPECT_DEATH(m.SetValid(3), "CDB_ASSERT");
+    EXPECT_DEATH(m.SetRangeValid(0, 10), "CDB_ASSERT");
+    EXPECT_DEATH(m.SetAllInvalid(10), "CDB_ASSERT");
+    EXPECT_DEATH(m.MutableWords(), "CDB_ASSERT");
+}
+#endif
+
+TEST(ValidityMask, ResizeOfUnallocatedMaskJustChangesCapacity) {
+    ValidityMask m(10);
+    m.Resize(5000);
+    EXPECT_TRUE(m.AllValid());
+    EXPECT_EQ(m.capacity(), 5000u);
+    m.SetInvalid(4999);
+    EXPECT_FALSE(m.IsValid(4999));
+}
+
+TEST(ValidityMask, ResizePreservesBitsAndNewRowsAreValid) {
+    for (idx_t from : {idx_t{1}, idx_t{64}, idx_t{100}, idx_t{2048}}) {
+        for (idx_t to : {from, from + 1, from + 64, from * 2 + 5, idx_t{10000}}) {
+            ValidityMask m(from);
+            test::Rng rng(from * 31 + to);
+            std::vector<bool> model(to, true);
+            for (idx_t i = 0; i < from; i++) {
+                if (test::Chance(rng, 0.4)) {
+                    m.SetInvalid(i);
+                    model[i] = false;
+                }
+            }
+            m.Resize(to);
+            EXPECT_EQ(m.capacity(), to);
+            for (idx_t i = 0; i < to; i++)
+                ASSERT_EQ(m.IsValid(i), model[i]) << from << "->" << to;
+            // and the grown mask is fully writable
+            m.SetInvalid(to - 1);
+            EXPECT_FALSE(m.IsValid(to - 1));
+        }
+    }
+}
+
+TEST(ValidityMaskDeathTest, ResizeCannotShrink) {
+    ValidityMask m(100);
+    EXPECT_DEATH(m.Resize(99), "CDB_CHECK");
 }
 
 } // namespace cdb

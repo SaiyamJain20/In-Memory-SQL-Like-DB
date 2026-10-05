@@ -87,6 +87,7 @@ Value Vector::GetValue(idx_t row) const {
 void Vector::SetValue(idx_t row, const Value& value) {
     CDB_CHECK(format_ == VectorFormat::Flat && row < capacity_);
     CDB_CHECK(value.type() == type_);
+    CDB_CHECK(!data_->read_only());
     if (value.IsNull()) {
         validity_.SetInvalid(row);
         return;
@@ -120,11 +121,11 @@ void Vector::Reset() {
     sel_ = SelectionVector();
     validity_.Reset(capacity_);
     const size_t needed = capacity_ * type_.width();
-    if (!data_ || data_.use_count() > 1 || data_->size() < needed) {
+    if (!data_ || data_.use_count() > 1 || data_->read_only() || data_->size() < needed) {
         AllocateFlat();
     }
     if (heap_) {
-        if (heap_.use_count() == 1) {
+        if (heap_.use_count() == 1 && !heap_->sealed()) {
             heap_->Reset();
         } else {
             heap_.reset();
@@ -143,6 +144,18 @@ void Vector::Reference(const Vector& other) {
     sel_ = other.sel_;
 }
 
+void Vector::ReferenceFlat(std::shared_ptr<Buffer> data, ValidityMask validity,
+                           std::shared_ptr<StringHeap> heap) {
+    CDB_CHECK(data != nullptr && data->size() >= capacity_ * type_.width());
+    CDB_CHECK(validity.capacity() >= capacity_);
+    format_ = VectorFormat::Flat;
+    child_.reset();
+    sel_ = SelectionVector();
+    data_ = std::move(data);
+    validity_ = std::move(validity);
+    heap_ = std::move(heap);
+}
+
 void Vector::SetConstant(const Value& value) {
     CDB_CHECK(value.type() == type_);
     child_.reset();
@@ -150,11 +163,11 @@ void Vector::SetConstant(const Value& value) {
     format_ = VectorFormat::Constant;
     validity_.Reset(capacity_);
     const size_t width = type_.width();
-    if (!data_ || data_.use_count() > 1 || data_->size() < width) {
+    if (!data_ || data_.use_count() > 1 || data_->read_only() || data_->size() < width) {
         data_ = Buffer::Allocate(std::max<size_t>(width, 16));
     }
     if (heap_) {
-        if (heap_.use_count() == 1) {
+        if (heap_.use_count() == 1 && !heap_->sealed()) {
             heap_->Reset();
         } else {
             heap_.reset();
@@ -319,17 +332,14 @@ void Vector::Verify(idx_t count) const {
 
 namespace VectorOps {
 
-void Copy(const Vector& src, Vector& dst, const SelectionVector* sel, idx_t count,
-          idx_t dst_offset) {
-    CDB_CHECK(src.type() == dst.type());
-    CDB_CHECK(dst.format() == VectorFormat::Flat);
-    CDB_CHECK(dst_offset + count <= dst.capacity());
-
+void CopyRows(const Vector& src, const SelectionVector* sel, idx_t src_offset, idx_t count,
+              uint8_t* dst_data, ValidityMask& dst_validity, StringHeap* dst_heap,
+              idx_t dst_offset) {
     UnifiedFormat u;
     src.ToUnified(u);
-    ValidityMask& dst_validity = dst.Validity();
+    const bool identity_source = u.sel == SelectionVector::Identity().data();
     auto source_slot = [&](idx_t i) -> sel_t {
-        const idx_t logical = sel != nullptr ? (*sel)[i] : i;
+        const idx_t logical = sel != nullptr ? (*sel)[src_offset + i] : src_offset + i;
         CDB_ASSERT(logical < src.capacity());
         return u.sel[logical];
     };
@@ -341,19 +351,22 @@ void Copy(const Vector& src, Vector& dst, const SelectionVector* sel, idx_t coun
     DispatchPhysical(src.type().physical(), [&](auto tag) {
         using T = decltype(tag);
         const T* in = u.Data<T>();
-        T* out = dst.template FlatData<T>() + dst_offset;
+        T* out = reinterpret_cast<T*>(dst_data) + dst_offset;
         if constexpr (std::is_same_v<T, string_t>) {
             for (idx_t i = 0; i < count; i++) {
                 const sel_t s = source_slot(i);
                 if (!u.validity->IsValid(s)) {
                     out[i] = string_t();
+                } else if (in[s].IsInlined()) {
+                    out[i] = in[s];
                 } else {
-                    out[i] = in[s].IsInlined() ? in[s] : dst.AddString(in[s].view());
+                    CDB_ASSERT(dst_heap != nullptr);
+                    out[i] = dst_heap->Add(in[s].view());
                 }
             }
-        } else if (sel == nullptr && src.format() == VectorFormat::Flat) {
+        } else if (sel == nullptr && identity_source) {
             if (count > 0) {
-                std::memcpy(out, in, count * sizeof(T));
+                std::memcpy(out, in + src_offset, count * sizeof(T));
             }
         } else {
             for (idx_t i = 0; i < count; i++) {
@@ -371,6 +384,15 @@ void Copy(const Vector& src, Vector& dst, const SelectionVector* sel, idx_t coun
             dst_validity.Set(dst_offset + i, u.validity->IsValid(source_slot(i)));
         }
     }
+}
+
+void Copy(const Vector& src, Vector& dst, const SelectionVector* sel, idx_t count,
+          idx_t dst_offset) {
+    CDB_CHECK(src.type() == dst.type());
+    CDB_CHECK(dst.format() == VectorFormat::Flat);
+    CDB_CHECK(dst_offset + count <= dst.capacity());
+    StringHeap* heap = dst.type().id() == TypeId::Varchar ? &dst.Heap() : nullptr;
+    CopyRows(src, sel, 0, count, dst.FlatBytes(), dst.Validity(), heap, dst_offset);
 }
 
 } // namespace VectorOps

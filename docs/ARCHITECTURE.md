@@ -77,15 +77,38 @@ Filters do not copy data. They emit a `SelectionVector` (array of row indices); 
 operators read through it. A dictionary vector is exactly "child + selection", so slicing a chunk
 by a filter is O(selected) pointer work.
 
-## Storage — [planned: Phase 2, 5]
-Tables are lists of **row groups** (~120k rows). Each row group holds one **column segment** per
-column. Segments carry a **zone map** (min, max, null count) so scans can skip whole row groups
-for predicates like `l_shipdate <= DATE '1998-09-02'`, and an **encoding** chosen at seal time
-(constant, RLE, dictionary, frame-of-reference + bit-packing, delta; Phase 5). A scan takes a
-projection (only requested columns are touched) and optional pushed-down filters.
+## Storage — [implemented: Phase 2; encodings planned: Phase 5]
+Tables are lists of **row groups** (60 vectors = 122,880 rows). Each row group holds one
+**column segment** per column.
 
-The open tail of a table is a mutable buffer; it is sealed into immutable, compressed segments
-when full. Immutable segments are what make cheap concurrent reads possible.
+**Segments are immutable and uncompressed [implemented]**, laid out exactly like a flat vector
+(values + validity bitmask + sealed string heap, each padded to a whole number of vectors). A scan
+therefore does no work per value: `ColumnSegment::Scan` points the output vector at precomputed
+read-only `Buffer::View`s into the segment (`Vector::ReferenceFlat`), with no copy and no
+allocation. Vectors obtained this way are read-only (asserted), and `Vector::Reset` detaches from
+them instead of reusing them for writing. Encodings chosen at seal time (constant, RLE,
+dictionary, frame-of-reference + bit-packing, delta) are **[planned: Phase 5]**; those segments
+decode into the output vector (or, for dictionary encoding, expose it zero-copy as a dictionary
+vector).
+
+**Zone maps [implemented]**: every segment carries exact min / max / null count (doubles use the
+NaN-last total order; string bounds are kept up to 64 bytes). `ColumnStats::CanSkip(op, c)` is
+*sound* — it only answers "skip" when no row can satisfy `column <op> c` — and exact for
+`<`, `<=`, `>`, `>=`, `<>`. A scan given `TableFilter`s skips whole row groups whose zone maps
+rule them out; the Filter operator (Phase 4) still applies the real predicate to the rest.
+
+**Writes and snapshots [implemented]**: a table is append-only. Appends fill a mutable
+`RowGroupBuilder` (geometrically growing flat buffers, one `ColumnBuilder` per column); a full
+builder is sealed into an immutable `RowGroup` without copying. `Table::Snapshot()` returns the
+sealed groups plus a frozen copy of the open tail (cached until the next append; its long
+strings are shared with the builder's append-only heap), so **readers get snapshot isolation
+and never hold a lock while scanning**; this is also what lets Phase 6 hand row groups to
+worker threads as morsels. A scan takes a projection (only requested columns are touched,
+verified by per-segment scan counters in the tests; a zero-column projection still yields row
+counts for `COUNT(*)`) and optional pruning filters.
+
+**Catalog [implemented]**: case-insensitive, thread-safe name → table registry (`Catalog`,
+owned by `Database`).
 
 ## Execution — [planned: Phase 4, 6]
 **Push-based pipelines.** A query compiles to pipelines. Each is a `Source`, a chain of

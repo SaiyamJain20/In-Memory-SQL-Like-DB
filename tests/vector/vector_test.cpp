@@ -1,4 +1,5 @@
 #include "vector/vector.h"
+#include <cstring>
 
 #include "test_util.h"
 
@@ -633,6 +634,141 @@ TEST(VectorDeathTest, ContractViolationsAbort) {
     c.Slice(MakeSel({0}), 1);
     EXPECT_DEATH(VectorOps::Copy(a, c, nullptr, 1), "CDB_CHECK"); // dst must be flat
     EXPECT_DEATH(VectorOps::Copy(a, a, nullptr, 5), "CDB_CHECK"); // overflows dst
+}
+
+// ---------------------------------------------------------------- ReferenceFlat / CopyRows
+
+TEST(VectorReferenceFlat, ViewsExternalBuffersZeroCopy) {
+    Vector owner(LogicalType::BigInt(), kVectorSize);
+    for (idx_t i = 0; i < kVectorSize; i++) {
+        owner.SetValue(i, i % 5 == 0 ? Value::Null(LogicalType::BigInt())
+                                     : Value::BigInt(static_cast<int64_t>(i) * 10));
+    }
+    auto data = Buffer::View(Buffer::Allocate(1), 0, 0); // unrelated, to prove nothing is shared
+    (void)data;
+    auto parent = Buffer::Allocate(kVectorSize * 8);
+    std::memcpy(parent->data(), owner.FlatData<int64_t>(), kVectorSize * 8);
+    auto view = Buffer::View(parent, 0, kVectorSize * 8);
+
+    Vector v(LogicalType::BigInt(), kVectorSize);
+    v.ReferenceFlat(view, owner.Validity(), nullptr);
+    EXPECT_EQ(v.format(), VectorFormat::Flat);
+    const Vector& cv = v;
+    EXPECT_EQ(cv.FlatBytes(), parent->data());
+    for (idx_t i = 0; i < kVectorSize; i++)
+        ASSERT_TRUE(BitIdentical(v.GetValue(i), owner.GetValue(i)));
+    v.Verify(kVectorSize);
+}
+
+TEST(VectorReferenceFlat, ResetDetachesWithoutTouchingTheViewedBuffer) {
+    auto parent = Buffer::Allocate(kVectorSize * 4);
+    for (idx_t i = 0; i < kVectorSize; i++)
+        parent->As<int32_t>()[i] = static_cast<int32_t>(i);
+    Vector v(LogicalType::Integer(), kVectorSize);
+    v.ReferenceFlat(Buffer::View(parent, 0, kVectorSize * 4), ValidityMask(kVectorSize), nullptr);
+
+    v.Reset();
+    for (idx_t i = 0; i < kVectorSize; i++)
+        v.SetValue(i, Value::Integer(-7));
+    for (idx_t i = 0; i < kVectorSize; i++)
+        ASSERT_EQ(parent->As<int32_t>()[i], static_cast<int32_t>(i));
+    EXPECT_EQ(v.GetValue(5).GetInteger(), -7);
+}
+
+TEST(VectorReferenceFlat, ReplacesWhateverFormatTheVectorHad) {
+    Vector v(LogicalType::Integer(), 8);
+    v.SetConstant(Value::Integer(3));
+    auto parent = Buffer::Allocate(8 * 4);
+    parent->As<int32_t>()[2] = 42;
+    v.ReferenceFlat(Buffer::View(parent, 0, 32), ValidityMask(8), nullptr);
+    EXPECT_EQ(v.format(), VectorFormat::Flat);
+    EXPECT_EQ(v.GetValue(2).GetInteger(), 42);
+
+    SelectionVector sel(1);
+    v.Slice(sel, 1);
+    EXPECT_EQ(v.format(), VectorFormat::Dictionary);
+    v.ReferenceFlat(Buffer::View(parent, 0, 32), ValidityMask(8), nullptr);
+    EXPECT_EQ(v.format(), VectorFormat::Flat);
+    v.Verify(8);
+}
+
+TEST(VectorReferenceFlat, SharedHeapKeepsStringsAlive) {
+    auto heap = std::make_shared<StringHeap>();
+    auto parent = Buffer::Allocate(4 * sizeof(string_t));
+    for (int i = 0; i < 4; i++) {
+        parent->As<string_t>()[i] = heap->Add(std::string(30 + i, 'a' + i));
+    }
+    Vector v(LogicalType::Varchar(), 4);
+    v.ReferenceFlat(Buffer::View(parent, 0, parent->size()), ValidityMask(4), heap);
+    heap.reset();
+    parent.reset(); // only the vector keeps the data and heap alive now
+    for (int i = 0; i < 4; i++)
+        EXPECT_EQ(v.GetValue(i).GetVarchar(), std::string(30 + i, 'a' + i));
+    v.Reset(); // detaching from a shared/sealed-style heap must not clear it for others
+}
+
+TEST(VectorReferenceFlatDeathTest, ContractViolationsAbort) {
+    Vector v(LogicalType::BigInt(), 64);
+    auto too_small = Buffer::Allocate(10);
+    EXPECT_DEATH(v.ReferenceFlat(too_small, ValidityMask(64), nullptr), "CDB_CHECK");
+    auto ok = Buffer::Allocate(64 * 8);
+    EXPECT_DEATH(v.ReferenceFlat(ok, ValidityMask(8), nullptr), "CDB_CHECK"); // mask too small
+}
+
+TEST(VectorCopyRows, SourceOffsetSelectsAWindowOfSourceRows) {
+    test::Rng rng(11);
+    for (LogicalType t : AllTypes()) {
+        auto vals = RandomValues(rng, t, 200);
+        Vector src = MakeFlat(t, vals, 256);
+        for (auto [offset, count] :
+             {std::pair<idx_t, idx_t>{0, 200}, {17, 100}, {199, 1}, {200, 0}}) {
+            Vector dst(t, 256);
+            VectorOps::CopyRows(src, nullptr, offset, count, dst.FlatBytes(), dst.Validity(),
+                                t.id() == TypeId::Varchar ? &dst.Heap() : nullptr, 3);
+            for (idx_t i = 0; i < count; i++) {
+                ASSERT_TRUE(BitIdentical(dst.GetValue(3 + i), vals[offset + i]))
+                    << t.ToString() << " offset=" << offset << " row " << i;
+            }
+        }
+    }
+}
+
+TEST(VectorCopyRows, SourceOffsetAppliesToTheSelectionEntries) {
+    test::Rng rng(12);
+    for (LogicalType t : AllTypes()) {
+        auto vals = RandomValues(rng, t, 100);
+        Vector src = MakeFlat(t, vals, 128);
+        SelectionVector sel = MakeSel({5, 99, 0, 42, 42, 7});
+        const std::vector<sel_t> picks = {5, 99, 0, 42, 42, 7};
+        Vector dst(t, 128);
+        // process selection entries [2, 6): rows 0, 42, 42, 7
+        VectorOps::CopyRows(src, &sel, 2, 4, dst.FlatBytes(), dst.Validity(),
+                            t.id() == TypeId::Varchar ? &dst.Heap() : nullptr, 0);
+        for (idx_t i = 0; i < 4; i++) {
+            ASSERT_TRUE(BitIdentical(dst.GetValue(i), vals[picks[2 + i]])) << t.ToString();
+        }
+    }
+}
+
+TEST(VectorCopyRows, ThroughDictionaryAndConstantSourcesWithOffset) {
+    test::Rng rng(13);
+    for (LogicalType t : AllTypes()) {
+        auto vals = RandomValues(rng, t, 64);
+        Vector dict = MakeFlat(t, vals, 64);
+        dict.Slice(MakeSel({63, 1, 2, 3, 62}), 5);
+        Vector dst(t, 64);
+        VectorOps::CopyRows(dict, nullptr, 1, 3, dst.FlatBytes(), dst.Validity(),
+                            t.id() == TypeId::Varchar ? &dst.Heap() : nullptr, 0);
+        ExpectEquals(dst, {vals[1], vals[2], vals[3]});
+
+        const Value c = test::RandomValue(rng, t, 0.3);
+        Vector konst = Vector::MakeConstant(c, 64);
+        Vector dst2(t, 64);
+        VectorOps::CopyRows(konst, nullptr, 40, 10, dst2.FlatBytes(), dst2.Validity(),
+                            t.id() == TypeId::Varchar ? &dst2.Heap() : nullptr, 0);
+        for (idx_t i = 0; i < 10; i++)
+            ASSERT_TRUE(BitIdentical(dst2.GetValue(i), c));
+    }
 }
 
 } // namespace cdb

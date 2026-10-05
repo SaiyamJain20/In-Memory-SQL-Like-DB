@@ -4,8 +4,9 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phase 0 of 9).** The foundation (build, CI, test infrastructure,
-> design docs) is in place; the engine itself is being built phase by phase. Nothing below is
+> **Status: early development (Phases 0–2 of 9 complete).** Build, CI, the vector/type system and
+> the columnar storage layer (zone maps, snapshot scans, catalog) are in place; there is no SQL
+> front end or query execution yet. The engine is being built phase by phase. Nothing below is
 > claimed until it is implemented *and* measured — see the [roadmap](docs/ROADMAP.md) for what is
 > done and [`docs/PROGRESS.md`](docs/PROGRESS.md) for the dated log.
 

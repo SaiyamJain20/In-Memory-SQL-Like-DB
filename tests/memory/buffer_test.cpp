@@ -47,4 +47,47 @@ TEST(Buffer, SharedOwnershipKeepsDataAlive) {
     EXPECT_EQ(b.use_count(), 1);
 }
 
+TEST(BufferView, WindowsIntoTheParentWithoutCopying) {
+    auto parent = Buffer::Allocate(256);
+    for (int i = 0; i < 256; i++)
+        parent->data()[i] = static_cast<uint8_t>(i);
+    auto view = Buffer::View(parent, 64, 32);
+    EXPECT_TRUE(view->read_only());
+    EXPECT_FALSE(parent->read_only());
+    EXPECT_EQ(view->size(), 32u);
+    EXPECT_EQ(view->data(), parent->data() + 64);
+    EXPECT_EQ(view->data()[0], 64);
+    EXPECT_EQ(view->data()[31], 95);
+}
+
+TEST(BufferView, KeepsTheParentAlive) {
+    std::shared_ptr<Buffer> view;
+    {
+        auto parent = Buffer::Allocate(128);
+        parent->data()[100] = 0x7E;
+        view = Buffer::View(parent, 96, 32);
+    } // the only remaining reference to the parent is held by the view
+    EXPECT_EQ(view->data()[4], 0x7E); // ASan: no use-after-free
+}
+
+TEST(BufferView, ViewsOfViewsAndFullWindows) {
+    auto parent = Buffer::Allocate(100);
+    parent->data()[50] = 9;
+    auto v1 = Buffer::View(parent, 10, 80);
+    auto v2 = Buffer::View(v1, 40, 10);
+    EXPECT_EQ(v2->data()[0], 9);
+    EXPECT_TRUE(v2->read_only());
+    auto whole = Buffer::View(parent, 0, 100);
+    EXPECT_EQ(whole->data(), parent->data());
+    auto empty = Buffer::View(parent, 100, 0);
+    EXPECT_EQ(empty->size(), 0u);
+}
+
+TEST(BufferViewDeathTest, WindowMustLieInsideTheParent) {
+    auto parent = Buffer::Allocate(64);
+    EXPECT_DEATH(Buffer::View(parent, 32, 33), "CDB_CHECK");
+    EXPECT_DEATH(Buffer::View(parent, 65, 0), "CDB_CHECK");
+    EXPECT_DEATH(Buffer::View(nullptr, 0, 0), "CDB_CHECK");
+}
+
 } // namespace cdb

@@ -22,6 +22,15 @@ class ValidityMask {
     ValidityMask() = default;
     explicit ValidityMask(idx_t capacity) : capacity_(capacity) {}
 
+    // Wraps existing mask words (e.g. a read-only View into a storage segment). `words` must
+    // hold at least WordCount(capacity) 64-bit words. Mutating a mask over a read-only buffer is a
+    // bug and asserts.
+    static ValidityMask FromBuffer(std::shared_ptr<Buffer> words, idx_t capacity);
+
+    // Grows the mask to `new_capacity` rows (>= capacity()); existing bits are preserved and new
+    // rows are valid.
+    void Resize(idx_t new_capacity);
+
     idx_t capacity() const noexcept { return capacity_; }
 
     // True iff no row has ever been marked invalid (no storage allocated).
@@ -67,6 +76,9 @@ class ValidityMask {
     uint64_t* MutableWords();
 
     ValidityMask DeepCopy() const;
+
+    // The underlying words buffer, or null when AllValid().
+    const std::shared_ptr<Buffer>& buffer() const noexcept { return buffer_; }
 
   private:
     std::shared_ptr<Buffer> buffer_;

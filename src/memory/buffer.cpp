@@ -1,5 +1,6 @@
 #include "memory/buffer.h"
 
+#include "common/assert.h"
 #include "common/types.h"
 
 #include <cstring>
@@ -13,8 +14,18 @@ Buffer::Buffer(size_t bytes) : size_(bytes) {
     std::memset(data_, 0, total);
 }
 
+Buffer::Buffer(std::shared_ptr<Buffer> parent, size_t offset, size_t size)
+    : data_(parent->data_ + offset), size_(size), parent_(std::move(parent)) {}
+
 Buffer::~Buffer() {
-    ::operator delete(data_, std::align_val_t{kAlignment});
+    if (parent_ == nullptr) {
+        ::operator delete(data_, std::align_val_t{kAlignment});
+    }
+}
+
+std::shared_ptr<Buffer> Buffer::View(std::shared_ptr<Buffer> parent, size_t offset, size_t size) {
+    CDB_CHECK(parent != nullptr && offset + size <= parent->size());
+    return std::shared_ptr<Buffer>(new Buffer(std::move(parent), offset, size));
 }
 
 std::shared_ptr<Buffer> Buffer::Allocate(size_t bytes) {

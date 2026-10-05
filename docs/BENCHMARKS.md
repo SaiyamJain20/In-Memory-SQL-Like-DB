@@ -61,3 +61,32 @@ repetitions, so the *exact* ratios carry noise; the order-of-magnitude gains on 
 paths are far outside it. Correctness of the optimized path is covered by targeted tests plus the
 model-based property test (copies into pre-populated destinations at random offsets) and
 mutation checks (`tools/mutation_smoke.py`).
+
+---
+
+## Phase 2 — storage micro-benchmarks
+Dataset: 2,000,000 rows × 6 columns (BIGINT id, INTEGER qty, DOUBLE price, DATE shipdate
+ascending, VARCHAR flag (inlined), VARCHAR comment (~35 bytes, out-of-line)), default 122,880-row
+row groups (17 groups). Same machine/build as above; system load average ≈ 5 during this run
+(desktop session), CPU scaling enabled: treat sub-15% differences as noise.
+Command: `build/release/bench/cdb_bench --benchmark_filter=BM_Table --benchmark_min_time=0.5s
+--benchmark_repetitions=5 --benchmark_report_aggregates_only=true` (medians).
+
+| Benchmark | Time | Throughput | What it measures |
+|---|---:|---:|---|
+| `Table::Append`, 409,600 rows (200 chunks) incl. data generation | 47.3 ms | 8.7 M rows/s | builder append (growth + copy + seal); dominated by building the test strings |
+| Scan 1 column (BIGINT), sum every value | 0.85 ms | 2.36 G rows/s | zero-copy scan + one pass over 16 MB |
+| Scan 2 / 4 projected columns, sum column 0 | 0.91 / 0.92 ms | 2.2 G rows/s | extra projected columns cost ~nothing unless read |
+| Scan 4 columns, **touching no values** | 69 µs | 28.8 G rows/s | pure scan machinery: ≈ 70 ns per 2048-row chunk (≈ 17 ns per column-vector view hand-out) |
+| `shipdate >= X` pruning 0 % of groups (2 columns) | 35.0 µs | — | 17 of 17 groups scanned |
+| … pruning 50 % | 17.5 µs | — | 9 of 17 scanned |
+| … pruning 90 % | 5.3 µs | — | 3 of 17 scanned |
+| … pruning 99 % | 1.35 µs | — | 1 of 17 scanned |
+| `Table::Snapshot()` (17 groups) | 134 ns | — | copy of the group pointer list + schema |
+
+Reading these honestly: a scan of uncompressed in-memory data is bound by memory bandwidth once a
+consumer reads the values (2.4 G rows/s × 8 B ≈ 19 GB/s here), and costs almost nothing when it
+does not (the views are precomputed). The numbers that matter for later phases will be those of
+the operators *on top of* the scan (Phase 4) and of compressed scans (Phase 5); this table is the
+baseline they will be judged against. Zone-map pruning scales as expected with the fraction of
+groups skipped, with a ~1 µs floor from the scan setup.

@@ -67,4 +67,22 @@ TEST(StringHeap, ResetReleasesMemoryAndAllowsReuse) {
     EXPECT_EQ(s.view(), std::string(50, 'b'));
 }
 
+TEST(StringHeap, SealedHeapKeepsExistingStringsAndAllowsInlineAdds) {
+    StringHeap h;
+    string_t long_s = h.Add(std::string(40, 'q'));
+    EXPECT_FALSE(h.sealed());
+    h.Seal();
+    EXPECT_TRUE(h.sealed());
+    EXPECT_EQ(long_s.view(), std::string(40, 'q'));
+    // inlined strings need no heap memory, so they remain addable
+    EXPECT_EQ(h.Add("tiny").view(), "tiny");
+}
+
+TEST(StringHeapDeathTest, SealedHeapRejectsOutOfLineAddsAndReset) {
+    StringHeap h;
+    h.Seal();
+    EXPECT_DEATH(h.Add(std::string(40, 'x')), "CDB_CHECK");
+    EXPECT_DEATH(h.Reset(), "CDB_CHECK");
+}
+
 } // namespace cdb
