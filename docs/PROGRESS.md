@@ -106,3 +106,6 @@ every row to a `std::vector<Value>` model after every step — including that ve
 
 **Phase 1 exit criteria met** (tests for every format × type × null combination incl.
 slice-of-slice; sanitizer clean; micro-benchmarks recorded).
+
+**CI (GitHub Actions, run 37379450563)** — all 7 jobs green on the pushed branch: format,
+gcc-13 and clang-18 × debug and release, asan (ASan+UBSan), tsan.
