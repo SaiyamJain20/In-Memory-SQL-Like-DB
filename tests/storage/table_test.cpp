@@ -396,4 +396,64 @@ TEST(TableZoneMaps, PruningIsSoundOverRandomTablesAndFilters) {
     EXPECT_LT(pruned_groups, total_groups);
 }
 
+// ------------------------------------------------------------------ NOT NULL
+
+TEST(TableNotNull, RejectsNullsAndLeavesTheTableUntouched) {
+    Table table("t",
+                {{"id", LogicalType::Integer(), /*not_null=*/true},
+                 {"note", LogicalType::Varchar(), /*not_null=*/false}},
+                kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer(), LogicalType::Varchar()});
+    for (idx_t i = 0; i < 100; i++) {
+        chunk.SetValue(0, i, Value::Integer(static_cast<int32_t>(i)));
+        chunk.SetValue(1, i, i % 2 ? Value::Null(LogicalType::Varchar()) : Value::Varchar("x"));
+    }
+    chunk.SetCardinality(100);
+    table.Append(chunk); // NULLs in the nullable column are fine
+    EXPECT_EQ(table.RowCount(), 100u);
+
+    chunk.SetValue(0, 57, Value::Null(LogicalType::Integer()));
+    try {
+        table.Append(chunk);
+        FAIL() << "expected a NOT NULL violation";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Execution);
+        EXPECT_NE(std::string(e.what()).find("NOT NULL"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("\"id\""), std::string::npos);
+    }
+    EXPECT_EQ(table.RowCount(), 100u); // atomic: no partial append
+}
+
+TEST(TableNotNull, ChecksOnlyTheRowsOfTheChunkAndAnyVectorFormat) {
+    Table table("t", {{"x", LogicalType::Integer(), true}}, kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer()});
+    for (idx_t i = 0; i < 10; i++)
+        chunk.SetValue(0, i, Value::Integer(1));
+    chunk.SetValue(0, 500, Value::Null(LogicalType::Integer())); // beyond the cardinality
+    chunk.SetCardinality(10);
+    table.Append(chunk); // the NULL past row 10 is not part of the chunk
+    EXPECT_EQ(table.RowCount(), 10u);
+
+    DataChunk constant_null;
+    constant_null.Initialize({LogicalType::Integer()});
+    constant_null.column(0).SetConstant(Value::Null(LogicalType::Integer()));
+    constant_null.SetCardinality(3);
+    EXPECT_THROW(table.Append(constant_null), Error);
+
+    DataChunk dict;
+    dict.Initialize({LogicalType::Integer()});
+    for (idx_t i = 0; i < 4; i++)
+        dict.SetValue(0, i, Value::Integer(5));
+    dict.SetValue(0, 2, Value::Null(LogicalType::Integer()));
+    dict.SetCardinality(4);
+    SelectionVector sel(2);
+    sel.Set(0, 0);
+    sel.Set(1, 2); // selects the NULL
+    dict.Slice(sel, 2);
+    EXPECT_THROW(table.Append(dict), Error);
+    EXPECT_EQ(table.RowCount(), 10u);
+}
+
 } // namespace cdb

@@ -123,6 +123,21 @@ void Table::Append(const DataChunk& chunk) {
     if (chunk.size() == 0) {
         return;
     }
+    // Enforce NOT NULL up front so a rejected chunk leaves the table untouched.
+    for (idx_t c = 0; c < schema_.size(); c++) {
+        if (!schema_[c].not_null) {
+            continue;
+        }
+        UnifiedFormat u;
+        chunk.column(c).ToUnified(u);
+        for (idx_t r = 0; r < chunk.size(); r++) {
+            if (!u.IsValid(r)) {
+                throw Error(ErrorCode::Execution, "NOT NULL constraint failed: column \"" +
+                                                      schema_[c].name + "\" of table \"" + name_ +
+                                                      "\"");
+            }
+        }
+    }
     std::unique_lock lock(mutex_);
     idx_t pos = 0;
     while (pos < chunk.size()) {
