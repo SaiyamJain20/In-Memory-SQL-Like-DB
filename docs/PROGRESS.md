@@ -242,3 +242,7 @@ cases and a 30k-row randomized round trip; `Table::Merge` visibility under a con
 
 **Phase 3 exit criteria met** (parser round-trip tests, positioned error tests, parser fuzzing
 clean for a fixed budget, binder + plan tests).
+
+**CI (GitHub Actions, run 37388927631)** — all 8 jobs green on the pushed branch: format,
+gcc-13 and clang-18 × debug and release, asan (ASan+UBSan), tsan, and the new libFuzzer parser
+smoke job (45 s).
