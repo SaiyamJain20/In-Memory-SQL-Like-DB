@@ -65,14 +65,15 @@ MUTATIONS = [
      "if (!data_ || data_->read_only() || data_->size() < needed) {", None),
     ("vector: Copy keeps pointers into the source's string heap",
      "src/vector/vector.cpp",
-     "out[i] = in[s].IsInlined() ? in[s] : dst.AddString(in[s].view());", "out[i] = in[s];",
+     "out[i] = dst_heap->Add(in[s].view());", "out[i] = in[s];",
      None),
     ("validity: SetRangeValid last-word mask is off by one bit",
      "src/vector/validity_mask.cpp",
      "(uint64_t{1} << (end & 63)) - 1;", "(uint64_t{1} << (end & 63)) - 2;", None),
     ("vector: Copy memcpy fast path copies one element too few",
      "src/vector/vector.cpp",
-     "std::memcpy(out, in, count * sizeof(T));", "std::memcpy(out, in, (count - 1) * sizeof(T));",
+     "std::memcpy(out, in + src_offset, count * sizeof(T));",
+     "std::memcpy(out, in + src_offset, (count - 1) * sizeof(T));",
      None),
     ("vector: Copy forgets to mark overwritten NULL slots valid when the source has no NULLs",
      "src/vector/vector.cpp",
@@ -115,7 +116,8 @@ MUTATIONS = [
      "const idx_t n = chunk.size() - pos;", None),
     ("table: scan ignores zone maps entirely (pruning never fires)",
      "src/storage/table.cpp",
-     "skip = g.column(f.column_index).stats().CanSkip(f.op, f.constant);", "skip = false;", None),
+     "skip = g.column(f.column_index).stats().CanSkip(f.op, f.constant);",
+     "(void)f; skip = false;", None),
     ("table: scan over-prunes (skips groups whose zone map says 'maybe')",
      "src/storage/table.cpp",
      "skip = g.column(f.column_index).stats().CanSkip(f.op, f.constant);",
@@ -204,11 +206,17 @@ def main():
         return 2
     snapshot = {f: (ROOT / f).read_text() for f in targets()}
 
+    selected = [m for m in MUTATIONS if not args.only or args.only in m[0]]
+    stale = [f"{rel}: {name}" for name, rel, old, _new, _needs in selected
+             if len(pattern_for(old).findall((ROOT / rel).read_text())) != 1]
+    if stale:
+        print("ERROR  these mutation anchors no longer match exactly once (code changed?):\n  " +
+              "\n  ".join(stale))
+        return 2
+
     survivors = []
     ran = 0
-    for name, rel, old, new, needs in MUTATIONS:
-        if args.only and args.only not in name:
-            continue
+    for name, rel, old, new, needs in selected:
         preset = needs or args.preset
         path = ROOT / rel
         original = path.read_text()
