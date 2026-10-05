@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/error.h"
+#include "common/string_ops.h"
 #include "types/cast.h"
 
 #include <cmath>
@@ -16,29 +17,6 @@ __extension__ typedef __int128 Int128; // wide intermediates for overflow-free r
 [[noreturn]] void Overflow(const char* what, LogicalType type, const std::string& expr) {
     throw Error(ErrorCode::Execution, std::string("Out of Range: overflow in ") + what + " of " +
                                           type.ToString() + " (" + expr + ")");
-}
-
-size_t Utf8Len(unsigned char lead) {
-    if (lead < 0x80)
-        return 1;
-    if (lead >= 0xF0 && lead <= 0xF7)
-        return 4;
-    if (lead >= 0xE0)
-        return 3;
-    if (lead >= 0xC0)
-        return 2;
-    return 1; // stray continuation byte: treat as one character
-}
-
-// Byte offset of the start of every character, plus the end offset as the last element.
-std::vector<size_t> CharOffsets(std::string_view s) {
-    std::vector<size_t> offsets;
-    for (size_t i = 0; i < s.size();) {
-        offsets.push_back(i);
-        i += std::min(Utf8Len(static_cast<unsigned char>(s[i])), s.size() - i);
-    }
-    offsets.push_back(s.size());
-    return offsets;
 }
 
 template <class T> Value MakeNumber(T v);
@@ -232,30 +210,6 @@ Value EvaluateOperator(const BoundExpr& e, std::span<const Value> row) {
     CDB_UNREACHABLE("EvaluateOperator");
 }
 
-Value Substring(const Value& s, int64_t start, std::optional<int64_t> length) {
-    const std::string& text = s.GetVarchar();
-    const std::vector<size_t> offs = CharOffsets(text);
-    const int64_t n = static_cast<int64_t>(offs.size()) - 1; // characters
-    // 0-based begin: start 1 -> 0; start 0 -> -1; negative start counts from the end
-    int64_t begin = start > 0 ? start - 1 : (start == 0 ? -1 : n + start);
-    int64_t end;
-    if (!length) {
-        end = n;
-    } else if (*length >= 0) {
-        end = begin + *length;
-    } else { // negative length: that many characters *before* `begin`
-        end = begin;
-        begin = begin + *length;
-    }
-    begin = std::clamp<int64_t>(begin, 0, n);
-    end = std::clamp<int64_t>(end, 0, n);
-    if (begin >= end)
-        return Value::Varchar("");
-    return Value::Varchar(
-        text.substr(offs[static_cast<size_t>(begin)],
-                    offs[static_cast<size_t>(end)] - offs[static_cast<size_t>(begin)]));
-}
-
 int64_t AsInt64(const Value& v) {
     return v.type().id() == TypeId::Integer ? v.GetInteger() : v.GetBigInt();
 }
@@ -271,10 +225,12 @@ Value EvaluateFunction(const BoundExpr& e, std::span<const Value> row) {
         return Value::Null(e.type);
     }
     if (e.function == FunctionId::NullIf) {
+        // NULLIF(a, b) is CASE WHEN a = b THEN NULL ELSE a END: both operands are always
+        // evaluated (so an error in b surfaces even when a is NULL), as in Postgres and DuckDB.
         Value a = EvaluateScalar(*e.children[0], row);
+        const Value b = EvaluateScalar(*e.children[1], row);
         if (a.IsNull())
             return a;
-        const Value b = EvaluateScalar(*e.children[1], row);
         if (!b.IsNull() && Value::Compare(a, b) == 0)
             return Value::Null(e.type);
         return a;
@@ -303,15 +259,11 @@ Value EvaluateFunction(const BoundExpr& e, std::span<const Value> row) {
     case FunctionId::Quarter:
         return Value::BigInt((Date::Month(args[0].GetDate()) - 1) / 3 + 1);
     case FunctionId::Substring:
-        return Substring(args[0], AsInt64(args[1]),
-                         args.size() > 2 ? std::optional<int64_t>(AsInt64(args[2])) : std::nullopt);
+        return Value::Varchar(std::string(SubstringView(
+            args[0].GetVarchar(), AsInt64(args[1]),
+            args.size() > 2 ? std::optional<long long>(AsInt64(args[2])) : std::nullopt)));
     case FunctionId::Length: {
-        int64_t chars = 0;
-        const std::string& s = args[0].GetVarchar();
-        for (size_t i = 0; i < s.size(); chars++) {
-            i += std::min(Utf8Len(static_cast<unsigned char>(s[i])), s.size() - i);
-        }
-        return Value::BigInt(chars);
+        return Value::BigInt(static_cast<int64_t>(Utf8Length(args[0].GetVarchar())));
     }
     case FunctionId::Upper:
     case FunctionId::Lower: {
@@ -396,34 +348,6 @@ Value EvaluateFunction(const BoundExpr& e, std::span<const Value> row) {
 }
 
 } // namespace
-
-bool LikeMatch(std::string_view text, std::string_view pattern) {
-    size_t t = 0, p = 0;
-    size_t star_p = std::string_view::npos, star_t = 0;
-    while (t < text.size()) {
-        if (p < pattern.size() && pattern[p] == '%') {
-            star_p = p++;
-            star_t = t;
-        } else if (p < pattern.size() && pattern[p] == '_') {
-            t += std::min(Utf8Len(static_cast<unsigned char>(text[t])), text.size() - t);
-            p++;
-        } else if (p < pattern.size() && pattern[p] == text[t]) {
-            p++;
-            t++;
-        } else if (star_p != std::string_view::npos) {
-            // backtrack: let the last '%' swallow one more character
-            star_t +=
-                std::min(Utf8Len(static_cast<unsigned char>(text[star_t])), text.size() - star_t);
-            t = star_t;
-            p = star_p + 1;
-        } else {
-            return false;
-        }
-    }
-    while (p < pattern.size() && pattern[p] == '%')
-        p++;
-    return p == pattern.size();
-}
 
 Value EvaluateScalar(const BoundExpr& e, std::span<const Value> row) {
     switch (e.kind) {
