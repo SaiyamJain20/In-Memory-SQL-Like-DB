@@ -40,13 +40,27 @@
         "CDB_SANITIZER": "thread",
         "CDB_WERROR": "ON"
       }
+    },
+    {
+      "name": "fuzz",
+      "inherits": "base",
+      "description": "libFuzzer + ASan/UBSan (clang). The gcc-install-dir pin works around a GCC 14 dir without libstdc++ on this machine / the CI image.",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++-18",
+        "CMAKE_CXX_FLAGS": "--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13 -fsanitize=fuzzer-no-link",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CDB_SANITIZER": "address",
+        "CDB_BUILD_FUZZ": "ON",
+        "CDB_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "asan", "configurePreset": "asan" },
-    { "name": "tsan", "configurePreset": "tsan" }
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "fuzz", "configurePreset": "fuzz" }
   ],
   "testPresets": [
     {

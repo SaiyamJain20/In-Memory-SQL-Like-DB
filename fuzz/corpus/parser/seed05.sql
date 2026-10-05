@@ -1,0 +1,1 @@
+SELECT EXTRACT(year FROM d), substring(s FROM 1 FOR 2), count(DISTINCT a) FROM t
