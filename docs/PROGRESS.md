@@ -175,3 +175,70 @@ under TSan).
 
 **CI (GitHub Actions, run 37383454174)** — all 7 jobs green on the pushed branch: format,
 gcc-13 and clang-18 × debug and release, asan (ASan+UBSan), tsan.
+
+---
+
+## 2026-10-06 — Phase 3: SQL front end
+**Branch:** `phase-3-sql-frontend`
+
+**Changed**
+- `parser/`: lexer + recursive-descent/precedence-climbing parser → AST. SELECT (DISTINCT, all join
+  forms incl. USING/CROSS/comma, derived tables with column-alias lists, WHERE/GROUP BY/HAVING/
+  ORDER BY NULLS FIRST|LAST/LIMIT/OFFSET), expressions (CASE, CAST/`::`, BETWEEN, IN list/subquery,
+  LIKE, IS NULL, EXISTS, scalar subqueries, EXTRACT, SUBSTRING, DATE/INTERVAL literals), CREATE/DROP
+  TABLE, INSERT VALUES/SELECT, COPY FROM, EXPLAIN [ANALYZE]. UNION/WITH/constraints/schema-qualified
+  names are reported as NotImplemented. AST prints fully parenthesised SQL (print/parse fixpoint);
+  nesting and left-deep chains are depth-bounded; `FormatErrorWithContext` renders `LINE n:` + caret.
+- `types/cast`: DuckDB-compatible `CAST`, implicit widening, `CommonSuperType`, `AddInterval`
+  (month clamping). `Value::ToString` for doubles is now Python-`repr`/DuckDB style.
+- `planner/`: `BoundExpr`, **`EvaluateScalar` (the reference interpreter, ADR 0004)**, logical plan
+  with EXPLAIN rendering, and the **binder** (scopes, coercion, constant folding, aggregation rules,
+  ORDER BY resolution incl. hidden columns and aggregates introduced by ORDER BY).
+- `storage`: `ColumnDefinition::not_null` (enforced), **`Table::Merge`** (atomic publish of a staging
+  table). `io/`: **CSV loader** (RFC 4180, atomic via staging).
+- `main/`: `Connection::Query`/`QueryAll`, `QueryResult`; executes DDL, INSERT VALUES, COPY, EXPLAIN
+  and table-free SELECT. `tools/shell.cpp` → `cdb_shell`. `bench/tpch/{schema.sql,queries/}`.
+- Fuzzing: deterministic mutational fuzz in the unit tests plus a libFuzzer harness
+  (`cmake --preset fuzz`, `tools/run_fuzz.sh parser 60`).
+- ADR 0003 (semantics: match DuckDB + documented divergences), ADR 0004.
+- `tools/verify.sh` (the gate) and a hardened `tools/mutation_smoke.py`.
+
+**Verified**
+| Check | Result |
+|---|---|
+| `tools/verify.sh`: debug / asan / tsan / release / clang-18 | 412 / 412 / 412 / 410 / 412 passing |
+| DuckDB differential (`GoldenExpressions.MatchDuckDB`) | **4,286 / 4,292 expressions identical** (type, value, error status); 6 documented divergences |
+| Parser contract fuzzing (unit test: 40k mutated queries + 40k token soups + all prefixes/suffixes + raw bytes) | no violations |
+| libFuzzer, `parser_fuzz`, 90 s, ASan+UBSan | 992,194 executions (~10.9k/s), no crash or contract violation |
+| TPC-H binding | 12 / 22 queries bind (Q1, 3, 5–10, 12–14, 19); the other 10 fail with a positioned NotImplemented exactly on a subquery / WITH |
+| `tools/mutation_smoke.py` (Phase 3 group: lexer, parser, AST printer, casts, double formatting, evaluator, binder, Table, CSV, Connection) | **28 / 28 killed.** The first run killed 26 of 28 mutants: one was a real test gap (CRLF left in a *text* column) and one was unreachable code (removed); one mutant did not compile and was repaired. Phase 1–2 mutants were not re-run this phase (their sources are unchanged); the full suite of 58 is re-run at the end of Phase 4. |
+
+Test design highlights: parse → print → parse fixpoint over a corpus and the 22 TPC-H queries;
+~40 positioned syntax-error cases plus caret rendering; every binder error path with its source
+position and reviewed golden EXPLAIN plans; scalar interpreter checked against compiler overflow
+builtins and an independent DP `LIKE` matcher over 30k UTF-8 cases; CSV quoting/atomicity corner
+cases and a 30k-row randomized round trip; `Table::Merge` visibility under a concurrent reader.
+
+**Found by the process**
+1. The DuckDB differential test found 82 disagreements on its first run (98.1 % agreement) that
+   unit tests had not: `DOUBLE→INT` rounds half-to-even, `'0x10'`/`'1_000'` parse as integers,
+   `'5' + 1` must be an error, `NULLIF`/`ROUND` result types, `x % 0.0` is NaN, `-NULL` is BIGINT,
+   `CAST(NULL AS DATE) AS INTEGER` is NULL, `TRUE::DOUBLE` is legal, doubles print like Python's
+   `repr`. All fixed or documented (ADR 0003).
+2. Fuzzing found a derived table without an alias that printed unparseable SQL.
+3. The binder could not handle `ORDER BY max(a)` when that aggregate was not otherwise in the
+   query; the aggregate operator is now built after ORDER BY resolution.
+4. `set -e` was silently ineffective in the harness's chained shell commands, so a failing test did
+   not stop a commit and an interrupted mutation run left a mutated file that was nearly committed.
+   Both are fixed structurally (`tools/verify.sh`, a crash-safe mutation tool, explicit staging).
+
+**Known gaps / deliberate limits**
+- No query execution over tables yet (Phase 4). Subqueries, `WITH`, `UNION`, `FULL`/`RIGHT` + `USING`
+  are NotImplemented. `DECIMAL` is `DOUBLE`; `SUM(INT)` is `BIGINT`; `UPPER`/`LOWER` are ASCII-only;
+  `DATE` covers years 1–9999 (ADR 0003).
+- A multi-statement script is parsed in full before any statement runs (a syntax error anywhere
+  means nothing executes), but bound statement-by-statement.
+- COPY loads whole files through the loader's line reader (no parallel parsing yet).
+
+**Phase 3 exit criteria met** (parser round-trip tests, positioned error tests, parser fuzzing
+clean for a fixed budget, binder + plan tests).
