@@ -48,3 +48,64 @@ acquired by Runner of type hosted"): a GitHub runner-capacity failure, not a tes
 one job that did get a runner passed, and `gh run rerun --failed` then passed the other six.
 
 **Phase 0 exit criteria met** → merged to `main`.
+
+---
+
+## 2026-10-06 — Phase 1: Core data model
+**Branch:** `phase-1-core-data-model`
+
+**Changed**
+- `memory/`: `Buffer` (64-byte aligned, zeroed, 64 bytes of SIMD slack, ref-counted), `Arena`
+  (bump allocator, stable pointers, dedicated blocks for large allocations, `Reset`).
+- `types/`: `LogicalType`/`PhysicalType` (BOOLEAN, INTEGER, BIGINT, DOUBLE, DATE, VARCHAR; DATE
+  shares INTEGER's physical type), 16-byte `string_t` (12-byte inline, 4-byte prefix, unsigned
+  bytewise ordering), `date_t` + `Date` (proleptic Gregorian, years 1–9999, parse/format),
+  `Value` (scalar with a documented total order: NaN last and equal to itself, -0.0 == +0.0).
+- `vector/`: `ValidityMask` (bitmask, no storage when all valid), `SelectionVector`
+  (+ shared read-only Identity/Zeros), `StringHeap`, `Vector` with FLAT / CONSTANT / DICTIONARY
+  formats (`Slice`, `Flatten`, `Reference`, `Reset`, `SetConstant`, `ToUnified`, `Verify`),
+  `VectorOps::Copy`, `DataChunk` (`Append`, `Slice`, `Flatten`, `Reset`).
+- Tests infrastructure: shared random generators with adversarial strings/doubles; custom gtest
+  `main` that makes the process non-dumpable (death tests went from ~24 s to ~1 s on this
+  machine, where `core_pattern` pipes to apport and `RLIMIT_CORE=0` is ignored).
+- `bench/cdb_bench` (Google Benchmark) and `tools/mutation_smoke.py`.
+
+**Verified**
+| Check | Result |
+|---|---|
+| `debug` (gcc 13.3, `-Werror`) | 151/151 |
+| `asan` (ASan + UBSan, `halt_on_error`) | 151/151 |
+| `tsan` | 151/151 |
+| `release` (`-O3`; assert death tests compiled out) | 150/150 |
+| clang 18.1 Debug, `-Werror` | 151/151 |
+| `tools/check_format.sh` | OK (43 files) |
+| `tools/mutation_smoke.py` | **15/15 mutations killed** (14 under `debug`, 1 under `asan`) |
+
+Test design highlights: exhaustive `Date` round-trip for every day of years 1–9999 against
+`std::chrono` (3.65 M days) and every `(start,count)` pair for `SetRangeValid`; `string_t`
+comparison/equality against `std::string_view` over 160k random pairs engineered to collide on
+prefixes and straddle the inline boundary (embedded NULs, bytes ≥ 0x80); a model-based
+property test that applies 12 random structural operations (slice, flatten, reference, copy into
+pre-populated destinations, reset-and-refill, set-constant) to 360 random vectors and compares
+every row to a `std::vector<Value>` model after every step — including that vectors
+`Reference()`d before a `Reset()` keep their old contents; death tests for every contract check.
+
+**Found by the process (not by inspection)**
+1. First benchmark showed `VectorOps::Copy` at 2.4 ns/row for plain INTEGER copies (~50× off
+   `memcpy`); reworked into value-copy + validity-copy phases → 55× faster (numbers and caveats
+   in `docs/BENCHMARKS.md`).
+2. Mutation testing found a real test gap: nothing copied a NULL-free source over a destination
+   that already contained NULLs. Added a targeted test and made the property test copy into
+   pre-populated destinations at random offsets.
+
+**Known gaps / deliberate limits**
+- `Vector` capacity is capped at `kVectorSize` (2048); `Value` has no casts yet (Phase 3/4).
+- No hashing of vectors yet (needed for aggregation/joins in Phase 4).
+- `string_t::view()` on an inlined string points into the `string_t` object itself (documented in
+  the header); Phase 4 kernels must take views from the stored element, not from a copy.
+
+**Phase 1 exit criteria met** (tests for every format × type × null combination incl.
+slice-of-slice; sanitizer clean; micro-benchmarks recorded).
+
+**CI (GitHub Actions, run 37379450563)** — all 7 jobs green on the pushed branch: format,
+gcc-13 and clang-18 × debug and release, asan (ASan+UBSan), tsan.

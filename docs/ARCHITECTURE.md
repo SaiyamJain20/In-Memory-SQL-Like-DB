@@ -41,7 +41,7 @@
                                                   FileSystem ▸ WAL ▸ checkpoint
 ```
 
-## Data model — [planned: Phase 1]
+## Data model — [implemented: Phase 1]
 
 ### Vectors
 A **Vector** holds up to `STANDARD_VECTOR_SIZE` (2048) values of one logical type. 2048 values of
@@ -59,7 +59,8 @@ Formats:
 
 Kernels never branch on format in the inner loop. They convert any vector to a **unified view**
 `(data*, sel*, validity*)` once per call and index `data[sel[i]]`; flat vectors get an identity
-selection and take a specialised fast path.
+selection and take a specialised fast path. *The unified view (`UnifiedFormat`) is
+[implemented: Phase 1]; the expression kernels that consume it are [planned: Phase 4].*
 
 ### Nulls
 Validity is a bitmask (1 bit/value). A vector with no nulls carries *no* mask, so the common case

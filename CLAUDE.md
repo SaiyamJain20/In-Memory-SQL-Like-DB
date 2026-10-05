@@ -15,6 +15,8 @@ cmake --preset debug   && cmake --build --preset debug   && ctest --preset debug
 cmake --preset asan    && cmake --build --preset asan    && ctest --preset asan    # ASan+UBSan
 cmake --preset tsan    && cmake --build --preset tsan    && ctest --preset tsan    # TSan
 cmake --preset release && cmake --build --preset release && ctest --preset release # + benchmarks
+build/release/bench/cdb_bench   # micro-benchmarks; record results in docs/BENCHMARKS.md
+python3 tools/mutation_smoke.py # proves the tests can fail (see Definition of done)
 tools/check_format.sh          # verify formatting;  tools/check_format.sh --fix  to apply
 ```
 - Build dirs are `build/<preset>`. Single test: `build/debug/tests/cdb_tests --gtest_filter='Suite.Name'`.
@@ -43,11 +45,13 @@ members `snake_case` (members suffixed `_`). No `using namespace` in headers, ev
 1. Code + tests written; the **full** suite passes under `debug` *and* `asan`
    (and `tsan` once threads exist). New behaviour has new tests, including NULLs, empty input, and
    selection-vector / non-flat inputs for anything vector-shaped.
-2. `tools/check_format.sh` passes. No new compiler warnings (`CDB_WERROR=ON` in presets).
-3. A dated entry is appended to `docs/PROGRESS.md`: what changed, tests run + results, numbers for
+2. `tools/mutation_smoke.py` reports every mutation killed; add mutations for the new subsystem
+   (a surviving mutation is a test gap - fix the tests, not the script).
+3. `tools/check_format.sh` passes. No new compiler warnings (`CDB_WERROR=ON` in presets).
+4. A dated entry is appended to `docs/PROGRESS.md`: what changed, tests run + results, numbers for
    performance work (machine, compiler, command), known gaps.
-4. `docs/ROADMAP.md` status and `docs/ARCHITECTURE.md` tags updated **only** for what is verified.
-5. Commit (see Git), push the branch, check CI with `gh run list --branch <branch>`; fix red CI
+5. `docs/ROADMAP.md` status and `docs/ARCHITECTURE.md` tags updated **only** for what is verified.
+6. Commit (see Git), push the branch, check CI with `gh run list --branch <branch>`; fix red CI
    before moving on.
 
 ## Git workflow
