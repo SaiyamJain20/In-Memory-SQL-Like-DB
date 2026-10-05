@@ -172,3 +172,6 @@ appends 84,000 rows across many group seals, each reader verifying it saw a cons
 **Phase 2 exit criteria met** (append → scan round trips for all types incl. NULLs and long
 strings; projection touches only requested columns, asserted; concurrent readers + writer clean
 under TSan).
+
+**CI (GitHub Actions, run 37383454174)** — all 7 jobs green on the pushed branch: format,
+gcc-13 and clang-18 × debug and release, asan (ASan+UBSan), tsan.
