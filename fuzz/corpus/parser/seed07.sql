@@ -1,0 +1,1 @@
+SELECT x FROM (SELECT a AS x FROM t) AS s (x) WHERE x > date '1998-12-01' - interval '90' day

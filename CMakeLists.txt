@@ -14,6 +14,7 @@ option(CDB_WERROR "Treat compiler warnings as errors" OFF)
 option(CDB_BUILD_TESTS "Build unit tests" ON)
 option(CDB_BUILD_BENCH "Build micro-benchmarks" OFF)
 option(CDB_BUILD_TOOLS "Build the shell and tools" ON)
+option(CDB_BUILD_FUZZ "Build libFuzzer harnesses (needs clang)" OFF)
 set(CDB_SANITIZER "" CACHE STRING "Sanitizer to enable: address (ASan+UBSan) or thread (TSan)")
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,10 @@ endif()
 if(CDB_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(CDB_BUILD_FUZZ)
+  add_subdirectory(fuzz)
 endif()
 
 if(CDB_BUILD_BENCH AND EXISTS ${CMAKE_SOURCE_DIR}/bench/CMakeLists.txt)

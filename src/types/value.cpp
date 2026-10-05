@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -89,14 +90,44 @@ std::string DoubleToString(double d) {
     if (std::isinf(d)) {
         return d < 0 ? "-inf" : "inf";
     }
-    char buf[64];
-    const auto res = std::to_chars(buf, buf + sizeof(buf), d);
-    CDB_CHECK(res.ec == std::errc());
-    std::string s(buf, res.ptr);
-    if (s.find_first_of(".e") == std::string::npos) {
-        s += ".0";
+    if (d == 0.0) {
+        return std::signbit(d) ? "-0.0" : "0.0";
     }
-    return s;
+    // Shortest round-trip digits in scientific form: [-]d[.ddd]e[+-]XX
+    char buf[64];
+    const auto res = std::to_chars(buf, buf + sizeof(buf), d, std::chars_format::scientific);
+    CDB_CHECK(res.ec == std::errc());
+    std::string sci(buf, res.ptr);
+    std::string sign;
+    if (sci[0] == '-') {
+        sign = "-";
+        sci.erase(0, 1);
+    }
+    const size_t e_pos = sci.find('e');
+    std::string digits = sci.substr(0, e_pos);
+    const int exponent = std::stoi(sci.substr(e_pos + 1));
+    digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end()); // "d.ddd" -> "dddd"
+
+    // Like Python's repr (and DuckDB): positional notation for 1e-4 <= |d| < 1e16, otherwise
+    // scientific with at least two exponent digits.
+    if (exponent >= -4 && exponent < 16) {
+        std::string out;
+        if (exponent >= 0) {
+            const size_t int_len = static_cast<size_t>(exponent) + 1;
+            out = digits.size() <= int_len
+                      ? digits + std::string(int_len - digits.size(), '0') + ".0"
+                      : digits.substr(0, int_len) + "." + digits.substr(int_len);
+        } else {
+            out = "0." + std::string(static_cast<size_t>(-exponent - 1), '0') + digits;
+        }
+        return sign + out;
+    }
+    std::string mantissa = digits.substr(0, 1);
+    if (digits.size() > 1)
+        mantissa += "." + digits.substr(1);
+    const int abs_exp = exponent < 0 ? -exponent : exponent;
+    return sign + mantissa + "e" + (exponent < 0 ? "-" : "+") + (abs_exp < 10 ? "0" : "") +
+           std::to_string(abs_exp);
 }
 
 template <class T> int ThreeWay(T a, T b) {

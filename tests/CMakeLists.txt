@@ -9,6 +9,7 @@ FetchContent_MakeAvailable(googletest)
 file(GLOB_RECURSE CDB_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 add_executable(cdb_tests ${CDB_TEST_SOURCES})
 target_include_directories(cdb_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(cdb_tests PRIVATE CDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(cdb_tests PRIVATE cdb GTest::gtest)
 
 # ThreadSanitizer's runtime aborts ("unexpected memory mapping") on kernels with high mmap ASLR

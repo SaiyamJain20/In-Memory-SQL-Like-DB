@@ -110,6 +110,32 @@ counts for `COUNT(*)`) and optional pruning filters.
 **Catalog [implemented]**: case-insensitive, thread-safe name → table registry (`Catalog`,
 owned by `Database`).
 
+## SQL front end — [implemented: Phase 3]
+`parser/` is a hand-written lexer and recursive-descent / precedence-climbing parser producing a
+syntax-only AST. Every node records its source offset, and `ToString()` prints fully
+parenthesised SQL, so *parse → print → parse is a fixpoint* (tested on a corpus, all 22 TPC-H
+queries and fuzzed input). Hostile input cannot overflow the stack: nesting and left-deep chains
+are depth-bounded and rejected with a positioned syntax error. `FormatErrorWithContext` renders
+`LINE n:` plus a caret.
+
+`planner/binder` turns the AST into a **logical plan** of relational operators over
+`BoundExpr`s: name resolution with scopes (aliases, `USING`, derived tables), type inference with
+explicit cast nodes, constant folding (including `DATE ± INTERVAL`), aggregate extraction with
+SQL's GROUP BY / HAVING / ORDER BY rules, and lowering of `BETWEEN`/`IN`/`LIKE`/`CASE`. Columns
+are referenced by ordinal into the operator's input. Semantics follow DuckDB; the deliberate
+divergences are in [ADR 0003](adr/0003-semantics-and-divergences-from-duckdb.md).
+
+`EvaluateScalar` is the single reference implementation of expression semantics
+([ADR 0004](adr/0004-scalar-interpreter-as-reference-semantics.md)): it runs `INSERT … VALUES` and
+table-free `SELECT`s today and is the oracle for Phase 4's vectorized kernels. It is checked
+against DuckDB on ~4,300 generated expressions (`tests/planner/golden_expression_test.cpp`).
+
+`Connection::Query` parses, binds and executes. DDL, `INSERT … VALUES` (atomic, via a staging
+table merged in one step), `COPY … FROM` (CSV, atomic the same way), `EXPLAIN` and table-free
+`SELECT` run now; queries over tables bind to a plan but need the Phase 4 executor. **12 of the 22
+TPC-H queries bind completely**; the other 10 stop precisely at a subquery or `WITH`
+(Phase 8).
+
 ## Execution — [planned: Phase 4, 6]
 **Push-based pipelines.** A query compiles to pipelines. Each is a `Source`, a chain of
 streaming `Operator`s (filter, project, hash-probe) and a `Sink`. Pipeline breakers (hash

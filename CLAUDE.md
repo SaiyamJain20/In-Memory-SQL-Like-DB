@@ -18,6 +18,9 @@ cmake --preset release && cmake --build --preset release && ctest --preset relea
 build/release/bench/cdb_bench   # micro-benchmarks; record results in docs/BENCHMARKS.md
 python3 tools/mutation_smoke.py # proves the tests can fail (see Definition of done)
 tools/check_format.sh          # verify formatting;  tools/check_format.sh --fix  to apply
+tools/verify.sh                # THE GATE: format + debug/asan/tsan/release/clang-18, non-zero on failure
+tools/verify.sh quick          # format + debug only (inner loop)
+cmake --preset fuzz && cmake --build --preset fuzz && tools/run_fuzz.sh parser 60   # libFuzzer
 ```
 - Build dirs are `build/<preset>`. Single test: `build/debug/tests/cdb_tests --gtest_filter='Suite.Name'`.
 - Python tooling (DuckDB oracle, formatter): `python3 -m venv .venv && .venv/bin/pip install -r tools/requirements-dev.txt`;
@@ -42,8 +45,9 @@ Namespace `cdb`. Files `snake_case.h/.cpp`; types `PascalCase`; functions `Pasca
 members `snake_case` (members suffixed `_`). No `using namespace` in headers, ever.
 
 ## Definition of done (every milestone)
-1. Code + tests written; the **full** suite passes under `debug` *and* `asan`
-   (and `tsan` once threads exist). New behaviour has new tests, including NULLs, empty input, and
+1. Code + tests written; **`tools/verify.sh` passes** (the full suite under debug, asan, tsan,
+   release and clang-18). Never trust `set -e` in a chained shell command here - it is suppressed
+   inside `&&` lists - use explicit `|| exit 1` or the verify script. New behaviour has new tests, including NULLs, empty input, and
    selection-vector / non-flat inputs for anything vector-shaped.
 2. `tools/mutation_smoke.py` reports every mutation killed; add mutations for the new subsystem
    (a surviving mutation is a test gap - fix the tests, not the script).
@@ -78,6 +82,10 @@ members `snake_case` (members suffixed `_`). No `using namespace` in headers, ev
   full (2048) vectors, and 1-row tails. Hot loops are `noexcept` and never throw per row
   (ADR 0002).
 - Check undefined behaviour by running ASan+UBSan, not by reasoning.
+- **Never `git add -A` / `git commit -a` right after a mutation run or any scripted edit.** Stage
+  explicit paths and read `git diff --stat` first (a mutated source file was once almost committed).
+- Scripted source edits (Python `str.replace`) must assert their anchor matched exactly once;
+  clang-format reflows code, so prefer the Edit tool and re-read the file if an anchor is missing.
 - Keep `docs/ARCHITECTURE.md` honest: tag sections `[implemented]` / `[planned: Phase N]`.
 
 ## Reference oracle

@@ -94,6 +94,13 @@ class Table {
     // may be in any format.
     void Append(const DataChunk& chunk);
 
+    // Atomically appends every row of `staging` to this table by moving its row groups in (no
+    // data is copied) and adopting its still-open tail. Used for bulk loads: build the data in a
+    // private staging table, then publish it all at once, so a failed load leaves no trace and
+    // concurrent readers see either none or all of the new rows. `staging` must have the same
+    // column types and row group size; it is consumed.
+    void Merge(std::unique_ptr<Table> staging);
+
     idx_t RowCount() const;
     size_t MemoryUsage() const;
 

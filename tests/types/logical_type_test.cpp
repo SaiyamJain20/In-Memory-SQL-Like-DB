@@ -60,7 +60,8 @@ TEST(LogicalType, FromNameIsCaseInsensitiveAndAcceptsAliases) {
 }
 
 TEST(LogicalType, FromNameRejectsUnknown) {
-    for (const char* bad : {"", "INTEGER ", " INT", "DECIMAL", "TIMESTAMP", "blob", "int2x"}) {
+    for (const char* bad :
+         {"", "INTEGER ", " INT", "DECIMAL(15,2)", "TIMESTAMP", "blob", "int2x", "SMALLINT"}) {
         EXPECT_FALSE(LogicalType::FromName(bad).has_value()) << "'" << bad << "'";
     }
 }
@@ -81,6 +82,16 @@ TEST(LogicalType, PhysicalTypeOfMatchesElementTypes) {
     for (LogicalType t : test::AllTypes()) {
         EXPECT_GT(PhysicalTypeSize(t.physical()), 0u);
         EXPECT_NE(std::string(PhysicalTypeName(t.physical())), "");
+    }
+}
+
+TEST(LogicalType, ApproximateNumericAndCharAliases) {
+    // DECIMAL/NUMERIC are stored as DOUBLE and CHAR as VARCHAR: documented limitations.
+    for (const char* name : {"decimal", "NUMERIC", "float", "REAL", "Double", "float8"}) {
+        EXPECT_EQ(LogicalType::FromName(name), LogicalType::Double()) << name;
+    }
+    for (const char* name : {"char", "CHARACTER", "bpchar", "varchar", "text", "STRING"}) {
+        EXPECT_EQ(LogicalType::FromName(name), LogicalType::Varchar()) << name;
     }
 }
 

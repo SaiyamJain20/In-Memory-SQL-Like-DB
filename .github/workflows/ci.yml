@@ -71,3 +71,19 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+
+  fuzz-smoke:
+    name: libFuzzer parser (45 s)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13 clang-18 libclang-rt-18-dev
+      - name: Build fuzz targets
+        run: |
+          cmake --preset fuzz
+          cmake --build --preset fuzz
+      - name: Fuzz the SQL parser
+        run: tools/run_fuzz.sh parser 45

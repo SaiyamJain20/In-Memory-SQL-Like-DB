@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+
 namespace cdb {
 
 namespace {
@@ -394,6 +397,160 @@ TEST(TableZoneMaps, PruningIsSoundOverRandomTablesAndFilters) {
     }
     EXPECT_GT(pruned_groups, 0u);
     EXPECT_LT(pruned_groups, total_groups);
+}
+
+// ------------------------------------------------------------------ NOT NULL
+
+TEST(TableNotNull, RejectsNullsAndLeavesTheTableUntouched) {
+    Table table("t",
+                {{"id", LogicalType::Integer(), /*not_null=*/true},
+                 {"note", LogicalType::Varchar(), /*not_null=*/false}},
+                kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer(), LogicalType::Varchar()});
+    for (idx_t i = 0; i < 100; i++) {
+        chunk.SetValue(0, i, Value::Integer(static_cast<int32_t>(i)));
+        chunk.SetValue(1, i, i % 2 ? Value::Null(LogicalType::Varchar()) : Value::Varchar("x"));
+    }
+    chunk.SetCardinality(100);
+    table.Append(chunk); // NULLs in the nullable column are fine
+    EXPECT_EQ(table.RowCount(), 100u);
+
+    chunk.SetValue(0, 57, Value::Null(LogicalType::Integer()));
+    try {
+        table.Append(chunk);
+        FAIL() << "expected a NOT NULL violation";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Execution);
+        EXPECT_NE(std::string(e.what()).find("NOT NULL"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find("\"id\""), std::string::npos);
+    }
+    EXPECT_EQ(table.RowCount(), 100u); // atomic: no partial append
+}
+
+TEST(TableNotNull, ChecksOnlyTheRowsOfTheChunkAndAnyVectorFormat) {
+    Table table("t", {{"x", LogicalType::Integer(), true}}, kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer()});
+    for (idx_t i = 0; i < 10; i++)
+        chunk.SetValue(0, i, Value::Integer(1));
+    chunk.SetValue(0, 500, Value::Null(LogicalType::Integer())); // beyond the cardinality
+    chunk.SetCardinality(10);
+    table.Append(chunk); // the NULL past row 10 is not part of the chunk
+    EXPECT_EQ(table.RowCount(), 10u);
+
+    DataChunk constant_null;
+    constant_null.Initialize({LogicalType::Integer()});
+    constant_null.column(0).SetConstant(Value::Null(LogicalType::Integer()));
+    constant_null.SetCardinality(3);
+    EXPECT_THROW(table.Append(constant_null), Error);
+
+    DataChunk dict;
+    dict.Initialize({LogicalType::Integer()});
+    for (idx_t i = 0; i < 4; i++)
+        dict.SetValue(0, i, Value::Integer(5));
+    dict.SetValue(0, 2, Value::Null(LogicalType::Integer()));
+    dict.SetCardinality(4);
+    SelectionVector sel(2);
+    sel.Set(0, 0);
+    sel.Set(1, 2); // selects the NULL
+    dict.Slice(sel, 2);
+    EXPECT_THROW(table.Append(dict), Error);
+    EXPECT_EQ(table.RowCount(), 10u);
+}
+
+// ------------------------------------------------------------------ Merge (atomic bulk load)
+
+TEST(TableMerge, AppendsStagingRowsAfterExistingOnes) {
+    test::Rng rng(11);
+    for (idx_t base_rows : {idx_t{0}, idx_t{100}, idx_t{kSmallGroup}, idx_t{kSmallGroup + 7}}) {
+        for (idx_t staged_rows : {idx_t{0}, idx_t{1}, idx_t{3000}, idx_t{2 * kSmallGroup + 5}}) {
+            Table table("t", AllTypesSchema(), kSmallGroup);
+            TableModel model(table.schema().size());
+            Fill(table, model, rng, base_rows);
+            auto staging = std::make_unique<Table>("staging", AllTypesSchema(), kSmallGroup);
+            Fill(*staging, model, rng,
+                 staged_rows); // the model gets the staged rows after the base rows
+
+            table.Merge(std::move(staging));
+            EXPECT_EQ(table.RowCount(), base_rows + staged_rows);
+            auto snap = table.Snapshot();
+            TableScan scan(snap, test::AllColumns(*snap));
+            ExpectColumnsEqual(ScanAll(scan), model.cols,
+                               "base=" + std::to_string(base_rows) +
+                                   " staged=" + std::to_string(staged_rows));
+
+            // the table keeps working after the merge: further appends land in order
+            Fill(table, model, rng, 1234);
+            auto snap2 = table.Snapshot();
+            TableScan scan2(snap2, test::AllColumns(*snap2));
+            ExpectColumnsEqual(ScanAll(scan2), model.cols, "after a further append");
+        }
+    }
+}
+
+TEST(TableMerge, OldSnapshotsAreUnaffectedAndTheTailCacheIsInvalidated) {
+    test::Rng rng(12);
+    Table table("t", AllTypesSchema(), kSmallGroup);
+    TableModel model(table.schema().size());
+    Fill(table, model, rng, 500);
+    auto before = table.Snapshot();
+    const auto frozen = model.cols;
+    auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+    Fill(*staging, model, rng, 5000);
+    table.Merge(std::move(staging));
+
+    TableScan old_scan(before, test::AllColumns(*before));
+    ExpectColumnsEqual(ScanAll(old_scan), frozen, "snapshot taken before the merge");
+    auto after = table.Snapshot();
+    TableScan new_scan(after, test::AllColumns(*after));
+    ExpectColumnsEqual(ScanAll(new_scan), model.cols, "snapshot taken after the merge");
+}
+
+TEST(TableMerge, ReadersSeeEitherNoneOrAllOfTheMergedRows) {
+    Table table("t", {{"x", LogicalType::Integer()}}, kSmallGroup);
+    constexpr idx_t kBatch = 7000;
+    constexpr int kMerges = 20;
+    std::atomic<bool> done{false}, torn{false};
+    std::thread reader([&] {
+        while (!done.load() && !torn.load()) {
+            const idx_t n = table.Snapshot()->row_count();
+            if (n % kBatch != 0)
+                torn = true; // a partial merge became visible
+        }
+    });
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer()});
+    for (int m = 0; m < kMerges; m++) {
+        auto staging = std::make_unique<Table>(
+            "s", std::vector<ColumnDefinition>{{"x", LogicalType::Integer()}}, kSmallGroup);
+        for (idx_t first = 0; first < kBatch; first += kVectorSize) {
+            chunk.Reset();
+            const idx_t n = std::min<idx_t>(kVectorSize, kBatch - first);
+            for (idx_t i = 0; i < n; i++)
+                chunk.SetValue(0, i, Value::Integer(static_cast<int32_t>(first + i)));
+            chunk.SetCardinality(n);
+            staging->Append(chunk);
+        }
+        table.Merge(std::move(staging));
+    }
+    done = true;
+    reader.join();
+    EXPECT_FALSE(torn.load());
+    EXPECT_EQ(table.RowCount(), kBatch * kMerges);
+}
+
+TEST(TableMergeDeathTest, StagingMustMatchTheTable) {
+    Table table("t", {{"x", LogicalType::Integer()}}, kSmallGroup);
+    EXPECT_DEATH(
+        table.Merge(std::make_unique<Table>(
+            "s", std::vector<ColumnDefinition>{{"x", LogicalType::BigInt()}}, kSmallGroup)),
+        "CDB_CHECK");
+    EXPECT_DEATH(
+        table.Merge(std::make_unique<Table>(
+            "s", std::vector<ColumnDefinition>{{"x", LogicalType::Integer()}}, 2 * kSmallGroup)),
+        "CDB_CHECK");
+    EXPECT_DEATH(table.Merge(nullptr), "CDB_CHECK");
 }
 
 } // namespace cdb

@@ -123,6 +123,21 @@ void Table::Append(const DataChunk& chunk) {
     if (chunk.size() == 0) {
         return;
     }
+    // Enforce NOT NULL up front so a rejected chunk leaves the table untouched.
+    for (idx_t c = 0; c < schema_.size(); c++) {
+        if (!schema_[c].not_null) {
+            continue;
+        }
+        UnifiedFormat u;
+        chunk.column(c).ToUnified(u);
+        for (idx_t r = 0; r < chunk.size(); r++) {
+            if (!u.IsValid(r)) {
+                throw Error(ErrorCode::Execution, "NOT NULL constraint failed: column \"" +
+                                                      schema_[c].name + "\" of table \"" + name_ +
+                                                      "\"");
+            }
+        }
+    }
     std::unique_lock lock(mutex_);
     idx_t pos = 0;
     while (pos < chunk.size()) {
@@ -138,6 +153,26 @@ void Table::Append(const DataChunk& chunk) {
         }
     }
     tail_cache_.reset(); // safe: we hold the exclusive lock, so no Snapshot() is running
+}
+
+void Table::Merge(std::unique_ptr<Table> staging) {
+    CDB_CHECK(staging != nullptr && staging.get() != this);
+    CDB_CHECK(staging->row_group_size_ == row_group_size_ &&
+              staging->schema_.size() == schema_.size());
+    for (idx_t c = 0; c < schema_.size(); c++) {
+        CDB_CHECK(staging->schema_[c].type == schema_[c].type);
+    }
+    std::unique_lock lock(mutex_);
+    // Seal our partial tail as a (short) row group so the new rows follow it in order.
+    if (open_ && open_->count() > 0) {
+        sealed_.push_back(open_->Seal());
+    }
+    open_.reset();
+    for (auto& group : staging->sealed_) {
+        sealed_.push_back(std::move(group));
+    }
+    open_ = std::move(staging->open_);
+    tail_cache_.reset();
 }
 
 idx_t Table::RowCount() const {

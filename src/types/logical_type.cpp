@@ -94,11 +94,14 @@ std::optional<LogicalType> LogicalType::FromName(std::string_view name) {
         return Integer();
     if (upper == "BIGINT" || upper == "INT8")
         return BigInt();
-    if (upper == "DOUBLE" || upper == "FLOAT8")
+    // Approximate numerics. DECIMAL/NUMERIC are stored as DOUBLE (a documented limitation).
+    if (upper == "DOUBLE" || upper == "FLOAT8" || upper == "FLOAT" || upper == "REAL" ||
+        upper == "DECIMAL" || upper == "NUMERIC")
         return Double();
     if (upper == "DATE")
         return Date();
-    if (upper == "VARCHAR" || upper == "TEXT" || upper == "STRING")
+    if (upper == "VARCHAR" || upper == "TEXT" || upper == "STRING" || upper == "CHAR" ||
+        upper == "CHARACTER" || upper == "BPCHAR")
         return Varchar();
     return std::nullopt;
 }
