@@ -25,7 +25,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ done (exit criteria ve
 
 | # | Phase | Status | Est. |
 |---|---|---|---|
-| 0 | Foundation: build, CI, tests, docs | 🟨 | 1–2 d |
+| 0 | Foundation: build, CI, tests, docs | ✅ | 1–2 d |
 | 1 | Core data model: types, vectors, chunks | ⬜ | ~1 wk |
 | 2 | Columnar storage and catalog | ⬜ | ~1 wk |
 | 3 | SQL front end: lexer, parser, binder, logical plan | ⬜ | ~1 wk |

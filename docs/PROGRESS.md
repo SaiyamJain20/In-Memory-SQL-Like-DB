@@ -41,3 +41,10 @@ Reference machine for all numbers in this repo unless stated otherwise: AMD Ryze
 - TSan aborts on this kernel (high `vm.mmap_rnd_bits`) unless ASLR is disabled; the test binary
   is wrapped in `setarch -R` for TSan builds (see `tests/CMakeLists.txt`).
 - No engine code yet; `release` + benchmarks are wired in Phase 1 when there is something to measure.
+
+**CI (GitHub Actions, run 37373633236)** — all 7 jobs green: format, gcc-13 and clang-18 × debug
+and release, asan (ASan+UBSan), tsan. The first attempt left six jobs unscheduled ("job was not
+acquired by Runner of type hosted"): a GitHub runner-capacity failure, not a test failure; the
+one job that did get a runner passed, and `gh run rerun --failed` then passed the other six.
+
+**Phase 0 exit criteria met** → merged to `main`.
