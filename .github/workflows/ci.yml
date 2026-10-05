@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned clang-format
+        run: pip install "$(grep '^clang-format==' tools/requirements-dev.txt)"
+      - name: Check formatting
+        run: tools/check_format.sh
+
+  build-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-13, clang-18]
+        preset: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13 clang-18
+      - name: Select compiler
+        run: |
+          if [[ "${{ matrix.compiler }}" == gcc-13 ]]; then
+            echo "CXX=g++-13" >> "$GITHUB_ENV"
+          else
+            echo "CXX=clang++-18" >> "$GITHUB_ENV"
+            # Pin clang to the GCC 13 libstdc++ (newer GCC dirs on the runner lack the dev files).
+            echo "CXXFLAGS=--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13" >> "$GITHUB_ENV"
+          fi
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  sanitizers:
+    name: ${{ matrix.preset }} (gcc-13)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-13
+          echo "CXX=g++-13" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}

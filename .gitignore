@@ -1,0 +1,20 @@
+# Build outputs
+build/
+bin/
+obj/
+compile_commands.json
+.cache/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Local data (TPC-H dumps, scratch databases, benchmark output)
+data/
+*.cdb
+*.cdb.wal
+
+# Python tooling
+.venv/
+venv/
+__pycache__/
