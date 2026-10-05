@@ -1,155 +1,33 @@
-# In-Memory SQL-Like Database System
+# cdb — a columnar, vectorized SQL analytics engine in C++20
 
-## Overview
+A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Velox: columnar
+storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
+optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-A lightweight, multithreaded in-memory database system written in C++17, supporting a SQL-like syntax for basic operations such as `CREATE TABLE`, `INSERT INTO`, and `SELECT`. The system persists data through a simple log-based recovery mechanism, enabling it to reconstruct the in-memory state upon restart.
+> **Status: early development (Phase 0 of 9).** The foundation (build, CI, test infrastructure,
+> design docs) is in place; the engine itself is being built phase by phase. Nothing below is
+> claimed until it is implemented *and* measured — see the [roadmap](docs/ROADMAP.md) for what is
+> done and [`docs/PROGRESS.md`](docs/PROGRESS.md) for the dated log.
 
-This project was built to deepen understanding of database internals, concurrency management, and lightweight persistence mechanisms in C++.
+## Goals
+- **Correct** — differential-tested against DuckDB; all 22 TPC-H queries.
+- **Fast** — vectorized kernels, compressed columnar storage, parallel execution; honest
+  benchmark numbers with machine, compiler and command recorded.
+- **Understandable** — every major decision has an [ADR](docs/adr/); the
+  [architecture](docs/ARCHITECTURE.md) document tracks what is implemented vs. planned.
 
-## Features
-
-* In-memory data storage for fast, low-latency read/write operations
-* SQL-like syntax providing a familiar query interface
-* Operation logging with log-based recovery at startup
-* Thread-safe table operations using `std::mutex`
-* Basic support for `INT` and `STRING` data types
-
-## Technologies Used
-
-* C++17
-* Standard Template Library (STL)
-* File I/O for logging
-* `std::mutex` for concurrency control
-* Custom utility functions for string handling
-
-## Architecture
-
-| Component | Description                                                                   |
-| :-------- | :---------------------------------------------------------------------------- |
-| Parser    | Converts SQL-like query strings into structured `Query` objects               |
-| Executor  | Processes `Query` objects and performs table operations                       |
-| Database  | Manages in-memory storage of tables, rows, and schema                         |
-| Logger    | Appends all operations to a log file (`log.txt`)                              |
-| Utils     | Provides helper functions for string trimming, splitting, and case conversion |
-
-## Folder Structure
-
-```
-in_memory_database/
-├── src/
-│   ├── main.cpp
-│   ├── database.h/.cpp
-│   ├── parser.h/.cpp
-│   ├── executor.h/.cpp
-│   ├── logger.h/.cpp
-│   ├── utils.h/.cpp
-├── log.txt
-├── Makefile
-└── README.md
-```
-
-## Building and Running
-
-### Prerequisites
-
-* C++17 compatible compiler (`g++ 9+` or `clang++ 10+`)
-* `make`
-
-### Build the Project
+## Build
+Requires CMake ≥ 3.21, Ninja, and GCC 13+ or Clang 18+ (C++20).
 
 ```bash
-make
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
-### Clean the Project
+Other presets: `release`, `asan` (AddressSanitizer + UBSan), `tsan` (ThreadSanitizer).
+See [`CLAUDE.md`](CLAUDE.md) for the full developer workflow.
 
-```bash
-make clean
-```
-
-### Run the Database
-
-```bash
-make run
-```
-
-or directly:
-
-```bash
-./bin/in_memory_db
-```
-
-## Usage Examples
-
-### Creating a Table
-
-```
-> CREATE TABLE students (id INT, name STRING)
-Table 'students' created successfully.
-```
-
-### Inserting Data
-
-```
-> INSERT INTO students VALUES ('1', 'Saiyam')
-Row inserted into 'students' successfully.
-
-> INSERT INTO students VALUES ('2', 'Rohit')
-Row inserted into 'students' successfully.
-```
-
-### Querying Data
-
-```
-> SELECT * FROM students
-id | name | 
-1 | Saiyam | 
-2 | Rohit | 
-```
-
-### Using WHERE Clause
-
-```
-> SELECT * FROM students WHERE id = '1'
-id | name | 
-1 | Saiyam | 
-```
-
-## Persistence
-
-The database state is recorded in `log.txt` as plain-text SQL-like commands.
-On startup, the system replays these logs to reconstruct all tables and data as it existed before shutdown, providing a simple log-based persistence mechanism.
-
-## Limitations
-
-* Only supports `CREATE TABLE`, `INSERT`, and `SELECT` operations
-* Limited to `INT` and `STRING` data types
-* No support for complex queries such as `UPDATE`, `DELETE`, or multi-table `JOIN`s
-* No indexing (linear row scans only)
-* In-memory only, with size limited by available RAM
-* Simple log-based persistence without transactions or rollback
-
-## Future Enhancements
-
-* Support for `DELETE` and `UPDATE` operations
-* Additional data types such as `FLOAT`, `BOOL`, `DATE`
-* Implementation of index structures for faster lookups
-* Support for query optimization and multi-table `JOIN`s
-* Transaction management with ACID properties
-* Configurable disk-based storage backend
-
-## Educational Value
-
-This project was built to explore how databases internally handle:
-
-* Query parsing and execution
-* In-memory table management
-* Concurrent data access
-* Log-based recovery systems
-
-It serves as a foundation for understanding real-world relational database concepts and implementation techniques.
-
-## Acknowledgments
-
-* Inspired by relational database architectures such as PostgreSQL and SQLite
-* Developed as an educational project to study database systems and concurrency models in C++
+## Repository history
+This repository began as a ~600-line row-oriented prototype (`CREATE`/`INSERT`/`SELECT` with a
+text-log replay). It was retired in favour of the columnar rewrite; the original is preserved in
+git history at commit `a254830`. The reasoning is recorded in
+[ADR 0001](docs/adr/0001-columnar-vectorized-direction.md).
