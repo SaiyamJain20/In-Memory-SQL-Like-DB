@@ -1,0 +1,112 @@
+#pragma once
+
+// Helpers for storage tests: build random DataChunks while recording a plain row-model of what
+// was appended, and read a table back through TableScan into the same shape for comparison.
+
+#include "storage/table.h"
+#include "test_util.h"
+
+#include <gtest/gtest.h>
+
+#include <string>
+#include <vector>
+
+namespace cdb::test {
+
+// Column-major model of a table's contents.
+struct TableModel {
+    std::vector<std::vector<Value>> cols;
+    explicit TableModel(size_t ncols) : cols(ncols) {}
+    idx_t rows() const { return cols.empty() ? 0 : cols[0].size(); }
+};
+
+inline std::vector<ColumnDefinition> AllTypesSchema() {
+    return {{"b", LogicalType::Boolean()}, {"i", LogicalType::Integer()},
+            {"l", LogicalType::BigInt()},  {"d", LogicalType::Double()},
+            {"dt", LogicalType::Date()},   {"s", LogicalType::Varchar()}};
+}
+
+// Builds a chunk of `n` random rows (<= kVectorSize) and appends them to `model`.
+inline DataChunk RandomChunk(const std::vector<ColumnDefinition>& schema, Rng& rng, idx_t n,
+                             TableModel& model, double null_prob = 0.2) {
+    std::vector<LogicalType> types;
+    for (const auto& c : schema)
+        types.push_back(c.type);
+    DataChunk chunk;
+    chunk.Initialize(types);
+    for (idx_t c = 0; c < schema.size(); c++) {
+        for (idx_t r = 0; r < n; r++) {
+            Value v = RandomValue(rng, schema[c].type, null_prob);
+            chunk.SetValue(c, r, v);
+            model.cols[c].push_back(std::move(v));
+        }
+    }
+    chunk.SetCardinality(n);
+    return chunk;
+}
+
+// Reads the projected columns of every row a scan produces, in order.
+inline std::vector<std::vector<Value>> ScanAll(TableScan& scan) {
+    DataChunk chunk;
+    chunk.Initialize(scan.types());
+    std::vector<std::vector<Value>> out(scan.types().size());
+    while (scan.Next(chunk)) {
+        chunk.Verify();
+        for (idx_t c = 0; c < out.size(); c++) {
+            for (idx_t r = 0; r < chunk.size(); r++)
+                out[c].push_back(chunk.GetValue(c, r));
+        }
+    }
+    return out;
+}
+
+inline std::vector<idx_t> AllColumns(const TableSnapshot& snap) {
+    std::vector<idx_t> ids;
+    for (idx_t i = 0; i < snap.schema().size(); i++)
+        ids.push_back(i);
+    return ids;
+}
+
+inline void ExpectColumnsEqual(const std::vector<std::vector<Value>>& got,
+                               const std::vector<std::vector<Value>>& expect,
+                               const std::string& ctx = "") {
+    ASSERT_EQ(got.size(), expect.size()) << ctx;
+    for (size_t c = 0; c < got.size(); c++) {
+        ASSERT_EQ(got[c].size(), expect[c].size()) << ctx << " column " << c;
+        for (size_t r = 0; r < got[c].size(); r++) {
+            ASSERT_TRUE(BitIdentical(got[c][r], expect[c][r]))
+                << ctx << " column " << c << " row " << r << ": got " << got[c][r].ToString()
+                << " expected " << expect[c][r].ToString();
+        }
+    }
+}
+
+// Does `value <op> constant` hold under SQL semantics (NULL never satisfies)?
+inline bool Satisfies(const Value& value, CompareOp op, const Value& constant) {
+    if (value.IsNull() || constant.IsNull())
+        return false;
+    const int c = Value::Compare(value, constant);
+    switch (op) {
+    case CompareOp::Eq:
+        return c == 0;
+    case CompareOp::Ne:
+        return c != 0;
+    case CompareOp::Lt:
+        return c < 0;
+    case CompareOp::Le:
+        return c <= 0;
+    case CompareOp::Gt:
+        return c > 0;
+    case CompareOp::Ge:
+        return c >= 0;
+    }
+    return false;
+}
+
+inline const std::vector<CompareOp>& AllOps() {
+    static const std::vector<CompareOp> kOps = {CompareOp::Eq, CompareOp::Ne, CompareOp::Lt,
+                                                CompareOp::Le, CompareOp::Gt, CompareOp::Ge};
+    return kOps;
+}
+
+} // namespace cdb::test
