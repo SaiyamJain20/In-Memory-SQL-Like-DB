@@ -7,7 +7,29 @@
 
 namespace cdb {
 
+ValidityMask ValidityMask::FromBuffer(std::shared_ptr<Buffer> words, idx_t capacity) {
+    CDB_CHECK(words != nullptr && words->size() >= WordCount(capacity) * sizeof(uint64_t));
+    ValidityMask m(capacity);
+    m.buffer_ = std::move(words);
+    return m;
+}
+
+void ValidityMask::Resize(idx_t new_capacity) {
+    CDB_CHECK(new_capacity >= capacity_);
+    if (buffer_ != nullptr && WordCount(new_capacity) != WordCount(capacity_)) {
+        const idx_t old_words = WordCount(capacity_);
+        const idx_t new_words = WordCount(new_capacity);
+        auto grown = Buffer::Allocate(new_words * sizeof(uint64_t));
+        std::memcpy(grown->data(), buffer_->data(), old_words * sizeof(uint64_t));
+        std::memset(grown->data() + old_words * sizeof(uint64_t), 0xFF,
+                    (new_words - old_words) * sizeof(uint64_t));
+        buffer_ = std::move(grown);
+    }
+    capacity_ = new_capacity;
+}
+
 uint64_t* ValidityMask::MutableWords() {
+    CDB_ASSERT(buffer_ == nullptr || !buffer_->read_only());
     if (buffer_ == nullptr) {
         const idx_t words = WordCount(capacity_);
         buffer_ = Buffer::Allocate(words * sizeof(uint64_t));
@@ -26,6 +48,7 @@ void ValidityMask::SetValid(idx_t row) {
     if (buffer_ == nullptr) {
         return;
     }
+    CDB_ASSERT(!buffer_->read_only());
     buffer_->As<uint64_t>()[row >> 6] |= uint64_t{1} << (row & 63);
 }
 
@@ -34,6 +57,7 @@ void ValidityMask::SetRangeValid(idx_t start, idx_t count) {
     if (buffer_ == nullptr || count == 0) {
         return;
     }
+    CDB_ASSERT(!buffer_->read_only());
     uint64_t* words = buffer_->As<uint64_t>();
     const idx_t end = start + count; // exclusive
     const idx_t first_word = start >> 6;

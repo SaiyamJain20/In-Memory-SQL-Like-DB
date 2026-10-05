@@ -15,6 +15,9 @@ using sel_t = uint32_t;
 // Maximum number of rows in a Vector / DataChunk. See docs/ARCHITECTURE.md for the rationale.
 inline constexpr idx_t kVectorSize = 2048;
 
+// Rows per row group (a table's unit of storage, pruning and parallel scanning): 60 vectors.
+inline constexpr idx_t kRowGroupSize = 60 * kVectorSize;
+
 inline constexpr idx_t kInvalidIndex = ~idx_t{0};
 
 constexpr size_t AlignUp(size_t value, size_t alignment) noexcept {

@@ -63,11 +63,22 @@ class Vector {
     // Raw element array. Requires format() == Flat and sizeof(T)/physical type to match.
     template <class T> T* FlatData() {
         CDB_ASSERT(format_ == VectorFormat::Flat && PhysicalTypeOf<T>::value == type_.physical());
+        CDB_ASSERT(!data_->read_only());
         return data_->As<T>();
     }
     template <class T> const T* FlatData() const {
         CDB_ASSERT(format_ == VectorFormat::Flat && PhysicalTypeOf<T>::value == type_.physical());
         return data_->As<T>();
+    }
+
+    // The Flat vector's storage as raw bytes (capacity() * type().width() of them).
+    uint8_t* FlatBytes() {
+        CDB_ASSERT(format_ == VectorFormat::Flat && !data_->read_only());
+        return data_->data();
+    }
+    const uint8_t* FlatBytes() const {
+        CDB_ASSERT(format_ == VectorFormat::Flat);
+        return data_->data();
     }
 
     // Validity of the Flat vector (per row) or Constant vector (bit 0).
@@ -107,6 +118,13 @@ class Vector {
     // Makes this vector share all of `other`'s buffers (shallow, O(1)).
     void Reference(const Vector& other);
 
+    // Becomes a Flat vector over externally owned buffers, typically read-only Views into a
+    // storage segment: O(1), zero-copy. `data` must hold at least capacity() elements. The vector
+    // keeps the buffers alive; writing through it is a bug (asserts), and Reset() safely detaches
+    // from them instead of reusing them.
+    void ReferenceFlat(std::shared_ptr<Buffer> data, ValidityMask validity,
+                       std::shared_ptr<StringHeap> heap);
+
     // Becomes a Constant vector holding `value`.
     void SetConstant(const Value& value);
 
@@ -141,6 +159,15 @@ class Vector {
 };
 
 namespace VectorOps {
+
+// Lower-level form of Copy for destinations that are not Vectors (e.g. storage column builders):
+// writes `count` rows of src's type into the contiguous element array `dst_data`, starting at
+// element `dst_offset`, maintaining `dst_validity`. `dst_heap` receives out-of-line string bytes
+// and may be null only for non-VARCHAR types. Source row i (0 <= i < count) is logical row
+// `sel ? sel[src_offset + i] : src_offset + i` of `src`.
+void CopyRows(const Vector& src, const SelectionVector* sel, idx_t src_offset, idx_t count,
+              uint8_t* dst_data, ValidityMask& dst_validity, StringHeap* dst_heap,
+              idx_t dst_offset);
 
 // Copies rows into the Flat vector `dst`:  dst[dst_offset + i] = src[sel ? sel[i] : i]
 // for i in [0, count). `src` may be in any format; `sel` (if non-null) indexes src's logical rows.
