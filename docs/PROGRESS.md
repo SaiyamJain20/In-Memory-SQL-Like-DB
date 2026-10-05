@@ -242,3 +242,38 @@ cases and a 30k-row randomized round trip; `Table::Merge` visibility under a con
 
 **Phase 3 exit criteria met** (parser round-trip tests, positioned error tests, parser fuzzing
 clean for a fixed budget, binder + plan tests).
+
+## 2026-10-06 — Phase 4 (in progress): vectorized expression executor
+
+**Done so far**
+- `execution/expression_executor`: evaluates a `BoundExpr` a vector at a time. Typed kernels for
+  comparison, arithmetic (checked overflow), date arithmetic, `||`, `CAST`, `CASE`, `COALESCE`,
+  `NULLIF`, `IN`, `IS NULL`, `LIKE` (constant patterns compile to prefix/suffix/contains/exact
+  matchers), `SUBSTRING`, date parts and the other scalar functions. Kernels read through
+  `UnifiedFormat`, so flat, constant and dictionary (filtered) inputs all work without flattening.
+  `AND`/`OR`/`CASE`/`COALESCE` are lazy per row. `Select()` evaluates a predicate straight into a
+  selection vector and narrows between conjuncts.
+- Shared UTF-8/`LIKE`/`SUBSTRING` helpers in `common/string_ops`.
+
+**Verified**
+| Check | Result |
+|---|---|
+| `tools/verify.sh`: debug / asan / tsan / release / clang-18 | 450 / 450 / 450 / 448 / 450 passing |
+| `ExecutorDifferential` (8 seeds × 1,200 random typed SQL expressions × 3 random chunks: flat / constant / dictionary columns, 0–2048 rows, NULLs, benign and full-range data) vs `EvaluateScalar` | identical values (bitwise for doubles), identical error/no-error, `Select` = the TRUE rows |
+| `ExecutorDirected` (14) | laziness of AND/OR/CASE/COALESCE, 3VL, empty chunk, zero-copy column refs, dictionary/constant `Select`, executor reuse |
+
+**Found by the process**
+1. `LIKE '%a'` disagreed between the byte-wise fast path and the general matcher on invalid UTF-8
+   (`"\xFFaa"`): the lead byte `0xFF` was treated as a 3-byte character. UTF-8 segmentation is now
+   defined for every byte string (a lead byte counts only with its continuation bytes) and the fast
+   paths are limited to ASCII-led literals, where byte search is provably equivalent.
+2. The interpreter's `NULLIF(a, b)` skipped `b` when `a` was NULL; both operands are now always
+   evaluated (Postgres/DuckDB semantics).
+3. Documented, deliberate difference: when a predicate is evaluated in *selection position* (the top
+   of `Select`, a `CASE` condition), `a AND b` never evaluates `b` for rows where `a` is NULL or
+   FALSE, because such rows cannot be TRUE (DuckDB does the same). The interpreter does evaluate
+   `b` for NULL `a`, so a run-time error in `b` on such a row is raised by one and not the other.
+   The differential test tolerates exactly that case (`MayNarrow`) and nothing else.
+
+**Next**: physical plan and push-based pipelines, hash aggregate / join, sort, top-N, optimizer
+(filter pushdown, join extraction/ordering, column pruning), TPC-H differential tests.
