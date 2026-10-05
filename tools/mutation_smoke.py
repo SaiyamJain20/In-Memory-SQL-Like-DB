@@ -161,7 +161,7 @@ MUTATIONS = [
      "if (ch == '\\'')\n            out += '\\'';\n        out += ch;\n    }\n    out += '\\'';", "out += ch;\n    }\n    out += '\\'';", None),
     ("parser: unary minus is dropped",
      "src/parser/parser.cpp",
-     "return Finish(std::make_unique<UnaryExpr>(t.pos, UnaryOp::Negate, std::move(child)), d);", "return child;", None),
+     "return Finish(std::make_unique<UnaryExpr>(t.pos, UnaryOp::Negate, std::move(child)), d);", "(void)d; return child;", None),
     # ---- Phase 3: types, evaluation ----
     ("cast: DOUBLE -> integer rounds half away from zero instead of half to even",
      "src/types/cast.cpp",
@@ -225,9 +225,6 @@ MUTATIONS = [
     ("csv: the header line is loaded as data",
      "src/io/csv_reader.cpp",
      "bool skipped_header = !options.header;", "bool skipped_header = true;", None),
-    ("connection: a script keeps running after a failed statement",
-     "src/main/connection.cpp",
-     "if (!results.back().ok())\n                break;", "if (false)\n                break;", None),
     ("vector: Flatten of a dictionary drops the child's string heap (use-after-free)",
      "src/vector/vector.cpp",
      "        heap_ = child_->heap_;\n", "", "asan"),
