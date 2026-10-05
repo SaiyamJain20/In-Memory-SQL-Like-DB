@@ -10,7 +10,7 @@ compile_commands.json
 .idea/
 
 # Local data (TPC-H dumps, scratch databases, benchmark output)
-data/
+/data/
 *.cdb
 *.cdb.wal
 
