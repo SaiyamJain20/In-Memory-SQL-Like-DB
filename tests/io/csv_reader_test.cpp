@@ -62,6 +62,18 @@ TEST(Csv, NoTrailingNewlineCrlfAndBlankLines) {
     EXPECT_EQ(Rows(t)[1][2].GetVarchar(), "c");
 }
 
+TEST(Csv, CrlfLineEndingsNeverLeakIntoTextFields) {
+    // The last column is VARCHAR: a stray '\r' would be stored verbatim (numeric columns would
+    // hide it, because their parsers trim whitespace).
+    Table t("t", {{"id", LogicalType::Integer()}, {"word", LogicalType::Varchar()}});
+    EXPECT_EQ(Load(t, "1,alpha\r\n2,beta\r\n3,\"quoted\"\r\n4,gamma"), 4u);
+    auto rows = Rows(t);
+    EXPECT_EQ(rows[1][0].GetVarchar(), "alpha");
+    EXPECT_EQ(rows[1][1].GetVarchar(), "beta");
+    EXPECT_EQ(rows[1][2].GetVarchar(), "quoted");
+    EXPECT_EQ(rows[1][3].GetVarchar(), "gamma");
+}
+
 TEST(Csv, HeaderIsSkippedOnlyWhenRequested) {
     Table with("t", Schema());
     EXPECT_EQ(Load(with, "id,name,score\n1,a,1\n", {',', true}), 1u);

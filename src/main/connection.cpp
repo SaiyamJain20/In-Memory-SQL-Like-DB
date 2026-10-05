@@ -42,9 +42,7 @@ std::vector<QueryResult> Connection::QueryAll(std::string_view sql) {
             // Each statement is bound just before it runs, so it sees the effects of earlier ones.
             Binder binder(db_.catalog());
             LogicalPtr plan = binder.Bind(*stmt);
-            results.push_back(Execute(*plan));
-            if (!results.back().ok())
-                break;
+            results.push_back(Execute(*plan)); // failures throw: the catch below ends the script
         }
     } catch (const Error& e) {
         results.push_back(QueryResult::Failure(e.code(), FormatErrorWithContext(sql, e)));
