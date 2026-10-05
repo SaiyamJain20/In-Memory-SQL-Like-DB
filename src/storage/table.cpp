@@ -155,6 +155,26 @@ void Table::Append(const DataChunk& chunk) {
     tail_cache_.reset(); // safe: we hold the exclusive lock, so no Snapshot() is running
 }
 
+void Table::Merge(std::unique_ptr<Table> staging) {
+    CDB_CHECK(staging != nullptr && staging.get() != this);
+    CDB_CHECK(staging->row_group_size_ == row_group_size_ &&
+              staging->schema_.size() == schema_.size());
+    for (idx_t c = 0; c < schema_.size(); c++) {
+        CDB_CHECK(staging->schema_[c].type == schema_[c].type);
+    }
+    std::unique_lock lock(mutex_);
+    // Seal our partial tail as a (short) row group so the new rows follow it in order.
+    if (open_ && open_->count() > 0) {
+        sealed_.push_back(open_->Seal());
+    }
+    open_.reset();
+    for (auto& group : staging->sealed_) {
+        sealed_.push_back(std::move(group));
+    }
+    open_ = std::move(staging->open_);
+    tail_cache_.reset();
+}
+
 idx_t Table::RowCount() const {
     std::shared_lock lock(mutex_);
     idx_t rows = open_ ? open_->count() : 0;
