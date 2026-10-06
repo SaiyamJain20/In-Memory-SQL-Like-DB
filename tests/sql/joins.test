@@ -1,0 +1,375 @@
+# Joins of every kind, residual predicates, multi-way joins, derived tables, self joins.
+
+statement ok
+CREATE TABLE emp (id INTEGER NOT NULL, name VARCHAR, dept INTEGER, salary DOUBLE, hired DATE, boss INTEGER);
+
+statement ok
+INSERT INTO emp VALUES
+ (1, 'alice', 10, 5000.5, DATE '2015-03-01', NULL),
+ (2, 'bob', 10, 4200.0, DATE '2016-07-15', 1),
+ (3, 'carol', 20, 6100.25, DATE '2014-01-20', 1),
+ (4, 'dave', 20, 3900.0, DATE '2018-11-30', 3),
+ (5, 'erin', 30, 4800.75, DATE '2017-05-05', 3),
+ (6, 'frank', NULL, 3500.0, DATE '2019-02-14', 2),
+ (7, 'grace', 10, 5000.5, DATE '2020-09-09', 1),
+ (8, 'heidi', 40, NULL, DATE '2021-12-31', NULL),
+ (9, 'ivan', 20, 4200.0, DATE '2016-07-15', 3),
+ (10, 'judy', 30, NULL, DATE '2022-01-01', 5),
+ (11, 'Mallory', 50, 7000.0, DATE '2013-06-06', NULL);
+
+statement ok
+CREATE TABLE dept (id INTEGER, dname VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES (10, 'eng', 'berlin'), (20, 'ops', 'paris'), (30, 'sales', 'berlin'), (40, 'hr', NULL), (60, 'legal', 'rome');
+
+
+statement ok
+CREATE TABLE proj (pid INTEGER, owner INTEGER, title VARCHAR, budget DOUBLE);
+
+statement ok
+INSERT INTO proj VALUES (1, 1, 'alpha', 100.5), (2, 1, 'beta', 50.25), (3, 3, 'gamma', 75.0), (4, 99, 'delta', 10.0), (5, NULL, 'eps', 5.5), (6, 7, 'zeta', 200.0);
+
+query TT
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id ORDER BY e.id;
+----
+alice	eng
+bob	eng
+carol	ops
+dave	ops
+erin	sales
+grace	eng
+heidi	hr
+ivan	ops
+judy	sales
+
+query TT
+SELECT e.name, d.dname FROM emp e, dept d WHERE e.dept = d.id ORDER BY e.id;
+----
+alice	eng
+bob	eng
+carol	ops
+dave	ops
+erin	sales
+grace	eng
+heidi	hr
+ivan	ops
+judy	sales
+
+query TT
+SELECT e.name, d.dname FROM emp e INNER JOIN dept d ON d.id = e.dept AND d.city = 'berlin' ORDER BY e.id;
+----
+alice	eng
+bob	eng
+erin	sales
+grace	eng
+judy	sales
+
+query TT
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id AND d.city = 'berlin' ORDER BY e.id;
+----
+alice	eng
+bob	eng
+carol	NULL
+dave	NULL
+erin	sales
+frank	NULL
+grace	eng
+heidi	NULL
+ivan	NULL
+judy	sales
+Mallory	NULL
+
+query TT
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE d.city = 'berlin' ORDER BY e.id;
+----
+alice	eng
+bob	eng
+erin	sales
+grace	eng
+judy	sales
+
+query TT
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE d.id IS NULL ORDER BY e.id;
+----
+frank	NULL
+Mallory	NULL
+
+query TT
+SELECT e.name, d.dname FROM dept d LEFT JOIN emp e ON e.dept = d.id WHERE e.id IS NULL ORDER BY d.id;
+----
+NULL	legal
+
+query TT
+SELECT d.dname, e.name FROM dept d RIGHT JOIN emp e ON e.dept = d.id ORDER BY e.id;
+----
+eng	alice
+eng	bob
+ops	carol
+ops	dave
+sales	erin
+NULL	frank
+eng	grace
+hr	heidi
+ops	ivan
+sales	judy
+NULL	Mallory
+
+query TT
+SELECT e.name, p.title FROM emp e JOIN proj p ON p.owner = e.id ORDER BY p.pid;
+----
+alice	alpha
+alice	beta
+carol	gamma
+grace	zeta
+
+query TT
+SELECT e.name, p.title FROM emp e LEFT JOIN proj p ON p.owner = e.id ORDER BY e.id, p.pid;
+----
+alice	alpha
+alice	beta
+bob	NULL
+carol	gamma
+dave	NULL
+erin	NULL
+frank	NULL
+grace	zeta
+heidi	NULL
+ivan	NULL
+judy	NULL
+Mallory	NULL
+
+query TT
+SELECT e.name, p.title FROM proj p LEFT JOIN emp e ON p.owner = e.id ORDER BY p.pid;
+----
+alice	alpha
+alice	beta
+carol	gamma
+NULL	delta
+NULL	eps
+grace	zeta
+
+query TTT
+SELECT e.name, d.dname, p.title FROM emp e JOIN dept d ON e.dept = d.id JOIN proj p ON p.owner = e.id ORDER BY p.pid;
+----
+alice	eng	alpha
+alice	eng	beta
+carol	ops	gamma
+grace	eng	zeta
+
+query TTT
+SELECT e.name, d.dname, p.title FROM emp e, dept d, proj p WHERE e.dept = d.id AND p.owner = e.id ORDER BY p.pid;
+----
+alice	eng	alpha
+alice	eng	beta
+carol	ops	gamma
+grace	eng	zeta
+
+query TTT
+SELECT p.title, e.name, d.dname FROM proj p, dept d, emp e WHERE p.owner = e.id AND e.dept = d.id AND d.city = 'berlin' ORDER BY p.pid;
+----
+alpha	alice	eng
+beta	alice	eng
+zeta	grace	eng
+
+query TTT
+SELECT e.name, d.dname, p.title FROM emp e LEFT JOIN dept d ON e.dept = d.id LEFT JOIN proj p ON p.owner = e.id ORDER BY e.id, p.pid;
+----
+alice	eng	alpha
+alice	eng	beta
+bob	eng	NULL
+carol	ops	gamma
+dave	ops	NULL
+erin	sales	NULL
+frank	NULL	NULL
+grace	eng	zeta
+heidi	hr	NULL
+ivan	ops	NULL
+judy	sales	NULL
+Mallory	NULL	NULL
+
+query TTR
+SELECT e.name, p.title, p.budget FROM emp e JOIN proj p ON p.owner = e.id AND p.budget > 60 ORDER BY p.pid;
+----
+alice	alpha	100.5
+carol	gamma	75.0
+grace	zeta	200.0
+
+query TT
+SELECT e.name, p.title FROM emp e JOIN proj p ON p.owner = e.id WHERE p.budget > e.salary / 100 ORDER BY p.pid;
+----
+alice	alpha
+alice	beta
+carol	gamma
+grace	zeta
+
+query TT
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.boss = b.id ORDER BY a.id;
+----
+bob	alice
+carol	alice
+dave	carol
+erin	carol
+frank	bob
+grace	alice
+ivan	carol
+judy	erin
+
+query TT
+SELECT a.name, b.name FROM emp a LEFT JOIN emp b ON a.boss = b.id ORDER BY a.id;
+----
+alice	NULL
+bob	alice
+carol	alice
+dave	carol
+erin	carol
+frank	bob
+grace	alice
+heidi	NULL
+ivan	carol
+judy	erin
+Mallory	NULL
+
+query TT
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.dept = b.dept AND a.id < b.id ORDER BY a.id, b.id;
+----
+alice	bob
+alice	grace
+bob	grace
+carol	dave
+carol	ivan
+dave	ivan
+erin	judy
+
+query TT
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.salary = b.salary AND a.id <> b.id ORDER BY a.id, b.id;
+----
+alice	grace
+bob	ivan
+grace	alice
+ivan	bob
+
+query II
+SELECT count(*), count(DISTINCT e.id) FROM emp e, dept d;
+----
+55	11
+
+query IT
+SELECT count(*), max(d.city) FROM emp e CROSS JOIN dept d WHERE e.id <= 2;
+----
+10	rome
+
+query TT
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept < d.id AND d.id <= 30 AND e.id <= 3 ORDER BY e.id, d.id;
+----
+alice	ops
+alice	sales
+bob	ops
+bob	sales
+carol	sales
+
+query TT
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id OR e.boss = d.id WHERE e.id <= 6 ORDER BY e.id, d.id;
+----
+alice	eng
+bob	eng
+carol	ops
+dave	ops
+erin	sales
+
+query TT
+SELECT d.dname, t.c FROM dept d JOIN (SELECT dept, count(*) AS c FROM emp GROUP BY dept) t ON t.dept = d.id ORDER BY d.id;
+----
+eng	3
+ops	3
+sales	2
+hr	1
+
+query TI
+SELECT d.dname, coalesce(t.c, 0) FROM dept d LEFT JOIN (SELECT dept, count(*) AS c FROM emp GROUP BY dept) t ON t.dept = d.id ORDER BY d.id;
+----
+eng	3
+ops	3
+sales	2
+hr	1
+legal	0
+
+query TIR
+SELECT d.dname, count(e.id), sum(e.salary) FROM dept d LEFT JOIN emp e ON e.dept = d.id GROUP BY d.dname ORDER BY d.dname;
+----
+eng	3	14201.0
+hr	1	NULL
+legal	0	NULL
+ops	3	14200.25
+sales	2	4800.75
+
+query TIR
+SELECT d.city, count(*), avg(e.salary) FROM emp e JOIN dept d ON e.dept = d.id GROUP BY d.city ORDER BY d.city NULLS LAST;
+----
+berlin	5	4750.4375
+paris	3	4733.416666666667
+NULL	1	NULL
+
+query TI
+SELECT d.dname, count(*) FROM emp e JOIN dept d ON e.dept = d.id GROUP BY d.dname HAVING count(*) > 1 ORDER BY d.dname;
+----
+eng	3
+ops	3
+sales	2
+
+query T
+SELECT e.name FROM emp e JOIN dept d ON e.dept = d.id WHERE d.dname = 'eng' AND e.salary > 4500 ORDER BY e.id;
+----
+alice
+grace
+
+query TT
+SELECT x.name, y.title FROM (SELECT name, id FROM emp WHERE salary > 4000) x JOIN (SELECT title, owner FROM proj WHERE budget < 100) y ON y.owner = x.id ORDER BY x.name, y.title;
+----
+alice	beta
+carol	gamma
+
+query II
+SELECT count(*), count(p.pid) FROM emp e LEFT JOIN proj p ON p.owner = e.id;
+----
+12	4
+
+query I
+SELECT count(*) FROM emp e JOIN dept d ON e.dept = d.id JOIN emp b ON e.boss = b.id;
+----
+7
+
+query TT
+SELECT e.name, p.title FROM emp e JOIN proj p ON e.id = p.owner AND e.dept = 10 ORDER BY p.pid;
+----
+alice	alpha
+alice	beta
+grace	zeta
+
+query I
+SELECT count(*) FROM emp e JOIN proj p ON e.id = p.owner WHERE p.owner IS NULL;
+----
+0
+
+statement ok
+CREATE TABLE nothing (id INTEGER, x VARCHAR);
+
+query T
+SELECT e.name FROM emp e JOIN nothing n ON e.id = n.id ORDER BY e.id;
+----
+
+query TT
+SELECT e.name, n.x FROM emp e LEFT JOIN nothing n ON e.id = n.id ORDER BY e.id LIMIT 3;
+----
+alice	NULL
+bob	NULL
+carol	NULL
+
+query TT
+SELECT n.x, e.name FROM nothing n LEFT JOIN emp e ON e.id = n.id;
+----
+
+query I
+SELECT count(*) FROM emp e, nothing n;
+----
+0
