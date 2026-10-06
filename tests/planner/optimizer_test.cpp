@@ -310,14 +310,16 @@ TEST(OptimizerShapes, SemiAndAntiJoinsSinkToTheSideOfTheJoinThatTheyMention) {
               "        SCAN big [k, v]\n"
               "        SCAN small [k]\n");
     EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE big.v NOT IN "
-                          "(SELECT k FROM small)"),
+                          "(SELECT w FROM mid WHERE w < 100)"),
               "PROJECT [v]\n"
-              "  JOIN INNER ON (big.k = mid.k)\n"
-              "    JOIN ANTI (NULL-AWARE) ON (v = k)\n"
-              "      SCAN big [k, v]\n"
-              "      PROJECT [k]\n"
-              "        SCAN small [k]\n"
-              "    SCAN mid [k]\n");
+              "  PROJECT [v]\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN mid [k]\n"
+              "      JOIN ANTI (NULL-AWARE) ON (v = w)\n"
+              "        SCAN big [k, v]\n"
+              "        PROJECT [w]\n"
+              "          FILTER (w < 100)\n"
+              "            SCAN mid [w] prune(w < 100)\n");
     // only mid is mentioned: it sinks into the other input
     EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE EXISTS "
                           "(SELECT 1 FROM small WHERE small.k = mid.w)"),
@@ -380,26 +382,68 @@ TEST(OptimizerShapes, SemiAndAntiJoinsReachTheRelationTheyFilterThroughTheWhereC
         "        PROJECT [k]\n"
         "          SCAN small [k]\n");
     EXPECT_EQ(env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND NOT EXISTS "
-                          "(SELECT 1 FROM small WHERE small.k = mid.w)"),
+                          "(SELECT 1 FROM big AS b2 WHERE b2.k = mid.k AND b2.v < 40)"),
               "PROJECT [v]\n"
               "  JOIN INNER ON (big.k = mid.k)\n"
               "    SCAN big [k, v]\n"
-              "    JOIN ANTI ON (w = k)\n"
-              "      SCAN mid [k, w]\n"
-              "      SCAN small [k]\n");
+              "    JOIN ANTI ON (mid.k = k)\n"
+              "      SCAN mid [k]\n"
+              "      FILTER (v < 40)\n"
+              "        SCAN big [k, v] prune(v < 40)\n");
     EXPECT_EQ(
         env.Explain("SELECT big.v FROM big, mid, small WHERE big.k = mid.k AND mid.k = small.k "
-                    "AND big.s = 'x' AND big.v NOT IN (SELECT k FROM small)"),
+                    "AND big.s = 'x' AND big.v NOT IN (SELECT w FROM mid WHERE w < 100)"),
         "PROJECT [v]\n"
-        "  JOIN INNER ON (mid.k = small.k)\n"
-        "    JOIN INNER ON (big.k = mid.k)\n"
-        "      JOIN ANTI (NULL-AWARE) ON (v = k)\n"
-        "        FILTER (s = 'x')\n"
-        "          SCAN big [k, v, s] prune(s = x)\n"
-        "        PROJECT [k]\n"
-        "          SCAN small [k]\n"
-        "      SCAN mid [k]\n"
-        "    SCAN small [k]\n");
+        "  PROJECT [v]\n"
+        "    JOIN INNER ON (mid.k = small.k)\n"
+        "      SCAN small [k]\n"
+        "      PROJECT [v, k]\n"
+        "        JOIN INNER ON (big.k = mid.k)\n"
+        "          SCAN mid [k]\n"
+        "          JOIN ANTI (NULL-AWARE) ON (v = w)\n"
+        "            FILTER (s = 'x')\n"
+        "              SCAN big [k, v, s] prune(s = x)\n"
+        "            PROJECT [w]\n"
+        "              FILTER (w < 100)\n"
+        "                SCAN mid [w] prune(w < 100)\n");
+}
+
+TEST(OptimizerShapes, ASemiOrAntiJoinThatRemovesAlmostNothingStaysAboveTheJoins) {
+    // A join that keeps 90% or more of its left rows is cheaper after the relation's other joins
+    // and filters (TPC-H Q21: an EXISTS that 96% of the rows satisfy, probed with 380,000 lineitem
+    // rows instead of the 8,000 left after the join with one nation's suppliers). Here small.k
+    // matches 5 of big.v's 50 distinct values: the semi join keeps 10% and sinks, the anti join
+    // keeps 90% and stays on top, and an IN over every key of big keeps everything and stays.
+    Env env;
+    env.SizedTables();
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND big.v IN "
+                          "(SELECT k FROM small)"),
+              "PROJECT [v]\n"
+              "  PROJECT [v]\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN mid [k]\n"
+              "      JOIN SEMI ON (v = k)\n"
+              "        SCAN big [k, v]\n"
+              "        PROJECT [k]\n"
+              "          SCAN small [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND big.v NOT IN "
+                          "(SELECT k FROM small)"),
+              "PROJECT [v]\n"
+              "  JOIN ANTI (NULL-AWARE) ON (v = k)\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN mid [k]\n"
+              "    PROJECT [k]\n"
+              "      SCAN small [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND big.k IN "
+                          "(SELECT k FROM big)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON (big.k = k)\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN mid [k]\n"
+              "    PROJECT [k]\n"
+              "      SCAN big [k]\n");
 }
 
 TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {

@@ -409,6 +409,22 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
     return proj;
 }
 
+// Does a semi / anti join keep clearly fewer than all of its left rows (by estimate: the share of
+// the left keys that find a partner, or lose it)? One that removes almost nothing is cheaper above
+// the joins and filters of the relation it mentions, where it sees far fewer rows than at the leaf
+// (TPC-H Q21: an EXISTS that 96% of the lineitem rows satisfy, applied to all of them before the
+// join with the one nation's suppliers, instead of to the few that are left after it).
+bool ShrinksItsInput(const LogicalJoin& join) {
+    CardinalityEstimator estimator;
+    const Estimate& left = estimator.Of(*join.children[0]);
+    if (left.rows <= 0) {
+        return true;
+    }
+    const Estimate out =
+        EstimateJoin(join.join_type, left, estimator.Of(*join.children[1]), join.condition.get());
+    return out.rows <= 0.9 * left.rows;
+}
+
 // Semi / anti joins (unnested subqueries). Their output is the left side, so a predicate above them
 // refers to left columns only and moves to the left child; a condition part that only mentions the
 // right side filters the subquery's rows before the join. And the join itself moves down: if its
@@ -445,7 +461,7 @@ LogicalPtr PushFilterJoin(LogicalPtr op, Conjuncts conjuncts) {
             }
             const bool in_a = !left_refs.empty() && *left_refs.rbegin() < a_width;
             const bool in_b = !left_refs.empty() && *left_refs.begin() >= a_width;
-            if (in_a || in_b) {
+            if ((in_a || in_b) && ShrinksItsInput(join)) {
                 // Semi(A x B, S) -> Semi(A, S) x B  or  A x Semi(B, S); the inner join's own
                 // condition and everything above keep their meaning (the output columns are
                 // unchanged).
