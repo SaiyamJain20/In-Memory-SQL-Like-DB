@@ -332,3 +332,7 @@ SF0.1 and **3.1x** at SF1. Scan/aggregate queries are within 1.2-1.9x; the multi
 
 **Phase 4 exit criteria met** (Q1/Q6 and the join-heavy queries match DuckDB at SF0.1 and SF1; first
 honest numbers recorded in `BENCHMARKS.md`).
+
+**CI (GitHub Actions, run 37407175257, the last commit that changed code)** - all 8 jobs green: format,
+gcc-13 and clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job; every test
+job generated the TPC-H data and required the 12 differential tests (CDB_REQUIRE_TPCH=1).
