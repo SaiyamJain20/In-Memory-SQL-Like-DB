@@ -393,8 +393,10 @@ TEST(CsvParallel, TheParallelPathIsOnlyTakenForABigEnoughFileAndSeveralThreads) 
     }
     const TempFile file(Join(records, st, rng));
     TaskScheduler many(4), one(1);
-    CsvOptions defaults; // parallel_min_bytes = 8 MiB: this small file is loaded serially
+    CsvOptions
+        defaults; // 8 MiB (whatever the environment says): this small file is loaded serially
     defaults.delimiter = ',';
+    defaults.parallel_min_bytes = size_t{8} << 20;
     Table a("t", Schema(), kGroupRows);
     uint64_t before = CsvParallelLoadCount();
     LoadCsvFile(a, file.path(), defaults, &many);

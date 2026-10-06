@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <optional>
@@ -573,6 +574,15 @@ std::optional<idx_t> LoadCsvParallel(Table& target, const std::string& path,
 
 } // namespace
 #endif // CDB_CSV_HAS_MMAP
+
+size_t DefaultCsvParallelMinBytes() noexcept {
+    static const size_t bytes = [] {
+        const char* env = std::getenv("CDB_CSV_PARALLEL_MIN_BYTES");
+        return env != nullptr ? static_cast<size_t>(std::strtoull(env, nullptr, 10))
+                              : size_t{8} << 20;
+    }();
+    return bytes;
+}
 
 uint64_t CsvParallelLoadCount() noexcept {
 #ifdef CDB_CSV_HAS_MMAP

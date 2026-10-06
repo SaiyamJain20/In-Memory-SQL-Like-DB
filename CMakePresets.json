@@ -83,6 +83,58 @@
       "name": "tsan",
       "configurePreset": "tsan",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "debug-parallel",
+      "inherits": "debug",
+      "description": "The whole suite with 4 threads, one-vector morsels and every parallel threshold at 1",
+      "environment": {
+        "CDB_THREADS": "4",
+        "CDB_MORSEL_ROWS": "2048",
+        "CDB_PARTITION_MIN_GROUPS": "1",
+        "CDB_JOIN_PARALLEL_MIN_ROWS": "1",
+        "CDB_SORT_PARALLEL_MIN_ROWS": "1",
+        "CDB_CSV_PARALLEL_MIN_BYTES": "1"
+      }
+    },
+    {
+      "name": "release-parallel",
+      "inherits": "release",
+      "description": "As debug-parallel",
+      "environment": {
+        "CDB_THREADS": "4",
+        "CDB_MORSEL_ROWS": "2048",
+        "CDB_PARTITION_MIN_GROUPS": "1",
+        "CDB_JOIN_PARALLEL_MIN_ROWS": "1",
+        "CDB_SORT_PARALLEL_MIN_ROWS": "1",
+        "CDB_CSV_PARALLEL_MIN_BYTES": "1"
+      }
+    },
+    {
+      "name": "asan-parallel",
+      "inherits": "asan",
+      "description": "As debug-parallel (keeps the UBSan options of asan)",
+      "environment": {
+        "CDB_THREADS": "4",
+        "CDB_MORSEL_ROWS": "2048",
+        "CDB_PARTITION_MIN_GROUPS": "1",
+        "CDB_JOIN_PARALLEL_MIN_ROWS": "1",
+        "CDB_SORT_PARALLEL_MIN_ROWS": "1",
+        "CDB_CSV_PARALLEL_MIN_BYTES": "1"
+      }
+    },
+    {
+      "name": "tsan-parallel",
+      "inherits": "tsan",
+      "description": "As debug-parallel",
+      "environment": {
+        "CDB_THREADS": "4",
+        "CDB_MORSEL_ROWS": "2048",
+        "CDB_PARTITION_MIN_GROUPS": "1",
+        "CDB_JOIN_PARALLEL_MIN_ROWS": "1",
+        "CDB_SORT_PARALLEL_MIN_ROWS": "1",
+        "CDB_CSV_PARALLEL_MIN_BYTES": "1"
+      }
     }
   ]
 }

@@ -8,12 +8,16 @@
 
 namespace cdb {
 
+// 8 MiB, or CDB_CSV_PARALLEL_MIN_BYTES from the environment (the parallel test presets lower it so
+// that every COPY in the suite takes the parallel path).
+size_t DefaultCsvParallelMinBytes() noexcept;
+
 struct CsvOptions {
     char delimiter = ',';
     bool header = false; // skip the first record
     // LoadCsvFile() with a scheduler loads files of at least this many bytes in parallel (smaller
     // ones are not worth the setup).
-    size_t parallel_min_bytes = size_t{8} << 20;
+    size_t parallel_min_bytes = DefaultCsvParallelMinBytes();
     // Parallel loading finds record boundaries in byte chunks of this size (0 = chosen from the
     // file size and the thread count). Tests use tiny chunks to put boundaries everywhere.
     size_t parallel_chunk_bytes = 0;
