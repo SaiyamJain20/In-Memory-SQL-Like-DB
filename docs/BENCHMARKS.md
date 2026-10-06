@@ -381,3 +381,47 @@ row comparator); a key-normalised radix or tuned comparison sort is future work,
 Loading scales to 5.5x at 8 threads and stops there. Memory grows with threads because every task holds the raw rows of
 a whole row group before sealing and compressing it; the stored table is identical for any thread count (a test checks
 that tables, row groups and errors equal the serial loader's).
+
+---
+
+## Phase 7 - persistence (durability costs and benefits)
+
+Same machine as above (Ryzen 7 6800H, GCC 13.3 `-O3`; the SSD is the machine's NVMe drive, `fsync` on ext4; the page cache was
+warm for the reopen numbers, so "reopen" measures reading, checking and decoding, not the disk). Measured in a quiet window with
+the background mutation runs paused. One run each; the commit latencies are I/O-bound and stable, the load times are CPU-bound
+and move by ~10% between runs. Reproduce:
+```
+cmake --preset release && cmake --build --preset release --target cdb_persist
+build/release/bench/cdb_persist --dir build/persist_scratch --sf 1 [--threads N]    # needs data/tpch-sf1 (tools/tpch_data.py)
+```
+
+### Commit latency: single-row `INSERT` statements (one process, one session)
+| Durability | statements/s | mean | p50 | p99 |
+|---|---:|---:|---:|---:|
+| `SyncMode::Full`: log frame written and **fsynced** before the statement returns | 1,828-1,908 | 524-547 us | 511-519 us | 699-749 us |
+| `SyncMode::Off`: written, flushing left to the OS | 24,600-25,300 | 40 us | 36 us | 71-75 us |
+| in memory (no storage) | 37,800-37,900 | 26 us | 25 us | 46-49 us |
+
+An fsynced commit costs ~0.5 ms on this disk, which is almost all of the difference; writing and checksumming the frame costs
+~14 us. There is no group commit, so concurrent sessions do not share an fsync (a known gap, below).
+
+### TPC-H SF1 (8,661,245 rows in 8 tables)
+| Step | 16 threads | 1 thread |
+|---|---:|---:|
+| `COPY` of the CSV files, in memory | 2.52 s | 8.85 s |
+| the same `COPY` into a persistent database (every row logged and fsynced; the log is 1,041 MB) | 3.54 s | 9.39 s |
+| `CHECKPOINT` (503.9 MB file; checksummed, encodings as in memory) | 0.74 s | 0.64 s |
+| **reopen from the checkpoint** (read, verify every block, decode all row groups) | **0.16 s** | **0.31 s** |
+| reopen by **replaying the whole log** (no checkpoint; 1,041 MB of raw rows) | 3.12 s | 2.84 s |
+
+- Reopening from a checkpoint is **16x faster than loading the CSV at 16 threads and 28x faster at one thread**, because the
+  checkpoint stores the already-encoded segments: loading is reading and verifying, not parsing and re-encoding. A reopened
+  database answers queries like the original (Q6 on the reopened SF1 database: 54 ms on one thread, vs 45-47 ms in the Phase 6 table
+  for a database built by `COPY`; the first run after opening is cold).
+- Logging a bulk load adds 0.7 s at 16 threads and 0.5 s at one: the rows are written once, sequentially, with one fsync.
+  The checkpoint (504 MB) is half the size of the log of the same data (1,041 MB), since the log stores plain rows.
+- Log replay is the slow recovery path (a log of raw rows is decoded and re-sealed with compression); checkpointing bounds it.
+  Checkpoint writing does not scale with threads here (0.64 s at 1, 0.74 s at 16): it is bound by writing 504 MB through the page
+  cache and fsync, not by serialising.
+- At SF0.1 (16 threads): `COPY` 0.50 s in memory, 0.71 s persistent; checkpoint 0.25 s (60.8 MB); reopen 0.04 s (vs 0.50 s to
+  reload the CSV); log replay 0.29 s (104 MB).
