@@ -283,3 +283,101 @@ Remaining gaps against DuckDB are the multi-way joins at SF1 (Q7 8.4x, Q8 7.8x, 
 where row-wise build-side storage (one cache miss per payload row instead of one per payload column) and a better
 join order (Q9, no `LIKE` statistics) are the next steps (Phases 6 and 8).
 
+
+---
+
+## Phase 6 - morsel-driven parallelism
+
+Same machine and build as above (8 cores / 16 hardware threads, GCC 13.3 `-O3`), **plus**: a desktop session
+was running (a browser used about 0.7 of a core during the runs) and the CPU governor was left alone, so 16-thread
+numbers include that noise and a clock that drops under all-core load (the clock was not recorded; that is a
+hypothesis for why 8 threads on 8 cores do not give 8x, not a measured cause). Every cell is the minimum of 5 runs
+after one cold run; the engine's single-thread column was measured again in this session, so it differs by up to
+~10% from the Phase 5 tables. DuckDB 1.5.6 (`tools/tpch_duckdb_time.py --threads N`) ran in the same session on its own
+`dbgen` data.
+
+Reproduce:
+```
+cmake --preset release && cmake --build --preset release
+for n in 1 2 4 8 16; do build/release/bench/cdb_tpch --sf 1 --threads $n --runs 5; done
+for n in 1 2 4 8 16; do .venv/bin/python tools/tpch_duckdb_time.py --sf 1 --threads $n --runs 5; done
+build/release/bench/cdb_tpch --sf 1 --threads 16 --queries "" --sql "SELECT ..."     # the statements below
+```
+
+### TPC-H SF1 (6,001,215 lineitem rows): threads vs time (ms, min of 5 runs) and speedup over 1 thread
+
+| Query | 1 | 2 | 4 | 8 | 16 | speedup @8 | speedup @16 | DuckDB 1 thr | DuckDB 16 thr | DuckDB speedup @16 | cdb 16 / DuckDB 16 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 261.7 | 136.6 | 73.7 | 49.1 | 40.6 | 5.3x | **6.4x** | 222.9 | 33.6 | 6.6x | 1.2x |
+| Q3 | 128.1 | 79.5 | 44.1 | 27.9 | 27.9 | 4.6x | **4.6x** | 58.7 | 20.1 | 2.9x | 1.4x |
+| Q5 | 253.3 | 137.2 | 71.9 | 46.4 | 42.8 | 5.5x | **5.9x** | 68.4 | 18.5 | 3.7x | 2.3x |
+| Q6 | 45.0 | 25.0 | 13.5 | 9.0 | 7.7 | 5.0x | **5.8x** | 25.2 | 5.1 | 4.9x | 1.5x |
+| Q7 | 539.7 | 318.8 | 176.4 | 112.3 | 128.2 | 4.8x | **4.2x** | 67.5 | 21.5 | 3.1x | 6.0x |
+| Q8 | 294.4 | 159.8 | 84.1 | 61.4 | 52.8 | 4.8x | **5.6x** | 38.6 | 16.6 | 2.3x | 3.2x |
+| Q9 | 1490.9 | 791.2 | 499.8 | 363.6 | 275.6 | 4.1x | **5.4x** | 255.8 | 82.5 | 3.1x | 3.3x |
+| Q10 | 231.8 | 142.2 | 87.0 | 53.9 | 58.4 | 4.3x | **4.0x** | 149.9 | 48.4 | 3.1x | 1.2x |
+| Q12 | 137.4 | 72.7 | 41.3 | 23.3 | 21.0 | 5.9x | **6.5x** | 105.5 | 19.2 | 5.5x | 1.1x |
+| Q13 | 745.5 | 394.9 | 228.1 | 138.1 | 113.6 | 5.4x | **6.6x** | 196.7 | 51.0 | 3.9x | 2.2x |
+| Q14 | 51.1 | 30.6 | 16.3 | 9.1 | 10.6 | 5.6x | **4.8x** | 37.6 | 14.5 | 2.6x | 0.7x |
+| Q19 | 185.7 | 101.9 | 56.5 | 33.5 | 28.1 | 5.5x | **6.6x** | 175.5 | 40.3 | 4.4x | 0.7x |
+| **geometric mean** | | | | | | | **5.5x** | | | 3.7x | 1.7x |
+
+### TPC-H SF0.1 (600,572 lineitem rows): threads vs time (ms, min of 5 runs) and speedup over 1 thread
+
+| Query | 1 | 2 | 4 | 8 | 16 | speedup @8 | speedup @16 | DuckDB 1 thr | DuckDB 16 thr | DuckDB speedup @16 | cdb 16 / DuckDB 16 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 25.8 | 14.0 | 7.1 | 4.5 | 3.7 | 5.7x | **7.0x** | 23.8 | 6.7 | 3.6x | 0.6x |
+| Q3 | 9.0 | 5.5 | 3.6 | 3.1 | 2.8 | 2.9x | **3.2x** | 6.1 | 6.4 | 1.0x | 0.4x |
+| Q5 | 19.6 | 10.7 | 6.7 | 4.5 | 4.6 | 4.4x | **4.3x** | 8.0 | 6.2 | 1.3x | 0.7x |
+| Q6 | 4.6 | 2.4 | 1.6 | 0.9 | 0.8 | 5.1x | **5.7x** | 2.9 | 1.4 | 2.1x | 0.6x |
+| Q7 | 46.9 | 26.2 | 16.4 | 11.7 | 12.0 | 4.0x | **3.9x** | 11.0 | 8.2 | 1.3x | 1.5x |
+| Q8 | 22.9 | 13.1 | 8.0 | 6.5 | 8.3 | 3.5x | **2.8x** | 8.1 | 7.2 | 1.1x | 1.2x |
+| Q9 | 60.7 | 34.0 | 20.4 | 15.4 | 16.2 | 3.9x | **3.7x** | 22.1 | 14.6 | 1.5x | 1.1x |
+| Q10 | 20.4 | 11.7 | 7.8 | 7.0 | 9.1 | 2.9x | **2.2x** | 24.1 | 16.2 | 1.5x | 0.6x |
+| Q12 | 13.3 | 7.4 | 4.4 | 2.8 | 2.7 | 4.8x | **4.9x** | 12.4 | 7.0 | 1.8x | 0.4x |
+| Q13 | 50.2 | 21.8 | 13.3 | 10.6 | 9.8 | 4.7x | **5.1x** | 15.9 | 16.6 | 1.0x | 0.6x |
+| Q14 | 3.7 | 2.1 | 1.4 | 1.0 | 1.2 | 3.7x | **3.1x** | 4.0 | 3.3 | 1.2x | 0.4x |
+| Q19 | 13.2 | 7.2 | 4.3 | 3.2 | 4.5 | 4.1x | **2.9x** | 19.7 | 9.2 | 2.1x | 0.5x |
+| **geometric mean** | | | | | | | **3.9x** | | | 1.5x | 0.6x |
+
+**Reading the curves.**
+- Scan/aggregate-heavy queries (Q1, Q6, Q12, Q13, Q19) reach **5.8-6.6x at 16 threads** on SF1; join-heavy ones (Q3, Q7,
+  Q10) 4.0-4.6x. The roadmap's target of >= 8x at 16 threads is **not met**: the best SF1 query is 6.6x and Q1, the
+  textbook scan+aggregate, is 6.4x. The machine has 8 physical cores, so 8x is already the ceiling without SMT; going
+  from 8 to 16 threads helps some queries (Q1 49 -> 41 ms) and hurts others (Q7 112 -> 128 ms, Q10 54 -> 58 ms).
+  DuckDB's own speedup on the same hardware is 6.6x on Q1, 4.9x on Q6 and a geometric mean of 3.7x (ours: 5.5x), so the
+  engine scales *better* than DuckDB from a slower base: at 16 threads the SF1 geometric mean against DuckDB is 1.7x,
+  against 2.6x on one thread.
+- The weak spots are Q7 and Q10 at SF1 and most queries at SF0.1. **Not profiled yet**, so the causes are hypotheses:
+  a serial or poorly parallel piece in the multi-way joins (build side, the final group-by over few rows), and, at
+  SF0.1, queries of 3-20 ms leaving little to divide against thread hand-off and plan setup.
+- **Found by this measurement:** Q13 at SF0.1 did not scale at all (46 ms on 1 thread, 28-44 ms on 2-16; DuckDB shows
+  the same plateau, 14.6 -> 17.9 ms). `customer` has 15,000 rows, which was a single 16,384-row morsel, so the probe of the
+  `LEFT JOIN` and the group-by after it ran on one thread. A scan now sizes its morsels from the thread count (about 4
+  per thread, never below one vector): Q13 SF0.1 50.2 -> **9.8 ms** at 16 threads (was 40.5), with no change to the
+  large-table queries.
+
+### Operators in isolation (SF1, `cdb_tpch --queries "" --sql`, min of 5 runs, ms)
+| Statement | 1 | 2 | 4 | 8 | 16 | speedup @16 |
+|---|---:|---:|---:|---:|---:|---:|
+| `ORDER BY l_extendedprice DESC, l_orderkey, l_linenumber` over lineitem (6.0 M rows, all returned) | 5539 | 3004 | 1669 | 1000 | 743 | **7.5x** |
+| `SELECT l_orderkey, sum(l_quantity), count(*), max(l_extendedprice) ... GROUP BY l_orderkey` (1.5 M groups, partitioned merge) | 321 | 247 | 129 | 76 | 63 | **5.1x** |
+| `SELECT count(*), sum(l.l_quantity) FROM orders o JOIN lineitem l ON o_orderkey = l_orderkey` (parallel build + probe) | 260 | 146 | 83 | 54 | 42 | **6.1x** |
+| `SELECT count(DISTINCT l_partkey) FROM lineitem` | 373 | 300 | 237 | 202 | 296 | **1.3x** |
+
+The sort scales best (the parallel merge sort cuts even the last, biggest merges into independent slices). **`DISTINCT`
+aggregates do not scale** (and 16 threads is slower than 8): they keep (group, value) pairs per thread and merge whole
+tables on one thread, because the partitioned merge is not implemented for them. This is a known gap, recorded in PROGRESS.
+The single-thread sort (5.5 s for 6 M rows) is slow in absolute terms (`std::stable_sort` over an index array with a
+row comparator); a key-normalised radix or tuned comparison sort is future work, not a Phase 6 claim.
+
+### Loading (`COPY ... FROM` CSV, SF1 lineitem 6,001,215 rows, `cdb_tpch --sf 1 --threads N`)
+| Threads | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| lineitem load (s) | 6.90 | 3.13 | 1.85 | 1.25 | 1.25 |
+| orders load (s) | 1.41 | 0.78 | 0.57 | 0.47 | 0.46 |
+| peak RSS after loading all 8 tables (MB; stored data is 612 MB in every case) | 720 | 853 | 917 | 1034 | 1266 |
+
+Loading scales to 5.5x at 8 threads and stops there. Memory grows with threads because every task holds the raw rows of
+a whole row group before sealing and compressing it; the stored table is identical for any thread count (a test checks
+that tables, row groups and errors equal the serial loader's).
