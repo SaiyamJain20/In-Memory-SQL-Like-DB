@@ -272,6 +272,18 @@ struct Record {
     uint32_t line;
 };
 
+// Drops the pages fully inside [begin, end) of the mapping from this process's resident set once
+// they have been read (they stay in the page cache and fault back in if touched again), so a big
+// file does not all sit in memory at once. Pages shared with a neighbouring range are kept.
+void ReleasePages(const char* data, uint64_t begin, uint64_t end) {
+    static const auto page = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+    const uint64_t first = (begin + page - 1) / page * page;
+    const uint64_t last = end / page * page;
+    if (last > first) {
+        madvise(const_cast<char*>(data) + first, last - first, MADV_DONTNEED);
+    }
+}
+
 bool IsBlank(const char* text, uint32_t length) {
     return length == 0 || (length == 1 && text[0] == '\r');
 }
@@ -337,6 +349,7 @@ FindRecordsUnquoted(const char* data, size_t size, size_t chunk_bytes, TaskSched
             last_newline[c] = p - data;
         }
         newlines[c] = count;
+        ReleasePages(data, static_cast<uint64_t>(begin - data), static_cast<uint64_t>(end - data));
     });
     if (has_quote.load()) {
         return std::nullopt;
@@ -379,6 +392,7 @@ FindRecordsUnquoted(const char* data, size_t size, size_t chunk_bytes, TaskSched
             previous = at;
             k++;
         }
+        ReleasePages(data, static_cast<uint64_t>(begin - data), static_cast<uint64_t>(end - data));
     });
     if (too_long.load()) {
         return std::nullopt;
@@ -456,8 +470,9 @@ std::optional<idx_t> LoadCsvParallel(Table& target, const std::string& path,
     std::vector<Record> records =
         found ? std::move(*found) : FindRecordsQuoted(data, file.size, options.delimiter);
     if (options.header && !records.empty()) {
-        // The serial loader skips the header only once it is a complete record: one that ends inside
-        // an open quote (it can only be the last, so only if it is the only record) is an error.
+        // The serial loader skips the header only once it is a complete record: one that ends
+        // inside an open quote (it can only be the last, so only if it is the only record) is an
+        // error.
         std::vector<Field> header_fields;
         const Record& h = records.front();
         if (!SplitRecord(std::string(data + h.begin, h.length), options.delimiter, header_fields)) {
@@ -531,6 +546,10 @@ std::optional<idx_t> LoadCsvParallel(Table& target, const std::string& path,
             }
             if (builder) {
                 sealed[g] = builder->Seal();
+            }
+            if (last > first) { // the group's text has been parsed: let go of its pages
+                ReleasePages(data, records[first].begin,
+                             records[last - 1].begin + records[last - 1].length);
             }
         } catch (...) {
             errors[g] = std::current_exception();

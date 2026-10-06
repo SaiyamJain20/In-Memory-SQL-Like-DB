@@ -5,7 +5,9 @@
 //   cdb_shell -f script.sql      run a script
 //
 // Dot commands (interactive or in scripts):
-//   .tables   .schema [table]   .read FILE   .timer on|off   .maxrows N|off   .help   .quit
+//   .tables   .schema [table]   .read FILE   .timer on|off   .maxrows N|off   .threads N|auto
+//   .help   .quit
+// Queries use one thread per hardware thread by default (CDB_THREADS overrides).
 // The database lives in memory for the lifetime of the process.
 
 #include "common/version.h"
@@ -60,7 +62,7 @@ bool RunSql(cdb::Connection& conn, const std::string& sql, const Settings& setti
 } // namespace
 
 int main(int argc, char** argv) {
-    cdb::Database db;
+    cdb::Database db(std::getenv("CDB_THREADS") != nullptr ? cdb::Database::DefaultThreads() : 0);
     cdb::Connection conn(db);
     Settings settings;
 
@@ -138,9 +140,18 @@ int main(int argc, char** argv) {
                     settings.max_rows =
                         static_cast<cdb::idx_t>(std::max(0, std::atoi(arg.c_str())));
                 }
+            } else if (cmd == ".threads") {
+                if (arg.empty()) {
+                    std::cout << db.threads() << " thread(s)\n";
+                } else {
+                    db.SetThreads(arg == "auto"
+                                      ? 0
+                                      : static_cast<size_t>(std::max(1, std::atoi(arg.c_str()))));
+                    std::cout << db.threads() << " thread(s)\n";
+                }
             } else if (cmd == ".help") {
                 std::cout << ".tables  .schema [table]  .read FILE  .timer on|off  .maxrows N|off  "
-                             ".quit\nEXPLAIN <query> shows the optimized plan.\n";
+                             ".threads N|auto  .quit\nEXPLAIN <query> shows the optimized plan.\n";
             } else {
                 std::cerr << "unknown command " << cmd << "\n";
             }
