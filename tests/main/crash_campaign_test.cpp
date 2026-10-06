@@ -19,7 +19,9 @@
 #include <algorithm>
 #include <map>
 #include <optional>
+#include <random>
 #include <set>
+#include <thread>
 
 namespace cdb {
 
@@ -433,6 +435,107 @@ TEST(CrashCampaign, AnIoErrorAtAnyOperationFailsCleanlyAndNeverLeavesAnythingEls
             << w.name << ": the errors should mostly land inside statements";
         EXPECT_GT(s.recoveries, 200U);
     }
+}
+
+// Several sessions commit at once while checkpoints rotate the log underneath them, and the power
+// fails at a random operation. Each session owns a table and inserts 0, 1, 2, ... into it, so what
+// recovery must find is easy to state: for every table, the rows 0..m-1 with m between the number
+// of acknowledged inserts and one more. (This is the test that sees a log whose *name* is not yet
+// durable while commits are already being acknowledged into it.)
+TEST(CrashCampaign, ConcurrentSessionsAndCheckpointsSurviveAPowerCutAnywhere) {
+    constexpr int kThreads = 4;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    constexpr uint64_t kRounds = 50;
+#else
+    constexpr uint64_t kRounds = 160;
+#endif
+    uint64_t crashed_rounds = 0, checkpoints_seen = 0;
+    for (uint64_t seed = 0; seed < kRounds; seed++) {
+        std::mt19937_64 rng(seed * 7919 + 1);
+        auto mem = std::make_shared<MemoryFileSystem>();
+        auto fi = std::make_shared<FaultInjector>(mem);
+        DatabaseOptions o = BaseOptions();
+        o.storage.fs = fi;
+        o.storage.checkpoint_wal_bytes = 300 + rng() % 600;
+        fi->CrashAtOperation(12 + rng() % 600);
+        std::vector<int64_t> acked(kThreads, 0);
+        std::vector<char> created(kThreads, 0);
+        {
+            std::unique_ptr<Database> db;
+            try {
+                db = std::make_unique<Database>(kDir, o);
+            } catch (const Error&) {
+            }
+            if (db != nullptr) {
+                std::vector<std::thread> threads;
+                for (int t = 0; t < kThreads; t++) {
+                    threads.emplace_back([&, t] {
+                        Connection conn(*db);
+                        const std::string table = "own" + std::to_string(t);
+                        if (!conn.Query("CREATE TABLE " + table + " (i BIGINT, pad VARCHAR)")
+                                 .ok()) {
+                            return;
+                        }
+                        created[static_cast<size_t>(t)] = 1;
+                        for (int64_t i = 0; i < 120; i++) {
+                            if (!conn.Query("INSERT INTO " + table + " VALUES (" +
+                                            std::to_string(i) +
+                                            ", 'some padding to make the log grow')")
+                                     .ok()) {
+                                return;
+                            }
+                            acked[static_cast<size_t>(t)] = i + 1;
+                        }
+                    });
+                }
+                for (auto& th : threads) {
+                    th.join();
+                }
+                checkpoints_seen += db->storage()->checkpoint_epoch() > 0 ? 1 : 0;
+            }
+        }
+        crashed_rounds += fi->crashed() ? 1 : 0;
+        for (const CrashPolicy& policy :
+             {CrashPolicy::DropUnsynced(), CrashPolicy::KeepAll(), CrashPolicy::Random(seed, false),
+              CrashPolicy::Random(seed, true)}) {
+            DatabaseOptions ro = BaseOptions();
+            ro.storage.fs = mem->Crash(policy);
+            ro.storage.checkpoint_on_close = false;
+            std::unique_ptr<Database> db;
+            try {
+                db = std::make_unique<Database>(kDir, ro);
+            } catch (const Error& e) {
+                ADD_FAILURE() << "seed " << seed << ": the database does not reopen: " << e.what();
+                return;
+            }
+            Connection conn(*db);
+            for (int t = 0; t < kThreads; t++) {
+                const std::string table = "own" + std::to_string(t);
+                if (db->catalog().TryGetTable(table) == nullptr) {
+                    EXPECT_FALSE(created[static_cast<size_t>(t)])
+                        << "seed " << seed << ": the acknowledged table " << table << " is gone";
+                    continue;
+                }
+                const QueryResult r = conn.Query("SELECT i FROM " + table);
+                ASSERT_TRUE(r.ok());
+                const auto rows = static_cast<int64_t>(r.RowCount());
+                if (rows < acked[static_cast<size_t>(t)] ||
+                    rows > acked[static_cast<size_t>(t)] + 1) {
+                    ADD_FAILURE() << "seed " << seed << ": " << table << " holds " << rows
+                                  << " rows after " << acked[static_cast<size_t>(t)]
+                                  << " acknowledged inserts (the power failed at operation count "
+                                  << fi->operations() << ")";
+                    return;
+                }
+                for (int64_t i = 0; i < rows; i++) {
+                    ASSERT_EQ(r.GetValue(0, static_cast<idx_t>(i)), Value::BigInt(i))
+                        << "seed " << seed << " " << table << ": rows out of order or missing";
+                }
+            }
+        }
+    }
+    EXPECT_GT(crashed_rounds, kRounds / 2) << "most rounds should lose power mid-workload";
+    EXPECT_GT(checkpoints_seen, kRounds / 4) << "checkpoints should be taken while sessions commit";
 }
 
 TEST(CrashCampaign, WithoutFsyncTheRecoveredStateIsStillACommittedPrefix) {
