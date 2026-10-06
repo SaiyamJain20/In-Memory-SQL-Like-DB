@@ -509,3 +509,12 @@ min of 5)
   NUMA awareness, one pool per `Database`.
 - The single-thread sort (5.5 s for 6 M rows with three keys) is slow in absolute terms (index array + row comparator);
   a normalised-key sort is future work.
+
+**Phase 6 exit criteria met**: TSan clean (both modes, locally and in CI); scaling curve for 1-16 threads for Q1 / Q3 / Q6
+(and the other nine queries) in `BENCHMARKS.md`; results identical to single-threaded (tolerance only for floating-point
+sums). The target of >= 8x at 16 threads was not met (above).
+
+**CI (GitHub Actions, run 37443156698)** - all 8 jobs green, now including the `-parallel` test steps: format, gcc-13 and
+clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job. The run before it (37442929725) ran 0 jobs
+because a step name containing `: ` made the workflow invalid YAML; `verify.sh` now parses the workflow. The regression
+run of the *older* mutants after the Phase 6 changes runs in a separate worktree and is recorded with the Phase 7 entry.

@@ -4,17 +4,19 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phases 0–5 of 9 complete).** The engine runs SQL end to end: a
+> **Status: early development (Phases 0–6 of 9 complete).** The engine runs SQL end to end: a
 > hand-written parser and binder, a rule-based optimizer, a push-based vectorized executor
 > (hash aggregation, hash joins, sort/top-N) over compressed columnar storage (bit-packing, RLE,
 > dictionaries, lossless scaled doubles) with zone-map pruning and AVX2 kernels behind runtime CPU
-> dispatch. It runs the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on
-> all of them at SF0.01, SF0.1 and SF1**; the whole test suite passes unchanged with SIMD or
-> compression switched off. TPC-H SF1 takes 2.3x less memory (lineitem 2.9x). It is single-threaded
-> so far: on one thread the geometric mean over those queries is 1.7x DuckDB's time at SF0.1 and 2.6x
-> at SF1 (the multi-way joins are the weak spot, up to 8.4x). Parallelism (Phase 6), persistence
-> (Phase 7) and
-> subqueries/statistics (Phase 8) are still ahead. Every number is in
+> dispatch, and morsel-driven parallelism across a thread pool (parallel scans, partitioned
+> aggregation, parallel join build, parallel merge sort, parallel CSV loading; TSan-clean).
+> It runs the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on all of
+> them at SF0.01, SF0.1 and SF1**; the whole test suite passes unchanged with SIMD or compression
+> switched off, and again in a stress mode that runs every query on 4 threads with one-vector
+> morsels. On one thread the SF1 geometric mean is 2.6x DuckDB's time; at 16 threads
+> (8 cores) the engine is **5.5x faster than on one thread** (Q1 6.4x, Q6 5.8x) and 1.7x DuckDB's
+> time at the same thread count; the 8x target was not met. `DISTINCT` aggregates do not scale yet.
+> Persistence (Phase 7) and subqueries/statistics (Phase 8) are still ahead. Every number is in
 > [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and command; see the
 > [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
