@@ -6,6 +6,8 @@
 #include "execution/key_index.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <optional>
 
@@ -21,6 +23,11 @@ struct JoinGlobalState final : GlobalSinkState {
     JoinGlobalState(std::vector<LogicalType> payload_types, std::vector<LogicalType> key_types)
         : payload(std::move(payload_types)), keys(std::move(key_types)) {}
     std::mutex mutex;
+    // What each thread collected, handed over by Combine and merged by Finalize.
+    struct Part {
+        ChunkStore payload, keys;
+    };
+    std::vector<Part> parts;
     ChunkStore payload; // build rows (all right columns)
     ChunkStore keys;    // their evaluated join keys, same row ids (no columns for key-less joins)
     // One entry per build row: its hash and the next row of its bucket's chain, side by side so
@@ -177,19 +184,63 @@ void PhysicalHashJoin::Combine(GlobalSinkState& global, LocalSinkState& local) {
     auto& g = static_cast<JoinGlobalState&>(global);
     auto& l = static_cast<BuildLocalState&>(local);
     const std::lock_guard<std::mutex> lock(g.mutex);
-    if (g.payload.Count() == 0 && g.keys.Count() == 0) {
-        g.payload = std::move(l.payload);
-        g.keys = std::move(l.keys);
-    } else {
-        g.payload.AppendStore(l.payload);
-        if (!right_keys_.empty()) {
-            g.keys.AppendStore(l.keys);
-        }
-    }
+    g.parts.push_back({std::move(l.payload), std::move(l.keys)});
 }
 
 void PhysicalHashJoin::Finalize(GlobalSinkState& global) {
+    ExecutionContext serial;
+    FinalizeParallel(global, serial);
+}
+
+namespace {
+constexpr idx_t kDefaultMinRowsToParallelize = 32768;
+
+std::atomic<idx_t>& MinRowsSetting() {
+    static std::atomic<idx_t> rows{[] {
+        const char* env = std::getenv("CDB_JOIN_PARALLEL_MIN_ROWS");
+        const long long v = env != nullptr ? std::atoll(env) : 0;
+        return v > 0 ? static_cast<idx_t>(v) : idx_t{0};
+    }()};
+    return rows;
+}
+
+size_t NextPowerOfTwo(size_t n) {
+    size_t p = 1;
+    while (p < n) {
+        p *= 2;
+    }
+    return p;
+}
+} // namespace
+
+idx_t PhysicalHashJoin::MinRowsToParallelize() noexcept {
+    const idx_t set = MinRowsSetting().load(std::memory_order_relaxed);
+    return set != 0 ? set : kDefaultMinRowsToParallelize;
+}
+
+void PhysicalHashJoin::SetMinRowsToParallelize(idx_t rows) noexcept {
+    MinRowsSetting().store(rows, std::memory_order_relaxed);
+}
+
+void PhysicalHashJoin::FinalizeParallel(GlobalSinkState& global, ExecutionContext& context) {
     auto& g = static_cast<JoinGlobalState&>(global);
+    // 1. One build side from the threads' stores. Whole chunks are moved, not copied; only each
+    //    thread's last partial chunk is copied. (Row order is therefore the order the stores were
+    //    handed over in, not the input order.)
+    for (auto& part : g.parts) {
+        g.payload.AdoptFullChunks(part.payload);
+        if (!right_keys_.empty()) {
+            g.keys.AdoptFullChunks(part.keys);
+        }
+    }
+    for (auto& part : g.parts) {
+        g.payload.AppendStore(part.payload);
+        if (!right_keys_.empty()) {
+            g.keys.AppendStore(part.keys);
+        }
+    }
+    g.parts.clear();
+
     const idx_t n = g.payload.Count();
     if (n >= kNotStarted) {
         throw Error(ErrorCode::NotImplemented, "join build side has more than 4 billion rows");
@@ -198,32 +249,87 @@ void PhysicalHashJoin::Finalize(GlobalSinkState& global) {
         return; // nested loop: every build row is a candidate, no index needed
     }
     CDB_CHECK(g.keys.Count() == n);
+
+    // 2. Hash every build row, one key chunk per task.
     g.entries.resize(n);
-    std::vector<const Vector*> cols(right_keys_.size());
-    uint64_t chunk_hashes[kVectorSize];
-    for (idx_t c = 0; c < g.keys.ChunkCount(); c++) {
+    context.ParallelFor(g.keys.ChunkCount(), [&](size_t c) {
         const DataChunk& chunk = g.keys.chunk(c);
+        std::vector<const Vector*> cols(right_keys_.size());
         for (idx_t k = 0; k < cols.size(); k++) {
             cols[k] = &chunk.column(k);
         }
+        uint64_t chunk_hashes[kVectorSize];
         HashColumns(cols.data(), cols.size(), chunk.size(), chunk_hashes);
         for (idx_t i = 0; i < chunk.size(); i++) {
             g.entries[c * kVectorSize + i].hash = chunk_hashes[i];
             g.entries[c * kVectorSize + i].pad = 0;
         }
-    }
+    });
+
+    // 3. Link the rows into bucket chains. Chains list rows in build order (rows are inserted from
+    //    the last to the first), and no two threads touch the same bucket or the same row: the
+    //    buckets are split into contiguous partitions, the rows are scattered into per-partition
+    //    lists (two passes, each over row ranges in parallel), and one task links one partition.
     idx_t buckets = 16;
     while (buckets < 2 * n) {
         buckets *= 2;
     }
     g.mask = buckets - 1;
     g.heads.assign(buckets, kNone);
-    // Insert in reverse so each chain lists rows in build order.
-    for (idx_t row = n; row-- > 0;) {
-        uint32_t& head = g.heads[g.entries[row].hash & g.mask];
-        g.entries[row].next = head;
-        head = static_cast<uint32_t>(row);
+
+    const bool parallel = context.threads() > 1 && n >= MinRowsToParallelize();
+    const size_t partitions = parallel ? NextPowerOfTwo(context.threads() * 4) : 1;
+    const size_t ranges = parallel ? context.threads() * 4 : 1;
+    unsigned bucket_bits = 0, partition_bits = 0;
+    while ((idx_t{1} << bucket_bits) < buckets) {
+        bucket_bits++;
     }
+    while ((size_t{1} << partition_bits) < partitions) {
+        partition_bits++;
+    }
+    const unsigned shift = bucket_bits - partition_bits;
+    const auto partition_of = [&](idx_t row) {
+        return static_cast<size_t>((g.entries[row].hash & g.mask) >> shift);
+    };
+    const auto range_begin = [&](size_t r) { return static_cast<idx_t>(r * n / ranges); };
+
+    // counts[r * partitions + p]: rows of range r in partition p; then each becomes the offset
+    // where range r starts writing its rows of partition p (partitions are laid out one after
+    // another, within one by range, so rows stay in ascending order).
+    std::vector<uint32_t> offsets(ranges * partitions, 0);
+    context.ParallelFor(ranges, [&](size_t r) {
+        uint32_t* counts = offsets.data() + r * partitions;
+        for (idx_t row = range_begin(r); row < range_begin(r + 1); row++) {
+            counts[partition_of(row)]++;
+        }
+    });
+    std::vector<uint32_t> partition_start(partitions + 1, 0);
+    uint32_t running = 0;
+    for (size_t p = 0; p < partitions; p++) {
+        partition_start[p] = running;
+        for (size_t r = 0; r < ranges; r++) {
+            uint32_t& slot = offsets[r * partitions + p];
+            const uint32_t count = slot;
+            slot = running;
+            running += count;
+        }
+    }
+    partition_start[partitions] = running;
+    std::vector<uint32_t> order(n);
+    context.ParallelFor(ranges, [&](size_t r) {
+        uint32_t* next = offsets.data() + r * partitions;
+        for (idx_t row = range_begin(r); row < range_begin(r + 1); row++) {
+            order[next[partition_of(row)]++] = static_cast<uint32_t>(row);
+        }
+    });
+    context.ParallelFor(partitions, [&](size_t p) {
+        for (uint32_t i = partition_start[p + 1]; i-- > partition_start[p];) {
+            const uint32_t row = order[i];
+            uint32_t& head = g.heads[g.entries[row].hash & g.mask];
+            g.entries[row].next = head;
+            head = row;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------------- probe

@@ -32,6 +32,12 @@ class ChunkStore {
     // Appends every row of `other` (same types).
     void AppendStore(const ChunkStore& other);
 
+    // Moves every completely filled chunk of `other` onto the end of this store without copying a
+    // row. This store must end on a chunk boundary (Count() a multiple of kVectorSize), which it
+    // keeps; `other` keeps only its partial last chunk, if any (append that with AppendStore()).
+    // Merging many stores this way copies at most one partial chunk per store.
+    void AdoptFullChunks(ChunkStore& other);
+
     // out[i] = column `column` of row rows[i], for i in [0, n). `out` is a Flat vector of the
     // column's type with capacity >= n.
     void Gather(idx_t column, const uint32_t* rows, idx_t n, Vector& out) const;

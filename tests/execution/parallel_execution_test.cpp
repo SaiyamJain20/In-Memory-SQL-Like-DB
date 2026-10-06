@@ -4,6 +4,7 @@
 
 #include "execution/basic_operators.h"
 #include "execution/hash_aggregate.h"
+#include "execution/hash_join.h"
 #include "execution/pipeline.h"
 #include "execution/task_scheduler.h"
 
@@ -140,12 +141,12 @@ struct Data {
 
 // `nchunks` chunks of random size (some empty, some a full vector), over `types`.
 Data MakeData(Rng& rng, const std::vector<LogicalType>& types, int nchunks,
-              const test::ValueGen& gen, idx_t max_rows = 300) {
+              const test::ValueGen& gen, idx_t max_rows = 300, bool allow_full_chunks = true) {
     Data d;
     for (int k = 0; k < nchunks; k++) {
-        const idx_t n = Chance(rng, 0.05)   ? 0
-                        : Chance(rng, 0.05) ? kVectorSize
-                                            : 1 + RandBelow(rng, max_rows);
+        const idx_t n = Chance(rng, 0.05)                        ? 0
+                        : allow_full_chunks && Chance(rng, 0.05) ? kVectorSize
+                                                                 : 1 + RandBelow(rng, max_rows);
         d.chunks.push_back(test::RandomVariedChunk(rng, types, n, gen));
         for (auto& r : RowsOf(d.chunks.back())) {
             d.rows.push_back(std::move(r));
@@ -685,6 +686,208 @@ TEST(ParallelExecution, AnIntegerSumOverflowIsReportedWhateverTheThreadCount) {
         plan.pipelines = {p0, p1};
         plan.root = &result;
         EXPECT_THROW(RunPlan(plan, threads), Error) << "threads " << threads;
+    }
+}
+
+// ---------------------------------------------------------------------------------- join
+
+namespace {
+
+class ScopedMinJoinRows {
+  public:
+    explicit ScopedMinJoinRows(idx_t rows) { PhysicalHashJoin::SetMinRowsToParallelize(rows); }
+    ~ScopedMinJoinRows() { PhysicalHashJoin::SetMinRowsToParallelize(0); }
+    ScopedMinJoinRows(const ScopedMinJoinRows&) = delete;
+    ScopedMinJoinRows& operator=(const ScopedMinJoinRows&) = delete;
+};
+
+const std::vector<LogicalType> kLeftTypes = {LogicalType::Integer(), LogicalType::Varchar(),
+                                             LogicalType::Double()};
+const std::vector<LogicalType> kRightTypes = {LogicalType::Integer(), LogicalType::Varchar(),
+                                              LogicalType::BigInt()};
+
+// Join keys are column 0 (Integer, `domain` values) and column 1 (Varchar, small pool).
+test::ValueGen JoinGen(int domain) {
+    return [domain](Rng& rng, LogicalType t) {
+        if (t.id() == TypeId::Integer) {
+            return Chance(rng, 0.05) ? Value::Null(t)
+                                     : Value::Integer(static_cast<int32_t>(
+                                           RandBelow(rng, static_cast<uint64_t>(domain))));
+        }
+        return test::SmallDomainValue(rng, t, 0.1);
+    };
+}
+
+// Reference: right rows indexed by key (a NULL in any key column never matches).
+Rows ReferenceJoin(const Rows& left, const Rows& right, size_t key_count, PhysicalJoinType type) {
+    std::map<std::vector<Value>, std::vector<size_t>, TupleLess> index;
+    const auto key_of = [&](const std::vector<Value>& row) -> std::optional<std::vector<Value>> {
+        std::vector<Value> key;
+        for (size_t k = 0; k < key_count; k++) {
+            if (row[k].IsNull()) {
+                return std::nullopt;
+            }
+            key.push_back(row[k]);
+        }
+        return key;
+    };
+    for (size_t r = 0; r < right.size(); r++) {
+        if (const auto key = key_of(right[r])) {
+            index[*key].push_back(r);
+        }
+    }
+    Rows out;
+    for (const auto& l : left) {
+        std::vector<size_t> matches;
+        if (const auto key = key_of(l)) {
+            if (const auto it = index.find(*key); it != index.end()) {
+                matches = it->second;
+            }
+        }
+        const bool any = !matches.empty();
+        if (type == PhysicalJoinType::Inner || type == PhysicalJoinType::Left) {
+            for (const size_t r : matches) {
+                std::vector<Value> row = l;
+                row.insert(row.end(), right[r].begin(), right[r].end());
+                out.push_back(std::move(row));
+            }
+        }
+        if (type == PhysicalJoinType::Left && !any) {
+            std::vector<Value> row = l;
+            for (const LogicalType& t : kRightTypes) {
+                row.push_back(Value::Null(t));
+            }
+            out.push_back(std::move(row));
+        } else if (type == PhysicalJoinType::Semi && any) {
+            out.push_back(l);
+        } else if (type == PhysicalJoinType::Anti && !any) {
+            out.push_back(l);
+        }
+    }
+    return out;
+}
+
+// build: right chunks -> join; probe: left chunks -> join -> collector. Returns the output rows.
+Rows RunParallelJoin(const Data& left, const Data& right, size_t key_count, PhysicalJoinType type,
+                     size_t threads) {
+    PhysicalPlan plan;
+    auto& lsrc = plan.Make<ParallelChunkSource>(kLeftTypes, &left.chunks);
+    auto& rsrc = plan.Make<ParallelChunkSource>(kRightTypes, &right.chunks);
+    std::vector<LogicalType> out = kLeftTypes;
+    if (type == PhysicalJoinType::Inner || type == PhysicalJoinType::Left) {
+        out.insert(out.end(), kRightTypes.begin(), kRightTypes.end());
+    }
+    std::vector<BoundExprPtr> lk, rk;
+    for (size_t k = 0; k < key_count; k++) {
+        lk.push_back(Col(k, kLeftTypes[k]));
+        rk.push_back(Col(k, kRightTypes[k]));
+    }
+    auto& join = plan.Make<PhysicalHashJoin>(out, type, kLeftTypes, kRightTypes, std::move(lk),
+                                             std::move(rk), nullptr);
+    auto& result = plan.Make<PhysicalResultCollector>(out);
+    Pipeline build;
+    build.source = &rsrc;
+    build.sink = &join;
+    Pipeline probe;
+    probe.source = &lsrc;
+    probe.operators = {&join};
+    probe.sink = &result;
+    probe.dependencies = {0};
+    plan.pipelines = {build, probe};
+    plan.root = &result;
+    return RunPlan(plan, threads);
+}
+
+void ExpectSameRows(Rows got, Rows want, const std::string& what) {
+    ASSERT_EQ(got.size(), want.size()) << what;
+    std::sort(got.begin(), got.end(), TupleLess());
+    std::sort(want.begin(), want.end(), TupleLess());
+    for (size_t i = 0; i < got.size(); i++) {
+        for (size_t c = 0; c < got[i].size(); c++) {
+            // equality consistent with the sort order (0.0 == -0.0), or ties could pair up
+            // differently
+            ASSERT_TRUE(test::CompareWithNulls(got[i][c], want[i][c]) == 0)
+                << what << ": row " << i << " column " << c << ": " << got[i][c].ToString()
+                << " vs " << want[i][c].ToString();
+        }
+    }
+}
+
+} // namespace
+
+TEST(ParallelExecution, HashJoinMatchesTheReferenceForEveryJoinTypeThreadCountAndBuildStrategy) {
+    Rng rng(11);
+    for (const int domain : {60, 1500}) {
+        const Data left = MakeData(rng, kLeftTypes, 16, JoinGen(domain), 150, false);
+        const Data right = MakeData(rng, kRightTypes, 16, JoinGen(domain), 150, false);
+        for (const size_t key_count : {size_t{1}, size_t{2}}) {
+            for (const PhysicalJoinType type : {PhysicalJoinType::Inner, PhysicalJoinType::Left,
+                                                PhysicalJoinType::Semi, PhysicalJoinType::Anti}) {
+                const Rows want = ReferenceJoin(left.rows, right.rows, key_count, type);
+                for (const idx_t min_rows : {idx_t{1}, idx_t{1} << 40}) {
+                    const ScopedMinJoinRows build(min_rows);
+                    for (const size_t threads : kThreadCounts) {
+                        ExpectSameRows(RunParallelJoin(left, right, key_count, type, threads), want,
+                                       "domain " + std::to_string(domain) + " keys " +
+                                           std::to_string(key_count) + " type " +
+                                           std::to_string(static_cast<int>(type)) +
+                                           (min_rows == 1 ? " parallel build" : " serial build") +
+                                           " threads " + std::to_string(threads));
+                        if (::testing::Test::HasFailure()) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(ParallelExecution, JoinWithEmptyAndAllNullBuildSides) {
+    Rng rng(12);
+    const Data left = MakeData(rng, kLeftTypes, 20, JoinGen(50), 150, false);
+    Data empty;
+    Data all_null;
+    for (int c = 0; c < 5; c++) {
+        DataChunk chunk;
+        chunk.Initialize(kRightTypes);
+        for (idx_t i = 0; i < 100; i++) {
+            chunk.SetValue(0, i, Value::Null(kRightTypes[0]));
+            chunk.SetValue(1, i, Value::Varchar("x"));
+            chunk.SetValue(2, i, Value::BigInt(1));
+        }
+        chunk.SetCardinality(100);
+        for (auto& r : RowsOf(chunk)) {
+            all_null.rows.push_back(std::move(r));
+        }
+        all_null.chunks.push_back(std::move(chunk));
+    }
+    const ScopedMinJoinRows build(1);
+    for (const Data* right : {&empty, &all_null}) {
+        for (const PhysicalJoinType type : {PhysicalJoinType::Inner, PhysicalJoinType::Left,
+                                            PhysicalJoinType::Semi, PhysicalJoinType::Anti}) {
+            for (const size_t threads : kThreadCounts) {
+                ExpectSameRows(RunParallelJoin(left, *right, 1, type, threads),
+                               ReferenceJoin(left.rows, right->rows, 1, type),
+                               "type " + std::to_string(static_cast<int>(type)) + " threads " +
+                                   std::to_string(threads));
+            }
+        }
+    }
+}
+
+TEST(ParallelExecution, TheSameJoinRunRepeatedlyGivesTheSameRows) {
+    Rng rng(13);
+    const Data left = MakeData(rng, kLeftTypes, 20, JoinGen(400), 150, false);
+    const Data right = MakeData(rng, kRightTypes, 20, JoinGen(400), 150, false);
+    const Rows want = ReferenceJoin(left.rows, right.rows, 1, PhysicalJoinType::Left);
+    const ScopedMinJoinRows build(1);
+    for (int round = 0; round < 15; round++) {
+        ExpectSameRows(RunParallelJoin(left, right, 1, PhysicalJoinType::Left, 8), want,
+                       "round " + std::to_string(round));
+        if (::testing::Test::HasFailure()) {
+            return;
+        }
     }
 }
 

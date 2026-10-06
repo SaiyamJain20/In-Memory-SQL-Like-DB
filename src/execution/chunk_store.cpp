@@ -42,6 +42,20 @@ void ChunkStore::AppendStore(const ChunkStore& other) {
     }
 }
 
+void ChunkStore::AdoptFullChunks(ChunkStore& other) {
+    CDB_CHECK(other.types_ == types_ && count_ % kVectorSize == 0);
+    const idx_t full = other.count_ / kVectorSize;
+    if (full == 0) {
+        return;
+    }
+    for (idx_t i = 0; i < full; i++) {
+        chunks_.push_back(std::move(other.chunks_[i]));
+    }
+    other.chunks_.erase(other.chunks_.begin(), other.chunks_.begin() + static_cast<long>(full));
+    count_ += full * kVectorSize;
+    other.count_ -= full * kVectorSize;
+}
+
 void ChunkStore::Gather(idx_t column, const uint32_t* rows, idx_t n, Vector& out) const {
     CDB_ASSERT(column < types_.size() && out.format() == VectorFormat::Flat && out.capacity() >= n);
     DispatchPhysical(types_[column].physical(), [&](auto tag) {
