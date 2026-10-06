@@ -99,6 +99,9 @@ constexpr std::array<UnpackFn, 64> kUnpackTable =
 } // namespace
 
 void BitUnpack(const uint8_t* in, idx_t count, uint8_t width, uint64_t* out) {
+    if (count == 0) {
+        return; // empty input may carry null pointers; memset/memcpy forbid them even for 0 bytes
+    }
     if (width == 0) {
         std::memset(out, 0, count * sizeof(uint64_t));
         return;
