@@ -609,22 +609,178 @@ Estimate EstimateJoin(JoinType type, const Estimate& left, const Estimate& right
 
 namespace {
 
-// How many distinct values an expression over `input` takes: those of the single column it is,
-// of the columns it combines (capped by the rows), 1 for a constant.
-double ExpressionDistinct(const BoundExpr& e, const Estimate& input) {
+// The range an arithmetic expression over `input`'s columns can take (interval arithmetic on the
+// columns' bounds), or nothing if some leaf has no bounds.
+std::optional<std::pair<double, double>> NumericRange(const BoundExpr& e, const Estimate& input) {
     if (const BoundExpr* c = AsColumnRef(e)) {
-        return c->ordinal < input.columns.size() ? input.columns[c->ordinal].distinct
-                                                 : std::max(1.0, input.rows);
+        if (c->ordinal >= input.columns.size() || !input.columns[c->ordinal].min ||
+            !input.columns[c->ordinal].max) {
+            return std::nullopt;
+        }
+        const auto lo = NumericValue(*input.columns[c->ordinal].min);
+        const auto hi = NumericValue(*input.columns[c->ordinal].max);
+        if (!lo || !hi) {
+            return std::nullopt;
+        }
+        return std::make_pair(*lo, *hi);
+    }
+    if (const Value* k = AsConstant(e)) {
+        const auto v = NumericValue(*k);
+        return v ? std::optional(std::make_pair(*v, *v)) : std::nullopt;
+    }
+    if (e.kind == BoundKind::Cast) {
+        return NumericRange(*e.children[0], input);
+    }
+    if (e.kind != BoundKind::Operator || e.children.empty()) {
+        return std::nullopt;
+    }
+    if (e.op == OperatorKind::Negate) {
+        const auto r = NumericRange(*e.children[0], input);
+        return r ? std::optional(std::make_pair(-r->second, -r->first)) : std::nullopt;
+    }
+    if (e.children.size() != 2 ||
+        (e.op != OperatorKind::Add && e.op != OperatorKind::Sub && e.op != OperatorKind::Mul)) {
+        return std::nullopt;
+    }
+    const auto a = NumericRange(*e.children[0], input), b = NumericRange(*e.children[1], input);
+    if (!a || !b) {
+        return std::nullopt;
+    }
+    if (e.op == OperatorKind::Add) {
+        return std::make_pair(a->first + b->first, a->second + b->second);
+    }
+    if (e.op == OperatorKind::Sub) {
+        return std::make_pair(a->first - b->second, a->second - b->first);
+    }
+    const double products[] = {a->first * b->first, a->first * b->second, a->second * b->first,
+                               a->second * b->second};
+    return std::make_pair(*std::min_element(products, products + 4),
+                          *std::max_element(products, products + 4));
+}
+
+// How many distinct values an expression over `input` takes. A column has its own count; a constant
+// one; what an expression of a column can take is bounded by what the function can return (a year
+// of a date column: the years between its bounds, not one per date; a comparison: two values;
+// a CASE of constants: those constants), else by the product of the distinct counts of the columns
+// it combines (capped by the rows).
+double ExpressionDistinct(const BoundExpr& e, const Estimate& input) {
+    const double rows = std::max(1.0, input.rows);
+    if (const BoundExpr* c = AsColumnRef(e)) {
+        return c->ordinal < input.columns.size() ? input.columns[c->ordinal].distinct : rows;
     }
     std::set<idx_t> refs;
     CollectColumnRefs(e, refs);
     if (refs.empty()) {
         return 1;
     }
+    const auto argument = [&](size_t i) { return ExpressionDistinct(*e.children.at(i), input); };
+    switch (e.kind) {
+    case BoundKind::Cast:
+        return argument(0);
+    case BoundKind::IsNull:
+    case BoundKind::InList:
+        return 2;
+    case BoundKind::Operator:
+        switch (e.op) {
+        case OperatorKind::Eq:
+        case OperatorKind::Ne:
+        case OperatorKind::Lt:
+        case OperatorKind::Le:
+        case OperatorKind::Gt:
+        case OperatorKind::Ge:
+        case OperatorKind::And:
+        case OperatorKind::Or:
+        case OperatorKind::Not:
+            return 3; // TRUE, FALSE, NULL
+        default:
+            break;
+        }
+        break;
+    case BoundKind::Function: {
+        const auto bounded = [&](double most) {
+            return std::max(1.0, std::min(argument(0), most));
+        };
+        switch (e.function) {
+        case FunctionId::Like:
+            return 3;
+        case FunctionId::Month:
+            return bounded(12);
+        case FunctionId::Day:
+            return bounded(31);
+        case FunctionId::Quarter:
+            return bounded(4);
+        case FunctionId::DayOfWeek:
+            return bounded(7);
+        case FunctionId::DayOfYear:
+            return bounded(366);
+        case FunctionId::Year: {
+            const BoundExpr* column = AsColumnRef(*e.children.at(0));
+            if (column != nullptr && column->ordinal < input.columns.size()) {
+                const ColumnEstimate& c = input.columns[column->ordinal];
+                const auto lo = c.min ? NumericValue(*c.min) : std::nullopt;
+                const auto hi = c.max ? NumericValue(*c.max) : std::nullopt;
+                if (lo && hi) { // days since 1970: the years the bounds span
+                    return bounded(std::floor((*hi - *lo) / 365.2425) + 2);
+                }
+            }
+            return argument(0);
+        }
+        case FunctionId::Upper:
+        case FunctionId::Lower:
+        case FunctionId::Substring:
+        case FunctionId::Length:
+        case FunctionId::Abs:
+        case FunctionId::Floor:
+        case FunctionId::Ceil:
+        case FunctionId::Round:
+            return argument(0); // never more values than the argument has
+        default:
+            break;
+        }
+        break;
+    }
+    case BoundKind::Case: {
+        // children = [when1, then1, ..., whenN, thenN, else]: with constant results the CASE can
+        // return no more values than there are distinct constants
+        std::vector<const BoundExpr*> results;
+        for (size_t i = 1; i + 1 < e.children.size(); i += 2) {
+            results.push_back(e.children[i].get());
+        }
+        results.push_back(e.children.back().get());
+        std::vector<Value> constants;
+        bool all_constant = true;
+        for (const BoundExpr* r : results) {
+            const Value* k = AsConstant(*r);
+            if (k == nullptr) {
+                all_constant = false;
+                break;
+            }
+            const bool seen = std::any_of(constants.begin(), constants.end(), [&](const Value& v) {
+                return v.IsNull() == k->IsNull() && (v.IsNull() || Value::Compare(v, *k) == 0);
+            });
+            if (!seen) {
+                constants.push_back(*k);
+            }
+        }
+        if (all_constant) {
+            return static_cast<double>(constants.size());
+        }
+        break;
+    }
+    default:
+        break;
+    }
     double product = 1;
     for (const idx_t r : refs) {
-        product *= r < input.columns.size() ? input.columns[r].distinct : std::max(1.0, input.rows);
-        product = std::min(product, std::max(1.0, input.rows));
+        product *= r < input.columns.size() ? input.columns[r].distinct : rows;
+        product = std::min(product, rows);
+    }
+    // an integer-valued expression takes no more values than its range holds integers
+    const TypeId id = e.type.id();
+    if (id == TypeId::Integer || id == TypeId::BigInt || id == TypeId::Date) {
+        if (const auto range = NumericRange(e, input)) {
+            product = std::min(product, std::floor(range->second - range->first) + 1);
+        }
     }
     return std::max(1.0, product);
 }

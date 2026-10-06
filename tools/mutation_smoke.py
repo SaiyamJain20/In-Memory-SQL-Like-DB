@@ -1089,6 +1089,23 @@ MUTATIONS = [
      'can_mask ? (mask[c] == 0 ? last',
      'can_mask ? (mask[c] == 0 ? false', None),
 
+    ('estimates: the years of a date column are one per date',
+     'src/planner/cardinality.cpp',
+     'return bounded(std::floor((*hi - *lo) / 365.2425) + 2);',
+     'return argument(0);', None),
+    ('estimates: an integer expression may take more values than its range holds',
+     'src/planner/cardinality.cpp',
+     'product = std::min(product, std::floor(range->second - range->first) + 1);',
+     'product = product + 0 * range->second;', None),
+    ('estimates: a CASE of constants may take as many values as it has rows',
+     'src/planner/cardinality.cpp',
+     'return static_cast<double>(constants.size());',
+     'return rows;', None),
+    ('estimates: a comparison may take as many values as it has rows',
+     'src/planner/cardinality.cpp',
+     'return 3; // TRUE, FALSE, NULL',
+     'return rows; // TRUE, FALSE, NULL', None),
+
     # ---- Phase 8: EXPLAIN ANALYZE ---------------------------------------------------------------
     ('explain analyze: the rows of streaming operators are not counted',
      'src/execution/pipeline.cpp',

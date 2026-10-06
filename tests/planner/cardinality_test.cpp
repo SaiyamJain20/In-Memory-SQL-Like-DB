@@ -562,6 +562,49 @@ TEST(CardinalityEstimates, JoinsAndAggregatesOfSyntheticSchemasAreCloseToTheTrut
     }
 }
 
+TEST(CardinalityEstimates, TheGroupsOfAnExpressionAreBoundedByWhatTheExpressionCanReturn) {
+    Rng rng(9);
+    Env env;
+    env.Run("CREATE TABLE ev (id INTEGER, d DATE, a INTEGER, b INTEGER, s VARCHAR)");
+    std::string values;
+    for (int i = 0; i < 6000; i++) {
+        // dates over seven years (2000-2006), a in 0..9, b in 0..99, s one of 40 words
+        const int day = static_cast<int>(RandBelow(rng, 2557));
+        values += (i ? "," : "") + std::string("(") + std::to_string(i) +
+                  ",DATE '2000-01-01' + INTERVAL '" + std::to_string(day) + "' DAY," +
+                  std::to_string(RandBelow(rng, 10)) + "," + std::to_string(RandBelow(rng, 100)) +
+                  ",'w" + std::to_string(RandBelow(rng, 40)) + "')";
+    }
+    env.Run("INSERT INTO ev VALUES " + values);
+    struct Case {
+        const char* group;
+        double actual; // distinct values of the expression
+        double most;   // an estimate above this is a miss
+    };
+    const Case cases[] = {
+        {"extract(year FROM d)", 7, 14},
+        {"extract(month FROM d)", 12, 12},
+        {"extract(day FROM d)", 31, 31},
+        {"a > 4", 2, 3},
+        {"CASE WHEN a < 3 THEN 'low' WHEN a < 7 THEN 'mid' ELSE 'high' END", 3, 3},
+        {"CASE WHEN a < 5 THEN 1 ELSE 0 END", 2, 2},
+        {"upper(s)", 40, 48},
+        {"substring(s FROM 1 FOR 2)", 4, 48},
+        {"s LIKE 'w1%'", 2, 3},
+        {"a + b", 109, 109 * 1.4},
+        {"a - b", 109, 109 * 1.4},
+        {"a * 3", 10, 14},
+        {"a + a", 10, 14},
+    };
+    for (const Case& c : cases) {
+        const std::string sql =
+            std::string("SELECT ") + c.group + ", count(*) FROM ev GROUP BY " + c.group;
+        const double estimate = env.Estimated(sql);
+        EXPECT_LE(estimate, c.most + 1e-9) << c.group << ": estimated " << estimate << " groups";
+        EXPECT_GE(estimate, c.actual * 0.5) << c.group << ": estimated " << estimate << " groups";
+    }
+}
+
 TEST(CardinalityEstimates, EveryOperatorOfAPlanHasAnEstimateWithTheRightColumnCount) {
     Env env;
     env.Run("CREATE TABLE t (a INTEGER, b VARCHAR)");
