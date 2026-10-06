@@ -74,13 +74,19 @@ TEST(Kill9, AKilledWriterLeavesEveryAcknowledgedRowAndNothingElse) {
             ChildMain(dir, fds[1]);
         }
         close(fds[1]);
-        usleep(20000 + rng() % 150000);
+        // let the child get going whatever the machine's load (at least 100 acknowledged rows, which
+        // is several checkpoints at this threshold), then kill it at a random moment
+        int64_t acked = 0, last = -1;
+        while (acked < 100 &&
+               read(fds[0], &last, sizeof(last)) == static_cast<ssize_t>(sizeof(last))) {
+            acked = last + 1;
+        }
+        usleep(static_cast<useconds_t>(rng() % 60000));
         kill(pid, SIGKILL);
         int status = 0;
         ASSERT_EQ(waitpid(pid, &status, 0), pid);
         ASSERT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL)
             << "the child ended on its own (status " << status << "): it must be killed";
-        int64_t acked = 0, last = -1;
         while (read(fds[0], &last, sizeof(last)) == static_cast<ssize_t>(sizeof(last))) {
             acked = last + 1;
         }
@@ -110,8 +116,9 @@ TEST(Kill9, AKilledWriterLeavesEveryAcknowledgedRowAndNothingElse) {
         // and it carries on from there
         ASSERT_TRUE(conn.Query("INSERT INTO t VALUES (-1, 'after recovery')").ok());
     }
-    EXPECT_GT(total_acked, 100) << "the child should have committed plenty before each kill";
-    EXPECT_GT(kills_in_checkpoints_or_later, 5) << "some recoveries should start from a checkpoint";
+    EXPECT_GE(total_acked, 25 * 100) << "the child committed at least 100 rows before every kill";
+    EXPECT_GT(kills_in_checkpoints_or_later, 20)
+        << "nearly every recovery starts from a checkpoint";
     std::filesystem::remove_all(root);
 }
 
