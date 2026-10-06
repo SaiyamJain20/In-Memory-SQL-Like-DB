@@ -31,6 +31,11 @@ class AggregateState {
     // Row i (< count) of `arg` (null for COUNT(*); any vector format) updates group groups[i].
     virtual void Update(const uint32_t* groups, const Vector* arg, idx_t count) = 0;
 
+    // Row i of `arg` updates the one implicit group 0 (an aggregate without GROUP BY). The default
+    // routes through Update(); states override it with vectorised kernels for Flat, all-valid
+    // input.
+    virtual void UpdateUngrouped(const Vector* arg, idx_t count);
+
     // Merges group s of `src` (a state of the same spec) into group dst_groups[s], for every
     // s < src_groups. The destination must already be Resize()d to cover the targets.
     virtual void Combine(const AggregateState& src, const uint32_t* dst_groups,

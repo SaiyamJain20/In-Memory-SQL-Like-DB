@@ -336,3 +336,94 @@ honest numbers recorded in `BENCHMARKS.md`).
 **CI (GitHub Actions, run 37407175257, the last commit that changed code)** - all 8 jobs green: format,
 gcc-13 and clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job; every test
 job generated the TPC-H data and required the 12 differential tests (CDB_REQUIRE_TPCH=1).
+
+## 2026-10-06 — Phase 5: Compression and SIMD kernels
+
+**What changed**
+- Per-segment encodings, chosen when a row group is sealed
+  ([ADR 0007](adr/0007-segment-encodings-and-simd-dispatch.md)): constant, run-length, bit-packed
+  integers (frame of reference, or delta for non-decreasing vectors), scaled doubles (`n / 10^e`,
+  checked bit for bit so they are lossless, with a per-vector raw fallback) and dictionary strings
+  (scans hand back DICTIONARY vectors over one shared dictionary). An encoding is used only if it is
+  at most 70% of the raw size; the open tail of a table stays raw; `SetCompressionEnabled` /
+  `CDB_NO_COMPRESSION` switch it off. Bit unpacking is specialised per width (compile-time
+  constants, no loop).
+- AVX2 kernels in `src/kernels/` with runtime CPU dispatch and a scalar fallback (`CDB_NO_SIMD`,
+  per-function `target("avx2")`, never `-march=native`): compare-to-selection (int32 / int64 /
+  double, NaN-as-largest and -0.0 preserved), SUM / MIN / MAX, scaled-double decode, integer hash and
+  hash-combine.
+- Engine integration: `Select` runs `column <op> constant` through the compare kernel; ungrouped
+  SUM / MIN / MAX use the aggregate kernels (integer `SUM` only where a left-to-right checked sum
+  provably cannot overflow either, so overflow errors do not depend on the CPU); hashing hashes each
+  distinct dictionary entry once and short strings from their 16 inline bytes; the hash-join probe
+  looks every bucket up first and prefetches (hash and chain pointer now live in one entry); decode and
+  gather write into unzeroed storage (`Vector::FlatDataForOverwrite`, `SelectionVector::Uninitialized`).
+- Tooling: `bench/kernel_bench.cpp` (every kernel, scalar vs AVX2), `cdb_tpch --no-compression` and
+  stored size, 57 new mutants (and `--check` repaired a Phase 4 mutant whose anchor became ambiguous).
+
+**Verified**
+| Check | Result |
+|---|---|
+| `tools/verify.sh`: debug / asan (+UBSan) / tsan / release / clang-18 | 597 / 597 / 597 / 595 / 597 passing (Phase 4: 552 / 552 / 552 / 550 / 552) |
+| Bit packing: every width 0-64 x lengths 0..2048 round trip, guard bytes after the stream untouched, high input bits ignored | pass |
+| Every encoding x every data shape (constant, two values, ascending, jumps, descending, narrow around a huge base, runs, random, extremes; money, rates, integers, NaN / infinity / -0.0 / denormals, long strings) x 0 / 20% / 100% NULLs x lengths 1, 2, 63, 2047, 2048, 2049, 4096, 5000, 10000, scanned in order and out of order, plus 6 threads scanning shared segments | bit-identical to the raw values |
+| Kernels vs their scalar reference: every length 0-70 (1-70 for the aggregates) plus the 127-2048 vector boundaries, special values (NaN, -0.0, `INT_MIN`, overflow edges), SIMD on and off | identical (`SUM(DOUBLE)` is re-associated: compared with a tolerance, and exactly for exactly representable inputs) |
+| **Whole suite with `CDB_NO_SIMD=1`, with `CDB_NO_COMPRESSION=1`, and with both** (release; includes the DuckDB-generated SQL suite and TPC-H SF0.01) | 595 / 595 in each configuration: results do not depend on the CPU or the storage layout |
+| **TPC-H vs DuckDB with compression and AVX2 on** (12 queries): SF0.01 in the gate and CI, SF0.1 and SF1 by hand (`CDB_TPCH_SF`) | identical (rows, order; doubles within 1e-9 relative) |
+| `tools/mutation_smoke.py`: 57 new mutants (bit packing, every encoding, segment scan, the AVX2 select / decode / aggregate / hash kernels, executor and aggregate integration, dictionary hashing) plus the 103 older ones re-run | **160 / 160 killed.** First run of the new ones: 49 / 57 - two survivors were real test gaps and six did not compile under `-Werror` (below). |
+
+**Performance** (tables, machine, build and commands in [BENCHMARKS](BENCHMARKS.md); GCC 13.3 `-O3`, one
+thread, DuckDB 1.5.6 pinned to one thread):
+- Kernels, scalar -> AVX2 or width-specialised, per row: unpack 1.4-4.3x, select 3.2-6.3x, scaled-double
+  decode 4.0x, SUM 1.6-8.2x, MIN+MAX 3.9-5.4x, hash 1.9-2.3x.
+- Memory, TPC-H SF1 stored columns: 1408 MB -> 612 MB (**2.3x**; lineitem 994.7 -> 337.5 MB, **2.9x**);
+  peak RSS after loading 1498 -> 720 MB.
+- TPC-H SF1 geometric mean against DuckDB: **3.1x -> 2.6x** (2.4x with compression off); SF0.1 1.7x,
+  unchanged. Compression itself costs 0-30% on scan-bound queries (decoding versus a zero-copy scan:
+  Q6 35.6 -> 44.3 ms); most of the SF1 gain comes from the join-probe prefetching and cheaper hashing
+  (Q9 2488 -> 1420 ms), which also confirms the Phase 4 hypothesis that the SF1 join gap was memory latency.
+
+**Found by the process**
+1. **UBSan in the gate** caught `BitUnpack(count = 0)` calling `memset` / `memcpy` with a null pointer,
+   which is undefined behaviour even for zero bytes (the debug and release builds had passed). Empty
+   segments reach it, so the function now returns early; the test, which deliberately includes length 0,
+   was left as it was.
+2. **Mutants found two real test gaps:** nothing exercised scaled-double offsets of 53-54 bits (the
+   "OR into the mantissa of 2^52" conversion is only exact below 2^52), and nothing pinned the exact
+   dictionary limit (2,047 distinct strings, so a NULL entry always fits). Both have tests now. Six
+   more mutants did not compile (an unused variable or parameter, a shift by 64) and were rewritten as
+   equivalent bugs that do.
+3. **Measuring deleted or rewrote code:** an AVX2 integer decode was slower (110 vs 83 ps/row) than the
+   loop the compiler already vectorises and was removed; the first AVX2 MIN/MAX was 3x *slower* than
+   scalar because the accumulators were kept in stack slots, and 5.4x faster once they stayed in
+   registers.
+4. **SIMD must not change SQL-visible behaviour.** A vector `SUM(BIGINT)` adds in four lanes, so it can
+   overflow where the sequential sum does not (`M, -M, 0, 0, ...`). The kernel is conservative, the
+   ungrouped fast path is taken only when `max|x| * n` is provably in range, and a test pins the
+   case; `SUM(DOUBLE)` is the one deliberately re-associated reduction.
+5. Two lessons about the tooling. `--check` found that adding a second `if (group_types_.empty())`
+   to `GroupTable::Sink` made an older anchor ambiguous (it is now pinned). And building another
+   preset while the mutation script runs compiles the *mutant* (it edits `src/` in place): I did
+   exactly that and got false `StringT` / `ExecutorDifferential` failures; the rule is in CLAUDE.md.
+
+**Known gaps / deliberate limits**
+- **Predicates are not evaluated on compressed data.** Scans decode, then compare; compression pays
+  in memory and in hashing, not yet in filtering (RLE / dictionary-code predicates, FSST, ALP
+  exceptions and sorted dictionaries are not implemented). The roadmap's SIMD string-prefix compare
+  was not done either; string predicates are unchanged.
+- Decoding costs 0-30% on scan-bound queries (above); `CDB_NO_COMPRESSION` is the escape hatch.
+- Only AVX2 + scalar. CI runs x86-64 machines with AVX2, so the scalar path is tested by forcing it
+  (`CDB_NO_SIMD`, whole suite green above), not on a CPU without AVX2; there is no AVX-512 or NEON path.
+- The open tail of a table (the unsealed last row group) is never compressed.
+- SF1 multi-way joins are still 6.3-8.4x DuckDB (Q7, Q8, Q9): row-wise payload storage on the build
+  side and a `LIKE` selectivity estimate are the next steps (a hypothesis, not yet measured).
+- Still single-threaded (Phase 6), including CSV loading.
+- `SUM(DOUBLE)` over a flat vector re-associates the additions, so its last bits can differ from a
+  left-to-right sum (deterministic for a given input).
+
+**Phase 5 exit criteria met**: round-trip property tests for every encoding; before/after numbers for
+each kernel in `BENCHMARKS.md`; memory footprint measured on TPC-H lineitem (2.9x).
+
+**CI (GitHub Actions, run 37421340867, the last commit that changed code)** - all 8 jobs green: format,
+gcc-13 and clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job; every test
+job generated the TPC-H data and required the 12 differential tests (CDB_REQUIRE_TPCH=1).

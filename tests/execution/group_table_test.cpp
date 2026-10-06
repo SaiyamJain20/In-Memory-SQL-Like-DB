@@ -6,6 +6,8 @@
 #include "execution/key_index.h"
 
 #include "exec_test_util.h"
+#include "kernels/cpu.h"
+#include "kernels/kernel_test_util.h"
 
 #include <gtest/gtest.h>
 
@@ -711,6 +713,149 @@ TEST(GroupTable, SumOverflowIsAnErrorNotAWrap) {
         EXPECT_NO_THROW(t.Sink(none, {&c.column(0)}, 3));
         EXPECT_EQ(ReadAll(t).begin()->second[0],
                   Value::BigInt(std::numeric_limits<int64_t>::max()));
+    }
+}
+
+namespace {
+
+// Feeds `chunks` of all-valid Flat values to an aggregate without GROUP BY.
+std::vector<Value> RunUngrouped(const std::vector<AggregateSpec>& specs, LogicalType type,
+                                const std::vector<std::vector<Value>>& chunks) {
+    GroupTable table({}, specs);
+    DataChunk none;
+    none.Initialize({});
+    for (const auto& values : chunks) {
+        DataChunk in;
+        in.Initialize({type});
+        for (idx_t i = 0; i < values.size(); i++) {
+            in.SetValue(0, i, values[i]);
+        }
+        in.SetCardinality(values.size());
+        std::vector<const Vector*> args(specs.size(), &in.column(0));
+        table.Sink(none, args, values.size());
+    }
+    return ReadAll(table).begin()->second;
+}
+
+} // namespace
+
+TEST(GroupTable, UngroupedAggregatesOverFlatAllValidInputMatchSequentialSemantics) {
+    // These inputs take the vectorised kernels (Flat, no NULLs); the answers must be the ones a
+    // plain row-at-a-time loop gives, with SIMD on and off.
+    Rng rng(31);
+    for (const bool simd : {true, false}) {
+        const test::ScopedSimd mode(simd);
+        for (const LogicalType type :
+             {LogicalType::Integer(), LogicalType::BigInt(), LogicalType::Date()}) {
+            for (int round = 0; round < 30; round++) {
+                std::vector<std::vector<Value>> chunks;
+                std::vector<Value> all;
+                const size_t nchunks = 1 + RandBelow(rng, 5);
+                for (size_t c = 0; c < nchunks; c++) {
+                    std::vector<Value> values;
+                    const idx_t n =
+                        std::vector<idx_t>{1, 7, 8, 9, 100, 2047, 2048}[RandBelow(rng, 7)];
+                    for (idx_t i = 0; i < n; i++) {
+                        const int64_t v =
+                            round % 3 == 0
+                                ? static_cast<int64_t>(RandBelow(rng, 1000000)) - 500000
+                                : static_cast<int64_t>(rng()) >> (16 + RandBelow(rng, 16));
+                        values.push_back(type.id() == TypeId::BigInt ? Value::BigInt(v)
+                                         : type.id() == TypeId::Integer
+                                             ? Value::Integer(static_cast<int32_t>(v))
+                                             : Value::Date(date_t{static_cast<int32_t>(v)}));
+                        all.push_back(values.back());
+                    }
+                    chunks.push_back(std::move(values));
+                }
+                std::vector<AggregateSpec> specs = {{AggregateKind::Min, type, false},
+                                                    {AggregateKind::Max, type, false}};
+                if (type.id() != TypeId::Date) {
+                    specs.push_back({AggregateKind::Sum, type, false});
+                }
+                const std::vector<Value> got = RunUngrouped(specs, type, chunks);
+                Value lo = all[0], hi = all[0];
+                int64_t sum = 0;
+                for (const Value& v : all) {
+                    lo = Value::Compare(v, lo) < 0 ? v : lo;
+                    hi = Value::Compare(v, hi) > 0 ? v : hi;
+                    if (type.id() == TypeId::Integer) {
+                        sum += v.GetInteger();
+                    } else if (type.id() == TypeId::BigInt) {
+                        sum += v.GetBigInt();
+                    }
+                }
+                ASSERT_EQ(got[0], lo) << type.ToString() << (simd ? " simd" : " scalar");
+                ASSERT_EQ(got[1], hi);
+                if (type.id() != TypeId::Date) {
+                    ASSERT_EQ(got[2], Value::BigInt(sum));
+                }
+            }
+        }
+    }
+}
+
+TEST(GroupTable, UngroupedSumOverflowFollowsTheSequentialRuleWithAndWithoutSimd) {
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
+    for (const bool simd : {true, false}) {
+        const test::ScopedSimd mode(simd);
+        const auto run = [&](std::vector<int64_t> values) {
+            std::vector<Value> v;
+            for (const int64_t x : values) {
+                v.push_back(Value::BigInt(x));
+            }
+            return RunUngrouped({sum}, LogicalType::BigInt(), {v});
+        };
+        // the running sum overflows at the second value even though the total would fit again
+        EXPECT_THROW(run({kMax, 1, -1}), Error) << (simd ? "simd" : "scalar");
+        EXPECT_THROW(run({kMax, kMax}), Error);
+        EXPECT_THROW(run({std::numeric_limits<int64_t>::min(), -1}), Error);
+        // exactly at the limit is fine
+        EXPECT_EQ(run({kMax - 1, 1})[0], Value::BigInt(kMax));
+        EXPECT_EQ(run({kMax, -kMax, kMax / 2})[0], Value::BigInt(kMax / 2));
+        // across chunks: the second chunk starts from the first one's total
+        std::vector<Value> first = {Value::BigInt(kMax - 5)},
+                           second = {Value::BigInt(10), Value::BigInt(-10)};
+        EXPECT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), {first, second}), Error);
+    }
+}
+
+namespace {
+// Cuts a long column into chunks of at most one vector.
+std::vector<std::vector<Value>> Split(const std::vector<Value>& values) {
+    std::vector<std::vector<Value>> out;
+    for (size_t at = 0; at < values.size(); at += kVectorSize) {
+        out.emplace_back(values.begin() + static_cast<long>(at),
+                         values.begin() +
+                             static_cast<long>(std::min<size_t>(values.size(), at + kVectorSize)));
+    }
+    return out;
+}
+} // namespace
+
+TEST(GroupTable, UngroupedDoubleSumIsCloseToSequentialAndExactForRepresentableValues) {
+    Rng rng(32);
+    for (const bool simd : {true, false}) {
+        const test::ScopedSimd mode(simd);
+        std::vector<Value> values;
+        double sequential = 0, exact_sum = 0;
+        std::vector<Value> exact_values;
+        for (int i = 0; i < 5000; i++) {
+            const double x =
+                static_cast<double>(static_cast<int64_t>(RandBelow(rng, 2000000)) - 1000000) /
+                100.0;
+            values.push_back(Value::Double(x));
+            sequential += x;
+            const double e = static_cast<double>(RandBelow(rng, 100)) * 0.25;
+            exact_values.push_back(Value::Double(e));
+            exact_sum += e;
+        }
+        const AggregateSpec sum{AggregateKind::Sum, LogicalType::Double(), false};
+        const double got = RunUngrouped({sum}, LogicalType::Double(), Split(values))[0].GetDouble();
+        EXPECT_NEAR(got, sequential, 1e-6);
+        EXPECT_EQ(RunUngrouped({sum}, LogicalType::Double(), Split(exact_values))[0],
+                  Value::Double(exact_sum));
     }
 }
 

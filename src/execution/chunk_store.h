@@ -40,6 +40,12 @@ class ChunkStore {
     // must be Initialize()d with types()).
     void ReadRange(idx_t first, idx_t n, DataChunk& out) const;
 
+    // Address of the stored cell (column, row), for prefetching: the element in the flat data.
+    const void* CellAddress(idx_t column, idx_t row) const {
+        const Vector& v = chunks_[row >> kShift].column(column);
+        return v.FlatBytes() + (row & (kVectorSize - 1)) * types_[column].width();
+    }
+
     // The chunks, for kernels that walk the stored data directly.
     idx_t ChunkCount() const noexcept { return chunks_.size(); }
     const DataChunk& chunk(idx_t i) const { return chunks_[i]; }

@@ -196,6 +196,9 @@ TEST(ColumnBuilder, SegmentStatsMatchTheData) {
 // ------------------------------------------------------------------ Scan() views
 
 TEST(ColumnSegment, ScanIsZeroCopyAndStable) {
+    // Zero-copy scans are a property of RAW segments; an encoded segment decodes into the output
+    // (these values are 0..4095 and would otherwise be bit-packed), so compression is off here.
+    const test::ScopedCompression raw_layout(false);
     ColumnBuilder b(LogicalType::Integer(), 4096);
     std::vector<Value> vals;
     for (int i = 0; i < 4096; i++)

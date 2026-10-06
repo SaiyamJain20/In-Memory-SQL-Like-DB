@@ -1,5 +1,7 @@
 #include "storage/column_builder.h"
 
+#include "storage/encoding.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -75,6 +77,7 @@ std::shared_ptr<ColumnSegment> ColumnBuilder::Seal() {
     if (heap_ != nullptr) {
         heap_->Seal();
     }
+    segment = CompressSegment(std::move(segment)); // sealed segments are immutable: encode them
     data_.reset();
     validity_ = ValidityMask(0);
     heap_ = type_.id() == TypeId::Varchar ? std::make_shared<StringHeap>() : nullptr;

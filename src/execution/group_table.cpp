@@ -27,6 +27,12 @@ void GroupTable::Sink(const DataChunk& keys, const std::vector<const Vector*>& a
         return;
     }
     CDB_CHECK(args.size() == specs_.size());
+    if (group_types_.empty()) { // no GROUP BY: one implicit group, no hashing at all
+        for (size_t a = 0; a < states_.size(); a++) {
+            states_[a]->UpdateUngrouped(args[a], count);
+        }
+        return;
+    }
     ids_.resize(count);
     index_.FindOrInsert(keys, count, ids_.data());
     for (size_t a = 0; a < states_.size(); a++) {

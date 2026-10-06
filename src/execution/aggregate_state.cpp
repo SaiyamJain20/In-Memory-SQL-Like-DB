@@ -3,12 +3,29 @@
 #include "common/error.h"
 #include "execution/key_index.h"
 #include "execution/type_dispatch.h"
+#include "kernels/aggregate.h"
 
 #include <cmath>
 
 namespace cdb {
 
+void AggregateState::UpdateUngrouped(const Vector* arg, idx_t count) {
+    thread_local std::vector<uint32_t> zeros;
+    if (zeros.size() < count) {
+        zeros.assign(count, 0);
+    }
+    Update(zeros.data(), arg, count);
+}
+
 namespace {
+
+// The contiguous data of a Flat vector with no NULLs, or null (the vectorised paths need exactly
+// that).
+template <class T> const T* FlatAllValid(const Vector* v) {
+    return v != nullptr && v->format() == VectorFormat::Flat && v->Validity().AllValid()
+               ? v->FlatData<T>()
+               : nullptr;
+}
 
 [[noreturn]] void SumOverflow() {
     throw Error(ErrorCode::Execution, "Out of Range: overflow in SUM");
@@ -109,6 +126,40 @@ template <class In> class SumIntState final : public AggregateState {
             has_[g] = 1;
         }
     }
+    void UpdateUngrouped(const Vector* arg, idx_t count) override {
+        if constexpr (std::is_same_v<In, int32_t> || std::is_same_v<In, int64_t>) {
+            const In* data = FlatAllValid<In>(arg);
+            if (data != nullptr && count > 0) {
+                // Use the kernel only when a left-to-right checked sum could not overflow either,
+                // so overflow errors are identical with and without SIMD: |every prefix| <= max|x|
+                // * count.
+                In lo, hi;
+                if constexpr (std::is_same_v<In, int32_t>) {
+                    kernels::MinMaxInt32(data, count, &lo, &hi);
+                } else {
+                    kernels::MinMaxInt64(data, count, &lo, &hi);
+                }
+                const uint64_t bound = std::max<uint64_t>(
+                    lo < 0 ? 0 - static_cast<uint64_t>(lo) : static_cast<uint64_t>(lo),
+                    hi < 0 ? 0 - static_cast<uint64_t>(hi) : static_cast<uint64_t>(hi));
+                const uint64_t acc = sums_[0] < 0 ? 0 - static_cast<uint64_t>(sums_[0])
+                                                  : static_cast<uint64_t>(sums_[0]);
+                const uint64_t room = (uint64_t{1} << 63) - 1;
+                if (bound <= (room - std::min(acc, room)) / count) {
+                    int64_t total = sums_[0];
+                    if constexpr (std::is_same_v<In, int32_t>) {
+                        total += kernels::SumInt32(data, count);
+                    } else if (!kernels::AddSumInt64(data, count, &total)) {
+                        CDB_UNREACHABLE("a sum bounded by max|x| * n cannot overflow");
+                    }
+                    sums_[0] = total;
+                    has_[0] = 1;
+                    return;
+                }
+            }
+        }
+        AggregateState::UpdateUngrouped(arg, count);
+    }
     void Combine(const AggregateState& src, const uint32_t* dst, idx_t n) override {
         const auto& s = static_cast<const SumIntState&>(src);
         for (idx_t g = 0; g < n; g++) {
@@ -142,6 +193,17 @@ class SumDoubleState final : public AggregateState {
     void Resize(idx_t groups) override {
         sums_.resize(groups, 0.0);
         has_.resize(groups, 0);
+    }
+    // The vectorised sum re-associates the additions (several partial sums), so results can differ
+    // in the last bits from a left-to-right sum; either way they are deterministic for a given
+    // input.
+    void UpdateUngrouped(const Vector* arg, idx_t count) override {
+        if (const double* data = FlatAllValid<double>(arg); data != nullptr && count > 0) {
+            sums_[0] += kernels::SumDouble(data, count);
+            has_[0] = 1;
+            return;
+        }
+        AggregateState::UpdateUngrouped(arg, count);
     }
     void Update(const uint32_t* groups, const Vector* arg, idx_t count) override {
         UnifiedFormat u;
@@ -229,6 +291,23 @@ template <class T, bool kMax> class MinMaxState final : public AggregateState {
     void Resize(idx_t groups) override {
         values_.resize(groups);
         has_.resize(groups, 0);
+    }
+    // Integer and date columns: one vectorised pass for both extremes (exact, no ordering
+    // questions).
+    void UpdateUngrouped(const Vector* arg, idx_t count) override {
+        if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t>) {
+            if (const T* data = FlatAllValid<T>(arg); data != nullptr && count > 0) {
+                T lo, hi;
+                if constexpr (std::is_same_v<T, int32_t>) {
+                    kernels::MinMaxInt32(data, count, &lo, &hi);
+                } else {
+                    kernels::MinMaxInt64(data, count, &lo, &hi);
+                }
+                Offer(0, kMax ? hi : lo);
+                return;
+            }
+        }
+        AggregateState::UpdateUngrouped(arg, count);
     }
     void Update(const uint32_t* groups, const Vector* arg, idx_t count) override {
         UnifiedFormat u;

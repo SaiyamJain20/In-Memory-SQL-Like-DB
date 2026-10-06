@@ -23,9 +23,15 @@ struct JoinGlobalState final : GlobalSinkState {
     std::mutex mutex;
     ChunkStore payload; // build rows (all right columns)
     ChunkStore keys;    // their evaluated join keys, same row ids (no columns for key-less joins)
-    std::vector<uint64_t> hashes;
+    // One entry per build row: its hash and the next row of its bucket's chain, side by side so
+    // that following a chain touches one cache line per row, not two.
+    struct Entry {
+        uint64_t hash;
+        uint32_t next; // next build row in the chain, or kNone
+        uint32_t pad;
+    };
+    std::vector<Entry> entries;
     std::vector<uint32_t> heads; // bucket -> first build row, or kNone
-    std::vector<uint32_t> next;  // build row -> next row in its chain
     uint64_t mask = 0;
 };
 
@@ -45,6 +51,8 @@ struct ProbeState final : OperatorState {
     DataChunk key_chunk;
     std::optional<KeyComparator> comparator;
     std::vector<uint64_t> hashes;
+    std::vector<uint32_t>
+        first; // per probe row: head of its bucket's chain (kNone if none/NULL key)
     std::vector<uint8_t> key_ok; // probe row has no NULL key
     std::vector<uint8_t> matched;
 
@@ -190,14 +198,19 @@ void PhysicalHashJoin::Finalize(GlobalSinkState& global) {
         return; // nested loop: every build row is a candidate, no index needed
     }
     CDB_CHECK(g.keys.Count() == n);
-    g.hashes.resize(n);
+    g.entries.resize(n);
     std::vector<const Vector*> cols(right_keys_.size());
+    uint64_t chunk_hashes[kVectorSize];
     for (idx_t c = 0; c < g.keys.ChunkCount(); c++) {
         const DataChunk& chunk = g.keys.chunk(c);
         for (idx_t k = 0; k < cols.size(); k++) {
             cols[k] = &chunk.column(k);
         }
-        HashColumns(cols.data(), cols.size(), chunk.size(), g.hashes.data() + c * kVectorSize);
+        HashColumns(cols.data(), cols.size(), chunk.size(), chunk_hashes);
+        for (idx_t i = 0; i < chunk.size(); i++) {
+            g.entries[c * kVectorSize + i].hash = chunk_hashes[i];
+            g.entries[c * kVectorSize + i].pad = 0;
+        }
     }
     idx_t buckets = 16;
     while (buckets < 2 * n) {
@@ -205,11 +218,10 @@ void PhysicalHashJoin::Finalize(GlobalSinkState& global) {
     }
     g.mask = buckets - 1;
     g.heads.assign(buckets, kNone);
-    g.next.assign(n, kNone);
     // Insert in reverse so each chain lists rows in build order.
     for (idx_t row = n; row-- > 0;) {
-        uint32_t& head = g.heads[g.hashes[row] & g.mask];
-        g.next[row] = head;
+        uint32_t& head = g.heads[g.entries[row].hash & g.mask];
+        g.entries[row].next = head;
         head = static_cast<uint32_t>(row);
     }
 }
@@ -230,6 +242,32 @@ std::unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(GlobalSinkStat
     joined.insert(joined.end(), right_types_.begin(), right_types_.end());
     s->joined.Initialize(joined);
     return s;
+}
+
+// The probe loop's expensive part is memory latency: bucket head -> chain entry -> key cells are
+// dependent loads from tables much larger than the cache, one probe row after another. Looking
+// every row's bucket up front, and prefetching what the candidates need, lets those misses overlap
+// (the CPU keeps ~10-20 in flight) instead of being paid one at a time.
+void Prefetch(ProbeState& st, const JoinGlobalState& build, idx_t n) {
+    constexpr idx_t kAhead = 16;
+    st.first.resize(n);
+    for (idx_t i = 0; i < n; i++) {
+        if (i + kAhead < n && st.key_ok[i + kAhead]) {
+            __builtin_prefetch(&build.heads[st.hashes[i + kAhead] & build.mask]);
+        }
+        st.first[i] = st.key_ok[i] ? build.heads[st.hashes[i] & build.mask] : kNone;
+    }
+    const idx_t key_columns = build.keys.ColumnCount();
+    for (idx_t i = 0; i < n; i++) {
+        const uint32_t b = st.first[i];
+        if (b == kNone) {
+            continue;
+        }
+        __builtin_prefetch(&build.entries[b]);
+        for (idx_t c = 0; c < key_columns; c++) {
+            __builtin_prefetch(build.keys.CellAddress(c, b));
+        }
+    }
 }
 
 OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& input,
@@ -267,6 +305,7 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
             }
             HashColumns(cols.data(), cols.size(), n, st.hashes.data());
             st.comparator.emplace(cols, /*nulls_equal=*/false);
+            Prefetch(st, build, n);
         }
     }
 
@@ -280,8 +319,7 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
                 if (left_keys_.empty()) {
                     st.chain = build_rows > 0 ? 0 : kNone;
                 } else {
-                    st.chain =
-                        st.key_ok[st.pos] ? build.heads[st.hashes[st.pos] & build.mask] : kNone;
+                    st.chain = st.first[st.pos];
                 }
             }
             while (st.chain != kNone && st.probe_rows.size() < kVectorSize) {
@@ -292,8 +330,9 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
                     st.build_rows.push_back(b);
                     continue;
                 }
-                st.chain = build.next[b];
-                if (build.hashes[b] == st.hashes[st.pos] &&
+                const JoinGlobalState::Entry& entry = build.entries[b];
+                st.chain = entry.next;
+                if (entry.hash == st.hashes[st.pos] &&
                     st.comparator->StoredEqualsInput(build.keys, b, st.pos)) {
                     st.probe_rows.push_back(static_cast<uint32_t>(st.pos));
                     st.build_rows.push_back(b);
@@ -315,7 +354,7 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
                 st.joined
                     .Reset(); // Gather() only ever marks rows invalid: start from a clean chunk
             }
-            SelectionVector left_sel(pairs);
+            SelectionVector left_sel = SelectionVector::Uninitialized(pairs);
             for (idx_t j = 0; j < pairs; j++) {
                 left_sel.Set(j, st.probe_rows[j]);
             }

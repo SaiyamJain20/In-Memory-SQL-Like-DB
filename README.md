@@ -4,14 +4,17 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phases 0–4 of 9 complete).** The engine runs SQL end to end: a
+> **Status: early development (Phases 0–5 of 9 complete).** The engine runs SQL end to end: a
 > hand-written parser and binder, a rule-based optimizer, a push-based vectorized executor
-> (hash aggregation, hash joins, sort/top-N) over columnar storage with zone-map pruning. It runs
-> the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on all of them at
-> SF0.01, SF0.1 and SF1**. It is single-threaded so far: on one thread the geometric mean over
-> those queries is 1.7x DuckDB's time at SF0.1 and 3.1x at SF1 (the multi-way joins are the weak
-> spot, up to 11x). Compression and SIMD (Phase 5), parallelism (Phase 6), persistence (Phase 7)
-> and subqueries/statistics (Phase 8) are still ahead. Every number is in
+> (hash aggregation, hash joins, sort/top-N) over compressed columnar storage (bit-packing, RLE,
+> dictionaries, lossless scaled doubles) with zone-map pruning and AVX2 kernels behind runtime CPU
+> dispatch. It runs the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on
+> all of them at SF0.01, SF0.1 and SF1**; the whole test suite passes unchanged with SIMD or
+> compression switched off. TPC-H SF1 takes 2.3x less memory (lineitem 2.9x). It is single-threaded
+> so far: on one thread the geometric mean over those queries is 1.7x DuckDB's time at SF0.1 and 2.6x
+> at SF1 (the multi-way joins are the weak spot, up to 8.4x). Parallelism (Phase 6), persistence
+> (Phase 7) and
+> subqueries/statistics (Phase 8) are still ahead. Every number is in
 > [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and command; see the
 > [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
 

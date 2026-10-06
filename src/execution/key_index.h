@@ -12,7 +12,8 @@ template <class T> inline bool KeyEquals(const T& a, const T& b) noexcept {
     if constexpr (std::is_same_v<T, double>) {
         return a == b || (a != a && b != b);
     } else if constexpr (std::is_same_v<T, string_t>) {
-        return a.view() == b.view();
+        return a ==
+               b; // length + prefix in one compare, then the inline tail or the out-of-line bytes
     } else {
         return a == b;
     }
@@ -58,6 +59,10 @@ class KeyIndex {
     void EnsureCapacity(idx_t extra);
 
     ChunkStore keys_;
+    // Scratch for FindOrInsert, kept between calls so a hot loop does not allocate (and zero-fill).
+    std::vector<uint64_t> scratch_hashes_;
+    std::vector<sel_t> scratch_pending_;
+    std::vector<const Vector*> scratch_columns_;
     std::vector<uint64_t> hashes_; // per id
     std::vector<uint32_t> slots_;  // 0 = empty, otherwise id + 1
     uint64_t mask_ = 0;

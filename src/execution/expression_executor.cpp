@@ -1,5 +1,7 @@
 #include "execution/expression_executor.h"
 
+#include "kernels/select.h"
+
 #include "common/assert.h"
 #include "common/error.h"
 #include "common/string_ops.h"
@@ -117,7 +119,7 @@ struct Input {
 
 // Rows `rows[0..n)` (positions within `in`) as a new Input; `storage` keeps the composed selection.
 Input Subset(const Input& in, const sel_t* rows, idx_t n, SelectionVector& storage) {
-    storage = SelectionVector(std::max<idx_t>(n, 1));
+    storage = SelectionVector::Uninitialized(std::max<idx_t>(n, 1));
     for (idx_t j = 0; j < n; j++) {
         storage.Set(j, in.sel ? (*in.sel)[rows[j]] : rows[j]);
     }
@@ -251,8 +253,83 @@ void CompareExecuteT(OperatorKind op, const Vector& l, const Vector& r, Vector& 
     }
 }
 
+kernels::CmpOp ToCmpOp(OperatorKind op) {
+    switch (op) {
+    case OperatorKind::Eq:
+        return kernels::CmpOp::Eq;
+    case OperatorKind::Ne:
+        return kernels::CmpOp::Ne;
+    case OperatorKind::Lt:
+        return kernels::CmpOp::Lt;
+    case OperatorKind::Le:
+        return kernels::CmpOp::Le;
+    case OperatorKind::Gt:
+        return kernels::CmpOp::Gt;
+    default:
+        return kernels::CmpOp::Ge;
+    }
+}
+
+// `c <op> x` is `x <mirror(op)> c`.
+OperatorKind Mirrored(OperatorKind op) {
+    switch (op) {
+    case OperatorKind::Lt:
+        return OperatorKind::Gt;
+    case OperatorKind::Le:
+        return OperatorKind::Ge;
+    case OperatorKind::Gt:
+        return OperatorKind::Lt;
+    case OperatorKind::Ge:
+        return OperatorKind::Le;
+    default:
+        return op;
+    }
+}
+
+// The common predicate shape `flat column <op> constant` (either order) goes to the vectorised
+// kernel. Returns false when the operands are not of that shape.
+template <class T>
+bool TryKernelSelect(OperatorKind op, const Vector& l, const Vector& r, idx_t n, sel_t* out,
+                     idx_t& matches) {
+    const Vector* column;
+    const Vector* constant;
+    if (r.format() == VectorFormat::Constant && l.format() == VectorFormat::Flat) {
+        column = &l;
+        constant = &r;
+    } else if (l.format() == VectorFormat::Constant && r.format() == VectorFormat::Flat) {
+        column = &r;
+        constant = &l;
+        op = Mirrored(op);
+    } else {
+        return false;
+    }
+    const View k(*constant);
+    if (!k.Valid(0)) {
+        matches = 0; // a comparison with NULL is never TRUE
+        return true;
+    }
+    const View v(*column);
+    matches = kernels::SelectConstant<T>(ToCmpOp(op), v.data<T>(), n, k.data<T>()[0], out);
+    if (!v.AllValid()) { // drop the NULL rows from the selection
+        idx_t kept = 0;
+        for (idx_t j = 0; j < matches; j++) {
+            out[kept] = out[j];
+            kept += v.Valid(out[j]);
+        }
+        matches = kept;
+    }
+    return true;
+}
+
 template <class T>
 idx_t CompareSelectT(OperatorKind op, const Vector& l, const Vector& r, idx_t n, sel_t* out) {
+    if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t> ||
+                  std::is_same_v<T, double>) {
+        idx_t matches;
+        if (TryKernelSelect<T>(op, l, r, n, out, matches)) {
+            return matches;
+        }
+    }
     switch (op) {
     case OperatorKind::Eq:
         return CompareSelect<T, CmpEq<T>>(l, r, n, out);

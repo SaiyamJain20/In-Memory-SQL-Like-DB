@@ -213,7 +213,7 @@ OperatorResult PhysicalLimit::Execute(OperatorState& state, const DataChunk& inp
     } else if (begin == 0 && take == n) {
         ShareRows(input, output, nullptr, input.size());
     } else {
-        SelectionVector sel(static_cast<idx_t>(take));
+        SelectionVector sel = SelectionVector::Uninitialized(static_cast<idx_t>(take));
         for (int64_t i = 0; i < take; i++) {
             sel.Set(static_cast<idx_t>(i), static_cast<sel_t>(begin + i));
         }
