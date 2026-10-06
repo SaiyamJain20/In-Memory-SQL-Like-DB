@@ -417,6 +417,18 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
 // after).
 LogicalPtr PushFilterJoin(LogicalPtr op, Conjuncts conjuncts) {
     auto& join = static_cast<LogicalJoin&>(*op);
+    if (join.children[0]->kind == LogicalKind::Filter) {
+        // A semi / anti join leaves its left rows and columns as they are, so a filter on them
+        // commutes with it: Semi(Filter(p, X), S) = Filter(p, Semi(X, S)). The binder puts the
+        // WHERE conditions below the subquery joins; lifting them past the join lets it reach the
+        // relations of a join tree underneath (TPC-H Q18's HAVING subquery selects 5 orders: it
+        // belongs on `orders`, not after the join of everything).
+        auto& filter = static_cast<LogicalFilter&>(*join.children[0]);
+        SplitAndFactor(std::move(filter.predicate), conjuncts);
+        LogicalPtr below = std::move(filter.children[0]);
+        join.children[0] = std::move(below);
+        return Push(std::move(op), std::move(conjuncts));
+    }
     const idx_t lw = join.children[0]->ColumnCount();
     LogicalOperator& left = *join.children[0];
     if (left.kind == LogicalKind::Join && join.condition) {

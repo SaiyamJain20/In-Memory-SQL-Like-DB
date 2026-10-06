@@ -361,6 +361,47 @@ TEST(OptimizerShapes, SemiAndAntiJoinsStayAboveTheNullSuppliedSideOfAnOuterJoin)
               "    SCAN small [k]\n");
 }
 
+TEST(OptimizerShapes, SemiAndAntiJoinsReachTheRelationTheyFilterThroughTheWhereClause) {
+    // The binder puts the WHERE conditions below the subquery joins; a filter on the left rows of a
+    // semi / anti join commutes with it, so the join can still sink to its relation instead of
+    // staying above the whole join tree (TPC-H Q18: 5 orders against lineitem x orders x customer).
+    Env env;
+    env.SizedTables();
+    EXPECT_EQ(
+        env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND mid.w > 10 AND big.k IN "
+                    "(SELECT k FROM small)"),
+        "PROJECT [v]\n"
+        "  PROJECT [v]\n"
+        "    JOIN INNER ON (big.k = mid.k)\n"
+        "      FILTER (w > 10)\n"
+        "        SCAN mid [k, w] prune(w > 10)\n"
+        "      JOIN SEMI ON (big.k = k)\n"
+        "        SCAN big [k, v]\n"
+        "        PROJECT [k]\n"
+        "          SCAN small [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND NOT EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = mid.w)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (big.k = mid.k)\n"
+              "    SCAN big [k, v]\n"
+              "    JOIN ANTI ON (w = k)\n"
+              "      SCAN mid [k, w]\n"
+              "      SCAN small [k]\n");
+    EXPECT_EQ(
+        env.Explain("SELECT big.v FROM big, mid, small WHERE big.k = mid.k AND mid.k = small.k "
+                    "AND big.s = 'x' AND big.v NOT IN (SELECT k FROM small)"),
+        "PROJECT [v]\n"
+        "  JOIN INNER ON (mid.k = small.k)\n"
+        "    JOIN INNER ON (big.k = mid.k)\n"
+        "      JOIN ANTI (NULL-AWARE) ON (v = k)\n"
+        "        FILTER (s = 'x')\n"
+        "          SCAN big [k, v, s] prune(s = x)\n"
+        "        PROJECT [k]\n"
+        "          SCAN small [k]\n"
+        "      SCAN mid [k]\n"
+        "    SCAN small [k]\n");
+}
+
 TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {
     Env env;
     env.SizedTables();
