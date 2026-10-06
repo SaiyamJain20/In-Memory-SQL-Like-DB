@@ -1,3 +1,4 @@
 # Pinned so local formatting / reference results match CI exactly.
 clang-format==23.1.2
 duckdb==1.5.6
+PyYAML==6.0.3  # verify.sh parses the CI workflow; a YAML error otherwise only shows up as a failed run

@@ -27,6 +27,11 @@ fi
 tools/check_format.sh >/dev/null 2>&1 || { tools/check_format.sh 2>&1 | head -20; fail "format"; }
 echo "format        OK"
 
+# A YAML mistake in the workflow only shows up as a CI run that fails in 0 s: parse it here.
+.venv/bin/python -c "import sys, yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" \
+  >build/verify-workflow.log 2>&1 || { cat build/verify-workflow.log | tail -5; fail "workflow yaml (.github/workflows/ci.yml)"; }
+echo "workflow yaml OK"
+
 run_preset() {
   local p="$1"
   cmake --preset "$p" >/dev/null 2>&1 || fail "configure $p"

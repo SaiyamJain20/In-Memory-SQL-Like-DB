@@ -51,7 +51,7 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
-      - name: Test (parallel mode: 4 threads, every parallel path forced on)
+      - name: Test (parallel mode - 4 threads, every parallel path forced on)
         run: ctest --preset ${{ matrix.preset }}-parallel
 
   sanitizers:
@@ -75,7 +75,7 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
-      - name: Test (parallel mode: 4 threads, every parallel path forced on)
+      - name: Test (parallel mode - 4 threads, every parallel path forced on)
         run: ctest --preset ${{ matrix.preset }}-parallel
 
   fuzz-smoke:
