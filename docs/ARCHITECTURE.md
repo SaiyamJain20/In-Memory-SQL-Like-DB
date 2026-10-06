@@ -152,7 +152,7 @@ operators can report `Finished` (a satisfied `LIMIT`), which stops the source be
 
 **Operators.** Table scan (snapshot per query, zone-map pruning), `VALUES`, filter (selection
 vectors; zero-copy dictionary output), projection, limit/offset, hash aggregate (also `DISTINCT`;
-`COUNT/SUM/AVG/MIN/MAX` and their `DISTINCT` forms, integer `SUM` overflow is an error), `ORDER BY`
+`COUNT/SUM/AVG/MIN/MAX` and their `DISTINCT` forms; integer `SUM` is exact in 128 bits and an error only if the total leaves `BIGINT`), `ORDER BY`
 (stable) and top-N (prunes while consuming), hash join (inner / left / semi / anti, multi-key,
 residual predicates, NULL keys never match; nested loop when there is no equality; output resumes
 mid-chain so a probe row with many matches never overflows a chunk), result collector and INSERT.

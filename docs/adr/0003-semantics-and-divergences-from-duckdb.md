@@ -32,7 +32,7 @@ to. Behaviours adopted because the differential test showed them:
 | Divergence | Why |
 |---|---|
 | `DECIMAL(p,s)`/`NUMERIC`/`FLOAT`/`REAL` are stored as `DOUBLE` | no fixed-point type yet; TPC-H results are compared with a tolerance. Revisit if exactness matters. |
-| `SUM(INTEGER/BIGINT)` returns `BIGINT` (DuckDB: `HUGEINT`) and raises on overflow | no 128-bit type |
+| `SUM(INTEGER/BIGINT)` returns `BIGINT` (DuckDB: `HUGEINT`) and raises if the **exact total** does not fit; a running total that leaves the range and comes back is fine (DuckDB never raises) | no 128-bit result type; the sum is accumulated exactly in 128 bits so that the answer depends on the values only, not on the order or the thread that added them (Phase 6) |
 | `DATE` covers years 1–9999 only; no `TIMESTAMP`/`INTERVAL` types. `DATE ± INTERVAL` is folded for constant dates | scope; TPC-H only needs constant-date arithmetic |
 | `UPPER`/`LOWER` map ASCII only | no Unicode case tables |
 | Constant cast errors are raised while binding, even inside a branch that can never run (`FALSE AND CAST('x' AS INT) = 1`) | constants are folded eagerly for typing; DuckDB simplifies the boolean first |

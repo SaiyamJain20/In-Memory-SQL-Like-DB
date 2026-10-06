@@ -675,7 +675,12 @@ TEST(GroupTable, CombineOfEmptyTablesAndIntoEmpty) {
     ExpectMatchesReference(in, a, "combined with empty");
 }
 
+// An integer SUM is exact and is range-checked when the result is produced: a total that does not
+// fit BIGINT is an error (never a wrapped value), and one that does fit is returned however large
+// the running total got on the way - so the answer cannot depend on the order rows arrive in.
 TEST(GroupTable, SumOverflowIsAnErrorNotAWrap) {
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
     const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
     auto chunk_of = [](std::vector<int64_t> values) {
         DataChunk c;
@@ -688,31 +693,60 @@ TEST(GroupTable, SumOverflowIsAnErrorNotAWrap) {
     };
     DataChunk none;
     none.Initialize({});
-    {
+    const auto sums_to = [&](std::vector<int64_t> values) {
         GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::max(), 1});
-        EXPECT_THROW(t.Sink(none, {&c.column(0)}, 2), Error);
+        const DataChunk c = chunk_of(std::move(values));
+        t.Sink(none, {&c.column(0)}, c.size());
+        return ReadAll(t).begin()->second[0];
+    };
+    // totals outside the range raise when the result is read
+    EXPECT_THROW(sums_to({kMax, 1}), Error);
+    EXPECT_THROW(sums_to({kMin, -1}), Error);
+    EXPECT_THROW(sums_to({kMax, kMax}), Error);
+    try {
+        sums_to({kMax, 1});
+        FAIL() << "expected an error";
+    } catch (const Error& e) {
+        EXPECT_NE(std::string(e.what()).find("overflow in SUM"), std::string::npos) << e.what();
     }
+    // totals inside it are returned, whatever the running total did in between
+    EXPECT_EQ(sums_to({kMax, -5, 5}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMax, 1, -1}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({1, kMax, -1}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMax, kMax, -kMax}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMin, kMin, kMax, kMax}), Value::BigInt(-2));
+    EXPECT_EQ(sums_to({kMax - 1, 1}), Value::BigInt(kMax)) << "exactly at the limit";
+    EXPECT_EQ(sums_to({kMin + 1, -1}), Value::BigInt(kMin)) << "exactly at the lower limit";
     {
-        GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::min(), -1});
-        EXPECT_THROW(t.Sink(none, {&c.column(0)}, 2), Error);
-    }
-    {
-        // exactly at the limit is fine, one more is not (here via Combine)
+        // merging two tables: the total of the pair decides, not either table's own total
         GroupTable a({}, {sum}), b({}, {sum});
-        const DataChunk big = chunk_of({std::numeric_limits<int64_t>::max()});
+        const DataChunk big = chunk_of({kMax});
         const DataChunk one = chunk_of({1});
+        const DataChunk minus = chunk_of({-1});
         a.Sink(none, {&big.column(0)}, 1);
         b.Sink(none, {&one.column(0)}, 1);
-        EXPECT_THROW(a.Combine(b), Error);
+        a.Combine(b);
+        EXPECT_THROW(ReadAll(a), Error) << "MAX + 1 does not fit";
+        GroupTable c({}, {sum}), d({}, {sum}), e({}, {sum});
+        c.Sink(none, {&big.column(0)}, 1);
+        d.Sink(none, {&one.column(0)}, 1);
+        e.Sink(none, {&minus.column(0)}, 1);
+        c.Combine(d); // transiently MAX + 1
+        c.Combine(e); // back to MAX
+        EXPECT_EQ(ReadAll(c).begin()->second[0], Value::BigInt(kMax));
     }
     {
-        GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::max(), -5, 5});
-        EXPECT_NO_THROW(t.Sink(none, {&c.column(0)}, 3));
-        EXPECT_EQ(ReadAll(t).begin()->second[0],
-                  Value::BigInt(std::numeric_limits<int64_t>::max()));
+        // one overflowing group fails the result even if the others are fine
+        GroupTable t({LogicalType::Integer()}, {sum});
+        DataChunk keys;
+        keys.Initialize({LogicalType::Integer()});
+        const DataChunk values = chunk_of({1, kMax, 1, 2});
+        for (idx_t i = 0; i < 4; i++) {
+            keys.SetValue(0, i, Value::Integer(i == 1 || i == 2 ? 7 : 8));
+        }
+        keys.SetCardinality(4);
+        t.Sink(keys, {&values.column(0)}, 4);
+        EXPECT_THROW(ReadAll(t), Error) << "group 7 sums to MAX + 1";
     }
 }
 
@@ -795,7 +829,7 @@ TEST(GroupTable, UngroupedAggregatesOverFlatAllValidInputMatchSequentialSemantic
     }
 }
 
-TEST(GroupTable, UngroupedSumOverflowFollowsTheSequentialRuleWithAndWithoutSimd) {
+TEST(GroupTable, UngroupedSumIsExactWithAndWithoutSimdWhateverTheOrderAndChunking) {
     constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
     const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
     for (const bool simd : {true, false}) {
@@ -807,18 +841,87 @@ TEST(GroupTable, UngroupedSumOverflowFollowsTheSequentialRuleWithAndWithoutSimd)
             }
             return RunUngrouped({sum}, LogicalType::BigInt(), {v});
         };
-        // the running sum overflows at the second value even though the total would fit again
-        EXPECT_THROW(run({kMax, 1, -1}), Error) << (simd ? "simd" : "scalar");
-        EXPECT_THROW(run({kMax, kMax}), Error);
-        EXPECT_THROW(run({std::numeric_limits<int64_t>::min(), -1}), Error);
-        // exactly at the limit is fine
-        EXPECT_EQ(run({kMax - 1, 1})[0], Value::BigInt(kMax));
-        EXPECT_EQ(run({kMax, -kMax, kMax / 2})[0], Value::BigInt(kMax / 2));
-        // across chunks: the second chunk starts from the first one's total
+        const char* where = simd ? "simd" : "scalar";
+        // the running total passes MAX at the second value, but the total fits: no error
+        EXPECT_EQ(run({kMax, 1, -1})[0], Value::BigInt(kMax)) << where;
+        EXPECT_THROW(run({kMax, kMax}), Error) << where;
+        EXPECT_THROW(run({std::numeric_limits<int64_t>::min(), -1}), Error) << where;
+        EXPECT_EQ(run({kMax - 1, 1})[0], Value::BigInt(kMax)) << where;
+        EXPECT_EQ(run({kMax, -kMax, kMax / 2})[0], Value::BigInt(kMax / 2)) << where;
+        // across chunks the second one continues from the first one's exact total
         std::vector<Value> first = {Value::BigInt(kMax - 5)},
                            second = {Value::BigInt(10), Value::BigInt(-10)};
-        EXPECT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), {first, second}), Error);
+        EXPECT_EQ(RunUngrouped({sum}, LogicalType::BigInt(), {first, second})[0],
+                  Value::BigInt(kMax - 5))
+            << where;
+        std::vector<Value> over = {Value::BigInt(kMax - 5)}, more = {Value::BigInt(10)};
+        EXPECT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), {over, more}), Error) << where;
     }
+}
+
+// Reference: the exact sum of the multiset. Any order, any chunking, grouped or not, SIMD or not,
+// must give that value, or the overflow error when it does not fit.
+TEST(GroupTable, IntegerSumMatchesTheExactReferenceForRandomOrdersAndSplits) {
+    __extension__ typedef __int128 Int128;
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+    Rng rng(33);
+    const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
+    int fits = 0, overflows = 0;
+    for (int round = 0; round < 300; round++) {
+        // values near the limits, in cancelling groups, so totals sit on both sides of the range
+        std::vector<int64_t> values;
+        const idx_t n = 1 + RandBelow(rng, 40);
+        for (idx_t i = 0; i < n; i++) {
+            switch (RandBelow(rng, 5)) {
+            case 0:
+                values.push_back(kMax - static_cast<int64_t>(RandBelow(rng, 4)));
+                break;
+            case 1:
+                values.push_back(kMin + static_cast<int64_t>(RandBelow(rng, 4)));
+                break;
+            case 2:
+                values.push_back(static_cast<int64_t>(RandBelow(rng, 100)) - 50);
+                break;
+            case 3:
+                values.push_back(kMax / 2 + static_cast<int64_t>(RandBelow(rng, 3)));
+                break;
+            default:
+                values.push_back(kMin / 2 - static_cast<int64_t>(RandBelow(rng, 3)));
+                break;
+            }
+        }
+        Int128 exact = 0;
+        for (const int64_t x : values) {
+            exact += x;
+        }
+        const bool fit = exact >= kMin && exact <= kMax;
+        (fit ? fits : overflows)++;
+        for (const bool simd : {true, false}) {
+            const test::ScopedSimd mode(simd);
+            for (int shuffle = 0; shuffle < 4; shuffle++) {
+                std::shuffle(values.begin(), values.end(), rng);
+                // cut into 1-4 chunks at random places
+                std::vector<std::vector<Value>> chunks(1);
+                for (const int64_t x : values) {
+                    if (RandBelow(rng, 8) == 0 && !chunks.back().empty()) {
+                        chunks.emplace_back();
+                    }
+                    chunks.back().push_back(Value::BigInt(x));
+                }
+                if (fit) {
+                    ASSERT_EQ(RunUngrouped({sum}, LogicalType::BigInt(), chunks)[0],
+                              Value::BigInt(static_cast<int64_t>(exact)))
+                        << "round " << round << (simd ? " simd" : " scalar");
+                } else {
+                    ASSERT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), chunks), Error)
+                        << "round " << round << (simd ? " simd" : " scalar");
+                }
+            }
+        }
+    }
+    EXPECT_GT(fits, 20) << "the generator must produce both outcomes";
+    EXPECT_GT(overflows, 20) << "the generator must produce both outcomes";
 }
 
 namespace {
