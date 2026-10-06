@@ -6,6 +6,7 @@
 #include "execution/hash_aggregate.h"
 #include "execution/hash_join.h"
 #include "execution/pipeline.h"
+#include "execution/sort.h"
 #include "execution/task_scheduler.h"
 
 #include "exec_test_util.h"
@@ -887,6 +888,277 @@ TEST(ParallelExecution, TheSameJoinRunRepeatedlyGivesTheSameRows) {
                        "round " + std::to_string(round));
         if (::testing::Test::HasFailure()) {
             return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------- sort
+
+namespace {
+
+class ScopedMinSortRows {
+  public:
+    explicit ScopedMinSortRows(idx_t rows) { SortBuffer::SetMinRowsToSortInParallel(rows); }
+    ~ScopedMinSortRows() { SortBuffer::SetMinRowsToSortInParallel(0); }
+    ScopedMinSortRows(const ScopedMinSortRows&) = delete;
+    ScopedMinSortRows& operator=(const ScopedMinSortRows&) = delete;
+};
+
+// Columns: id BigInt (unique, so any order over (keys..., id) is total), k Integer (few values, so
+// many ties), s Varchar, d Double (with NaN and -0.0).
+const std::vector<LogicalType> kSortTypes = {LogicalType::BigInt(), LogicalType::Integer(),
+                                             LogicalType::Varchar(), LogicalType::Double()};
+
+Data MakeSortData(Rng& rng, int nchunks, idx_t max_rows, int key_domain) {
+    Data d;
+    int64_t next_id = 0;
+    const test::ValueGen gen = [key_domain](Rng& r, LogicalType t) {
+        if (t.id() == TypeId::Integer) {
+            return Chance(r, 0.1) ? Value::Null(t)
+                                  : Value::Integer(static_cast<int32_t>(
+                                        RandBelow(r, static_cast<uint64_t>(key_domain))));
+        }
+        return test::SmallDomainValue(r, t, 0.1);
+    };
+    for (int k = 0; k < nchunks; k++) {
+        const idx_t n = Chance(rng, 0.05) ? 0 : 1 + RandBelow(rng, max_rows);
+        const DataChunk other =
+            test::RandomVariedChunk(rng, {kSortTypes[1], kSortTypes[2], kSortTypes[3]}, n, gen);
+        DataChunk chunk;
+        chunk.Initialize(kSortTypes);
+        for (idx_t i = 0; i < n; i++) {
+            chunk.SetValue(0, i, Value::BigInt(next_id++));
+        }
+        for (idx_t c = 0; c < 3; c++) {
+            chunk.column(c + 1).Reference(other.column(c));
+        }
+        chunk.SetCardinality(n);
+        for (auto& r : RowsOf(chunk)) {
+            d.rows.push_back(std::move(r));
+        }
+        d.chunks.push_back(std::move(chunk));
+    }
+    return d;
+}
+
+struct KeySpec {
+    idx_t column;
+    bool descending;
+    bool nulls_first;
+};
+
+std::vector<SortKey> MakeKeys(const std::vector<KeySpec>& specs) {
+    std::vector<SortKey> keys;
+    for (const KeySpec& k : specs) {
+        SortKey key;
+        key.expr = Col(k.column, kSortTypes[k.column]);
+        key.descending = k.descending;
+        key.nulls_first = k.nulls_first;
+        keys.push_back(std::move(key));
+    }
+    return keys;
+}
+
+bool RowBefore(const std::vector<Value>& a, const std::vector<Value>& b,
+               const std::vector<KeySpec>& keys) {
+    for (const KeySpec& k : keys) {
+        const Value &x = a[k.column], &y = b[k.column];
+        if (x.IsNull() || y.IsNull()) {
+            if (x.IsNull() && y.IsNull()) {
+                continue;
+            }
+            return x.IsNull() == k.nulls_first;
+        }
+        int c = Value::Compare(x, y);
+        if (k.descending) {
+            c = -c;
+        }
+        if (c != 0) {
+            return c < 0;
+        }
+    }
+    return false;
+}
+
+const std::vector<std::vector<KeySpec>> kKeyShapes = {
+    {{1, false, false}, {0, false, false}},                  // k asc, id
+    {{2, true, true}, {1, false, true}, {0, true, false}},   // s desc nulls first, k asc, id desc
+    {{3, true, false}, {2, false, false}, {0, false, false}} // d desc (NaN, -0.0), s, id
+};
+
+} // namespace
+
+TEST(SortBuffer, ParallelSortGivesExactlyTheSerialStableOrder) {
+    Rng rng(21);
+    const ScopedMinSortRows parallel(1);
+    for (const auto& shape : kKeyShapes) {
+        for (const idx_t rows_hint : {idx_t{0}, idx_t{1}, idx_t{3}, idx_t{2000}, idx_t{40000}}) {
+            std::vector<SortSpec> specs;
+            for (const KeySpec& k : shape) {
+                specs.push_back({kSortTypes[k.column], k.descending, k.nulls_first});
+            }
+            const Data d = MakeSortData(
+                rng, rows_hint == 0 ? 0 : 1 + static_cast<int>(rows_hint / 100), 200, 7);
+            auto fill = [&](SortBuffer& buffer) {
+                for (const DataChunk& chunk : d.chunks) {
+                    DataChunk keys;
+                    std::vector<LogicalType> key_types;
+                    for (const KeySpec& k : shape) {
+                        key_types.push_back(kSortTypes[k.column]);
+                    }
+                    keys.Initialize(key_types);
+                    for (size_t i = 0; i < shape.size(); i++) {
+                        keys.column(i).Reference(chunk.column(shape[i].column));
+                    }
+                    keys.SetCardinality(chunk.size());
+                    buffer.Append(chunk, keys);
+                }
+            };
+            SortBuffer serial(kSortTypes, specs);
+            fill(serial);
+            serial.Sort();
+            DataChunk want_chunk;
+            want_chunk.Initialize(kSortTypes);
+            Rows want;
+            for (idx_t at = 0; at < serial.Count(); at += kVectorSize) {
+                serial.Scan(at, std::min<idx_t>(kVectorSize, serial.Count() - at), want_chunk);
+                for (auto& r : RowsOf(want_chunk)) {
+                    want.push_back(std::move(r));
+                }
+            }
+            for (const size_t threads : {size_t{2}, size_t{3}, size_t{4}, size_t{8}, size_t{16}}) {
+                SortBuffer buffer(kSortTypes, specs);
+                fill(buffer);
+                TaskScheduler scheduler(threads);
+                const ExecutionContext context{&scheduler};
+                buffer.SortParallel(context);
+                ASSERT_EQ(buffer.Count(), serial.Count());
+                DataChunk chunk;
+                chunk.Initialize(kSortTypes);
+                size_t at_row = 0;
+                for (idx_t at = 0; at < buffer.Count(); at += kVectorSize) {
+                    buffer.Scan(at, std::min<idx_t>(kVectorSize, buffer.Count() - at), chunk);
+                    for (const auto& r : RowsOf(chunk)) {
+                        for (size_t c = 0; c < r.size(); c++) {
+                            ASSERT_TRUE(SameValue(r[c], want[at_row][c]))
+                                << "rows " << d.rows.size() << " threads " << threads << " row "
+                                << at_row << " column " << c;
+                        }
+                        at_row++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(ParallelExecution, OrderByMatchesTheReferenceOnEveryThreadCount) {
+    Rng rng(22);
+    const Data d = MakeSortData(rng, 80, 200, 6);
+    for (const idx_t min_rows : {idx_t{1}, idx_t{1} << 40}) {
+        const ScopedMinSortRows parallel(min_rows);
+        for (const auto& shape : kKeyShapes) {
+            Rows want = d.rows;
+            std::sort(want.begin(), want.end(),
+                      [&](const auto& a, const auto& b) { return RowBefore(a, b, shape); });
+            for (const size_t threads : kThreadCounts) {
+                PhysicalPlan plan;
+                auto& src = plan.Make<ParallelChunkSource>(kSortTypes, &d.chunks);
+                auto& order = plan.Make<PhysicalOrder>(kSortTypes, MakeKeys(shape));
+                auto& result = plan.Make<PhysicalResultCollector>(kSortTypes);
+                Pipeline p0;
+                p0.source = &src;
+                p0.sink = &order;
+                Pipeline p1;
+                p1.source = &order;
+                p1.sink = &result;
+                p1.dependencies = {0};
+                plan.pipelines = {p0, p1};
+                plan.root = &result;
+                const Rows got = RunPlan(plan, threads);
+                ASSERT_EQ(got.size(), want.size());
+                for (size_t i = 0; i < got.size(); i++) {
+                    ASSERT_TRUE(SameValue(got[i][0], want[i][0]))
+                        << "threads " << threads << " row " << i << ": ids must come out in "
+                        << "the order the (total) sort key defines";
+                }
+            }
+        }
+    }
+}
+
+TEST(ParallelExecution, OrderByWithTiesSortsByKeyAndKeepsEveryRow) {
+    // No tie-breaking column: rows with equal keys may come out in any order, but never lost,
+    // duplicated or interleaved with other keys.
+    Rng rng(23);
+    const Data d = MakeSortData(rng, 60, 200, 4);
+    const std::vector<KeySpec> shape = {{1, false, false}};
+    const ScopedMinSortRows parallel(1);
+    for (const size_t threads : kThreadCounts) {
+        PhysicalPlan plan;
+        auto& src = plan.Make<ParallelChunkSource>(kSortTypes, &d.chunks);
+        auto& order = plan.Make<PhysicalOrder>(kSortTypes, MakeKeys(shape));
+        auto& result = plan.Make<PhysicalResultCollector>(kSortTypes);
+        Pipeline p0;
+        p0.source = &src;
+        p0.sink = &order;
+        Pipeline p1;
+        p1.source = &order;
+        p1.sink = &result;
+        p1.dependencies = {0};
+        plan.pipelines = {p0, p1};
+        plan.root = &result;
+        const Rows got = RunPlan(plan, threads);
+        ASSERT_EQ(got.size(), d.rows.size());
+        for (size_t i = 1; i < got.size(); i++) {
+            ASSERT_FALSE(RowBefore(got[i], got[i - 1], shape))
+                << "threads " << threads << " row " << i;
+        }
+        std::vector<int64_t> ids;
+        for (const auto& r : got) {
+            ids.push_back(r[0].GetBigInt());
+        }
+        std::sort(ids.begin(), ids.end());
+        for (size_t i = 0; i < ids.size(); i++) {
+            ASSERT_EQ(ids[i], static_cast<int64_t>(i)) << "a row was lost or duplicated";
+        }
+    }
+}
+
+TEST(ParallelExecution, TopNMatchesSortThenLimitOnEveryThreadCount) {
+    Rng rng(24);
+    const Data d = MakeSortData(rng, 80, 200, 6);
+    const ScopedMinSortRows parallel(1);
+    for (const auto& shape : kKeyShapes) {
+        Rows sorted = d.rows;
+        std::sort(sorted.begin(), sorted.end(),
+                  [&](const auto& a, const auto& b) { return RowBefore(a, b, shape); });
+        for (const auto& [limit, offset] : std::vector<std::pair<int64_t, int64_t>>{
+                 {1, 0}, {10, 0}, {10, 7}, {500, 3}, {100000, 0}, {5, 100000}}) {
+            const size_t begin = std::min<size_t>(static_cast<size_t>(offset), sorted.size());
+            const size_t end = std::min(sorted.size(), begin + static_cast<size_t>(limit));
+            for (const size_t threads : kThreadCounts) {
+                PhysicalPlan plan;
+                auto& src = plan.Make<ParallelChunkSource>(kSortTypes, &d.chunks);
+                auto& top = plan.Make<PhysicalTopN>(kSortTypes, MakeKeys(shape), limit, offset);
+                auto& result = plan.Make<PhysicalResultCollector>(kSortTypes);
+                Pipeline p0;
+                p0.source = &src;
+                p0.sink = &top;
+                Pipeline p1;
+                p1.source = &top;
+                p1.sink = &result;
+                p1.dependencies = {0};
+                plan.pipelines = {p0, p1};
+                plan.root = &result;
+                const Rows got = RunPlan(plan, threads);
+                ASSERT_EQ(got.size(), end - begin) << "limit " << limit << " offset " << offset;
+                for (size_t i = 0; i < got.size(); i++) {
+                    ASSERT_TRUE(SameValue(got[i][0], sorted[begin + i][0]))
+                        << "limit " << limit << " offset " << offset << " threads " << threads
+                        << " row " << i;
+                }
+            }
         }
     }
 }
