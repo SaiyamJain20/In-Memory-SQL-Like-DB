@@ -66,6 +66,18 @@ atomic counters per operator, one timer per call; a null-pointer check when off)
 planner remembers which logical operator each physical one came from. Times are CPU time summed over
 threads and cover an operator's own calls only.
 
+### 6. Floating-point SUM / AVG are order-independent (found by the Phase 8 benchmark)
+TPC-H Q15 returned no row at 16 threads on SF1: `WITH revenue AS (... sum(...) ...) ... WHERE
+total_revenue = (SELECT max(total_revenue) FROM revenue)` evaluates the aggregate twice (a CTE is
+inlined per reference), and a parallel floating-point sum differs in the last bits between two
+evaluations (4,261 of 10,000 supplier sums, at 4 threads). `SUM` and `AVG` of a DOUBLE now accumulate in
+compensated form (`CompensatedSum`: an unevaluated `hi + lo`, every addition a TwoSum whose rounding
+error goes to `lo`, partial sums merged the same way, the AVX2 kernel with `(hi, lo)` lanes) and round
+once at the end, so the result is the exact sum rounded, except for sums within 2^-100 of a rounding
+boundary: the same on any number of threads and morsel sizes, with or without SIMD. Cost on SF1,
+one thread: Q1 (six such aggregates over 6 M rows, 4 groups) +23%, Q18 +11%, Q6 (ungrouped, vectorized)
+none; DuckDB also uses compensated (Kahan) summation for `SUM(DOUBLE)`.
+
 ## Verification
 - The 22 TPC-H queries match DuckDB (SF0.01 on memory / checkpoint / log in the gate; SF0.1 and SF1 by hand).
 - Subquery SQL files (102 + CTE queries, DuckDB-generated expected results) run in memory and across a

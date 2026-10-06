@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/compensated_sum.h"
 #include "common/types.h"
 
 #include <cstdint>
@@ -20,8 +21,11 @@ int64_t SumInt32(const int32_t* data, idx_t n);
 // and the kernel never returns true when that total does not fit in int64.
 bool AddSumInt64(const int64_t* data, idx_t n, int64_t* sum);
 
-// Sum of doubles. The additions are re-associated (several partial sums), so the result can differ
-// in the last bits from a left-to-right sum; NaN and infinities propagate as usual.
+// Sum of doubles, accumulated in compensated form (common/compensated_sum.h): the additions are
+// re-associated across SIMD lanes, but no rounding error is lost, so the result does not depend on
+// the lanes, the order or the CPU. NaN and infinities propagate as usual.
+CompensatedSum SumDoubleCompensated(const double* data, idx_t n);
+// The same, rounded to a double.
 double SumDouble(const double* data, idx_t n);
 
 // Minimum and maximum of n >= 1 values.

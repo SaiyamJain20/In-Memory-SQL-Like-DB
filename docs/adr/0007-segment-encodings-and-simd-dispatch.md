@@ -31,8 +31,8 @@ measures faster than the scalar loop the compiler generates: two were deleted or
 measuring slower.
 
 **Semantics must not depend on the CPU.** The same query returns the same answer with and without SIMD,
-except where floating-point addition is re-associated (ungrouped `SUM(DOUBLE)`, documented, still
-deterministic for a given input). Integer `SUM` uses the vector path only when it is provable that a
+(floating-point sums are accumulated in compensated form and rounded once since Phase 8, so even
+the SIMD lanes of `SUM(DOUBLE)` cannot show: see ADR 0010). Integer `SUM` uses the vector path only when it is provable that a
 left-to-right checked sum could not overflow either, so overflow errors are identical.
 
 ## Consequences

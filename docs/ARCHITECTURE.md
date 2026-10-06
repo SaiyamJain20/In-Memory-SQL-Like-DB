@@ -188,8 +188,9 @@ exactly that case.
 AVX2 versions with scalar fallbacks, dispatched at run time (`__builtin_cpu_supports`, no `-march=native`):
 compare-a-column-with-a-constant into a selection vector (used by the executor's `Select`), scaled-double
 decode, ungrouped SUM/MIN/MAX, integer hashing. Each is tested against the scalar version and an
-independent definition; results do not depend on the CPU (the one documented exception is the
-re-association of ungrouped `SUM(DOUBLE)`). `CDB_NO_SIMD` forces the scalar path.
+independent definition; results do not depend on the CPU (floating-point sums are accumulated in
+compensated form and rounded once, so even the lanes of the vector `SUM(DOUBLE)` cannot show).
+`CDB_NO_SIMD` forces the scalar path.
 
 **Optimizer** ([ADR 0006](adr/0006-rule-based-optimizer.md), join ordering superseded by
 [ADR 0010](adr/0010-statistics-subqueries-and-cost-based-joins.md)): filter pushdown (outer-join aware;
@@ -235,7 +236,10 @@ over in `Combine`:
 Chunks carry a *batch index* (morsel number), so `SELECT ... WHERE` over a scan and `INSERT ... SELECT`
 keep table order on any thread count. Not defined with more than one thread: the order of groups,
 of matches within one probe row, and of ties in a sort without a total key (none of which SQL promises).
-Floating-point `SUM`/`AVG` re-associate. The whole test suite runs a second time in `-parallel` mode
+Floating-point `SUM`/`AVG` are accumulated in compensated (double-double) form and rounded once, so
+they are bit-identical on any number of threads (tested up to 8 threads and one-vector morsels; a
+plain parallel sum differed in the last bits between two evaluations of the same aggregate, which
+made TPC-H Q15 find no row at 16 threads). The whole test suite runs a second time in `-parallel` mode
 (4 threads, one-vector morsels, every parallel threshold at 1) under debug, release, ASan and TSan.
 
 ## Persistence — [implemented: Phase 7]

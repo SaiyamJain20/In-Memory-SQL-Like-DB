@@ -83,8 +83,11 @@ join build, the parallel sort and the parallel CSV path. ThreadSanitizer runs bo
   hand-overs, the open-address `KeyIndex` insert inside one thread's table, and a pipeline with `LIMIT`.
   Measured curves are in [BENCHMARKS](../BENCHMARKS.md).
 - Memory grows with threads: one local aggregate table / sort buffer / build store per thread.
-- Floating-point `SUM` / `AVG` re-associate across threads (and SIMD lanes): equal to the serial result
-  only up to rounding, and not reproducible run to run when more than one thread feeds them.
+- Floating-point `SUM` / `AVG` *used to* re-associate across threads (and SIMD lanes): equal to the serial
+  result only up to rounding, and not reproducible run to run. That broke a query that compares an
+  aggregate with a recomputation of it (TPC-H Q15 found no row at 16 threads), so since Phase 8 they
+  accumulate in compensated form (`common/compensated_sum.h`, ADR 0010 addendum below) and are rounded
+  once: the same on any number of threads, with or without SIMD.
 - Hash tables are not shared while building (no atomics, no latches), which keeps TSan quiet and the
   code readable, at the price of the partitioning passes.
 

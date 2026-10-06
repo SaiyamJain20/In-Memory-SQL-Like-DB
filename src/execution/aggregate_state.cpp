@@ -215,18 +215,21 @@ template <class In> class SumIntState final : public AggregateState {
     std::vector<uint8_t> has_;
 };
 
+// SUM / AVG of doubles accumulate in compensated form (common/compensated_sum.h): no rounding error
+// is dropped, so the result - rounded once at the end - does not depend on the order the values
+// were added in: not on the SIMD lanes, not on how many threads each summed a share or which
+// morsels they got, not on how the partial sums were merged. (A plain parallel sum changed in the
+// last bits from one run to the next: `WHERE x = (SELECT max(x) FROM <the same aggregate again>)`,
+// TPC-H Q15, found no row at 16 threads.)
 class SumDoubleState final : public AggregateState {
   public:
     void Resize(idx_t groups) override {
-        sums_.resize(groups, 0.0);
+        sums_.resize(groups);
         has_.resize(groups, 0);
     }
-    // The vectorised sum re-associates the additions (several partial sums), so results can differ
-    // in the last bits from a left-to-right sum; either way they are deterministic for a given
-    // input.
     void UpdateUngrouped(const Vector* arg, idx_t count) override {
         if (const double* data = FlatAllValid<double>(arg); data != nullptr && count > 0) {
-            sums_[0] += kernels::SumDouble(data, count);
+            sums_[0].Add(kernels::SumDoubleCompensated(data, count));
             has_[0] = 1;
             return;
         }
@@ -238,7 +241,7 @@ class SumDoubleState final : public AggregateState {
         const double* data = u.Data<double>();
         for (idx_t i = 0; i < count; i++) {
             if (u.IsValid(i)) {
-                sums_[groups[i]] += data[u.sel[i]];
+                sums_[groups[i]].Add(data[u.sel[i]]);
                 has_[groups[i]] = 1;
             }
         }
@@ -247,7 +250,7 @@ class SumDoubleState final : public AggregateState {
         const auto& s = static_cast<const SumDoubleState&>(src);
         for (idx_t g = 0; g < n; g++) {
             if (s.has_[g]) {
-                sums_[dst[g]] += s.sums_[g];
+                sums_[dst[g]].Add(s.sums_[g]);
                 has_[dst[g]] = 1;
             }
         }
@@ -257,7 +260,7 @@ class SumDoubleState final : public AggregateState {
         const auto& s = static_cast<const SumDoubleState&>(src);
         for (idx_t i = 0; i < n; i++) {
             if (s.has_[from[i]]) {
-                sums_[to[i]] += s.sums_[from[i]];
+                sums_[to[i]].Add(s.sums_[from[i]]);
                 has_[to[i]] = 1;
             }
         }
@@ -266,7 +269,7 @@ class SumDoubleState final : public AggregateState {
         double* o = out.FlatData<double>();
         for (idx_t i = 0; i < count; i++) {
             if (has_[first + i]) {
-                o[i] = sums_[first + i];
+                o[i] = sums_[first + i].Value();
             } else {
                 out.Validity().SetInvalid(i);
             }
@@ -274,14 +277,15 @@ class SumDoubleState final : public AggregateState {
     }
 
   private:
-    std::vector<double> sums_;
+    std::vector<CompensatedSum> sums_;
     std::vector<uint8_t> has_;
 };
 
+// AVG: the sum (compensated, see SumDoubleState) divided by the count.
 template <class In> class AvgState final : public AggregateState {
   public:
     void Resize(idx_t groups) override {
-        sums_.resize(groups, 0.0);
+        sums_.resize(groups);
         counts_.resize(groups, 0);
     }
     void Update(const uint32_t* groups, const Vector* arg, idx_t count) override {
@@ -290,7 +294,7 @@ template <class In> class AvgState final : public AggregateState {
         const In* data = u.Data<In>();
         for (idx_t i = 0; i < count; i++) {
             if (u.IsValid(i)) {
-                sums_[groups[i]] += static_cast<double>(data[u.sel[i]]);
+                sums_[groups[i]].Add(static_cast<double>(data[u.sel[i]]));
                 counts_[groups[i]]++;
             }
         }
@@ -298,7 +302,7 @@ template <class In> class AvgState final : public AggregateState {
     void Combine(const AggregateState& src, const uint32_t* dst, idx_t n) override {
         const auto& s = static_cast<const AvgState&>(src);
         for (idx_t g = 0; g < n; g++) {
-            sums_[dst[g]] += s.sums_[g];
+            sums_[dst[g]].Add(s.sums_[g]);
             counts_[dst[g]] += s.counts_[g];
         }
     }
@@ -306,7 +310,7 @@ template <class In> class AvgState final : public AggregateState {
                        idx_t n) override {
         const auto& s = static_cast<const AvgState&>(src);
         for (idx_t i = 0; i < n; i++) {
-            sums_[to[i]] += s.sums_[from[i]];
+            sums_[to[i]].Add(s.sums_[from[i]]);
             counts_[to[i]] += s.counts_[from[i]];
         }
     }
@@ -314,7 +318,7 @@ template <class In> class AvgState final : public AggregateState {
         double* o = out.FlatData<double>();
         for (idx_t i = 0; i < count; i++) {
             if (counts_[first + i] > 0) {
-                o[i] = sums_[first + i] / static_cast<double>(counts_[first + i]);
+                o[i] = sums_[first + i].Value() / static_cast<double>(counts_[first + i]);
             } else {
                 out.Validity().SetInvalid(i);
             }
@@ -322,7 +326,7 @@ template <class In> class AvgState final : public AggregateState {
     }
 
   private:
-    std::vector<double> sums_;
+    std::vector<CompensatedSum> sums_;
     std::vector<int64_t> counts_;
 };
 
