@@ -25,6 +25,9 @@ cmake --preset fuzz && cmake --build --preset fuzz && tools/run_fuzz.sh parser 6
 CDB_TPCH_SF=1 CDB_REQUIRE_TPCH=1 build/release/tests/cdb_tests --gtest_filter='*TpchDifferential*'   # SF1 by hand
 build/release/bench/cdb_tpch --sf 1                  # TPC-H timings; tools/tpch_duckdb_time.py --sf 1 --threads 1 for DuckDB
 .venv/bin/python tools/gen_slt.py tests/sql/*.test   # refresh expected results of the SQL suite from DuckDB
+.venv/bin/python tools/fuzz_sql.py --seeds 1-4        # random queries + DuckDB answers -> data/sqlfuzz (the gate does this)
+.venv/bin/python tools/fuzz_sql.py --seeds 100-300 --out build/sqlfuzz   # a big campaign; run it with
+CDB_SQLFUZZ_DIR=build/sqlfuzz build/release/tests/cdb_tests --gtest_filter='SqlFuzz*'   # (seeds divisible by 5 use big tables)
 ```
 - Build dirs are `build/<preset>`. Single test: `build/debug/tests/cdb_tests --gtest_filter='Suite.Name'`.
 - Python tooling (DuckDB oracle, formatter): `python3 -m venv .venv && .venv/bin/pip install -r tools/requirements-dev.txt`;
@@ -42,6 +45,7 @@ build/release/bench/cdb_tpch --sf 1                  # TPC-H timings; tools/tpch
 src/<module>/*.h|cpp   engine; include root is src/  (#include "storage/vector.h")
 tests/<module>/*.cpp   GoogleTest, mirrors src/
 tests/sql/*.test       sqllogictest-style SQL files; expected results come from DuckDB (tools/gen_slt.py)
+data/sqlfuzz/*.test    generated random-query files, same format (tools/fuzz_sql.py; not committed)
 bench/                 Google Benchmark micro-benchmarks and the TPC-H runner
 tools/                 shell, scripts, requirements
 docs/                  ROADMAP, ARCHITECTURE, PROGRESS (dev log), BENCHMARKS, adr/

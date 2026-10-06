@@ -1,7 +1,8 @@
 name: Generate TPC-H test data
 description: >
-  Generates TPC-H SF0.01 data and DuckDB's reference answers (tools/tpch_data.py) for the
-  differential tests, and makes a missing data set a test failure instead of a skip.
+  Generates TPC-H SF0.01 data and DuckDB's reference answers (tools/tpch_data.py) and random SQL
+  queries with DuckDB's answers (tools/fuzz_sql.py) for the differential tests, and makes a missing
+  data set a test failure instead of a skip.
 runs:
   using: composite
   steps:
@@ -14,6 +15,11 @@ runs:
     - name: Generate data and reference answers
       shell: bash
       run: python tools/tpch_data.py --sf 0.01
+    - name: Generate random SQL differential tests
+      shell: bash
+      run: python tools/fuzz_sql.py --seeds 1-4 --queries 300
     - name: Require the data in tests
       shell: bash
-      run: echo "CDB_REQUIRE_TPCH=1" >> "$GITHUB_ENV"
+      run: |
+        echo "CDB_REQUIRE_TPCH=1" >> "$GITHUB_ENV"
+        echo "CDB_REQUIRE_SQLFUZZ=1" >> "$GITHUB_ENV"

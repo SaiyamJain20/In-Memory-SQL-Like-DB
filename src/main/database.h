@@ -29,6 +29,9 @@ class Database {
     Database();
     // In memory.
     explicit Database(size_t threads);
+    // In memory, with the thread count and row group size of `options` (tests use small row
+    // groups).
+    explicit Database(DatabaseOptions options);
     // Opens (creating if need be) the database stored in directory `path`. Throws Error(Io) if the
     // directory is unusable or in use by another process, Error(Corruption) if its files do not
     // verify.

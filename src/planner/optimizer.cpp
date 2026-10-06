@@ -27,6 +27,11 @@ void SplitAndFactor(BoundExprPtr e, Conjuncts& out) {
     Conjuncts parts;
     SplitConjuncts(std::move(e), parts);
     for (auto& part : parts) {
+        if (part->kind == BoundKind::Constant && part->value.has_value() &&
+            part->value->type().id() == TypeId::Boolean && !part->value->IsNull() &&
+            part->value->GetBoolean()) {
+            continue; // a conjunct that is always TRUE (`1 = 1`, `3 BETWEEN 2 AND 6`) says nothing
+        }
         if (part->kind != BoundKind::Operator || part->op != OperatorKind::Or) {
             out.push_back(std::move(part));
             continue;
@@ -339,9 +344,12 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
         // the predicates that this join is the first to have every relation of
         Conjuncts cond;
         for (size_t c = 0; c < flat.conjuncts.size(); c++) {
-            const bool covered = can_mask ? (mask[c] & ~set) == 0 && (mask[c] & ~left_set) != 0 &&
-                                                (mask[c] & ~right_set) != 0
-                                          : last;
+            // (a predicate that mentions no relation at all, like `1 = 1`, goes on the top join)
+            const bool covered =
+                can_mask ? (mask[c] == 0 ? last
+                                         : (mask[c] & ~set) == 0 && (mask[c] & ~left_set) != 0 &&
+                                               (mask[c] & ~right_set) != 0)
+                         : last;
             if (applied[c] || !covered) {
                 continue;
             }
@@ -368,7 +376,7 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
             }
             Built left = build(nd.left);
             Built right = build(nd.right);
-            return join_two(std::move(left), std::move(right), nd.set, false);
+            return join_two(std::move(left), std::move(right), nd.set, node == plan_tree.root);
         };
         result = build(plan_tree.root);
     } else { // too many relations to reason about: as written, all predicates at the top

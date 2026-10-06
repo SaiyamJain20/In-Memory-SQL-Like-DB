@@ -818,6 +818,67 @@ TEST(OptimizerShapes, OrFactoringKeepsTheCommonPartAndDropsImpliedRemainders) {
               "    SCAN r1 [a, b]\n");
 }
 
+TEST(OptimizerShapes, AlwaysTrueConjunctsAreDroppedAndAlwaysFalseOnesStay) {
+    Env env;
+    env.SizedTables();
+    // `1 = 1` and `3 BETWEEN 2 AND 6` fold to TRUE: they must not linger as `AND true` in a join
+    // condition (a residual to evaluate for every matching pair)
+    for (const char* always : {"1 = 1", "3 BETWEEN 2 AND 6", "TRUE", "1 = 1 AND 2 < 3"}) {
+        EXPECT_EQ(env.Explain(std::string("SELECT big.v FROM big, mid WHERE big.k = mid.k AND ") +
+                              always),
+                  env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k"))
+            << always;
+        EXPECT_EQ(
+            env.Explain(std::string("SELECT small.z FROM big, mid, small WHERE small.k = mid.k AND "
+                                    "mid.k = big.k AND ") +
+                        always),
+            env.Explain(
+                "SELECT small.z FROM big, mid, small WHERE small.k = mid.k AND mid.k = big.k"))
+            << always;
+        EXPECT_EQ(env.Explain(std::string("SELECT v FROM big WHERE ") + always),
+                  env.Explain("SELECT v FROM big"))
+            << always;
+    }
+    // a predicate that is always FALSE is kept: it empties the result (here as part of the join
+    // condition, since the join is the first place that has every relation it could mention - none)
+    EXPECT_NE(
+        env.Explain("SELECT big.v FROM big, mid WHERE big.k = mid.k AND 1 = 2").find("AND false"),
+        std::string::npos);
+    EXPECT_NE(env.Explain("SELECT v FROM big WHERE 1 = 2").find("FILTER false"), std::string::npos);
+}
+
+TEST(OptimizerEquivalenceDirected, PredicatesWithoutColumnsPlaceThemselvesOnAnyJoinTree) {
+    Rng rng(77);
+    Env env;
+    LoadRandomTables(env, rng);
+    const std::vector<std::string> constants = {
+        "1 = 1",       "1 = 2",         "3 BETWEEN 2 AND 6", "NULL IS NULL", "(1 < 2 OR 2 < 1)",
+        "NOT (1 = 1)", "2 IN (1, 2, 3)"};
+    const std::vector<std::string> froms = {
+        "r1 AS x",
+        "r1 AS x, r2 AS y WHERE x.a = y.a",
+        "r1 AS x JOIN r2 AS y ON x.a = y.a",
+        "r1 AS x, r2 AS y, r3 AS z WHERE x.a = y.a AND y.d = z.d",
+        "r1 AS x, r2 AS y, r3 AS z",
+        "r1 AS x LEFT JOIN r2 AS y ON x.a = y.a, r3 AS z WHERE z.d = y.d",
+    };
+    for (const std::string& from : froms) {
+        const bool has_where = from.find(" WHERE ") != std::string::npos;
+        for (const std::string& c : constants) {
+            const std::string sql =
+                "SELECT x.a, x.b FROM " + from + (has_where ? " AND " : " WHERE ") + c;
+            env.conn.SetOptimizerEnabled(false);
+            const QueryResult plain = env.conn.Query(sql);
+            env.conn.SetOptimizerEnabled(true);
+            const QueryResult optimized = env.conn.Query(sql);
+            ASSERT_TRUE(plain.ok()) << sql << "\n" << plain.error_message();
+            std::string why;
+            ASSERT_TRUE(SameResult(plain, optimized, /*ordered=*/false, why))
+                << sql << "\n  " << why;
+        }
+    }
+}
+
 TEST(OptimizerEquivalenceDirected, OrFactoringPreservesResultsOnNullData) {
     const std::vector<std::string> predicates = {
         "x.a = 1 OR (x.a = 1 AND x.b = 'a')",
