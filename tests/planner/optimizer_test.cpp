@@ -17,7 +17,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <regex>
 #include <sstream>
 
 namespace cdb {
@@ -65,12 +64,12 @@ struct Env {
     std::string Explain(const std::string& sql) {
         const QueryResult r = conn.Query("EXPLAIN " + sql);
         EXPECT_TRUE(r.ok()) << r.error_message();
-        static const std::regex estimate(R"(  \(~[0-9]+ rows\)$)");
         std::string out;
         for (idx_t i = 0; i < r.RowCount(); i++) {
             const std::string line = r.GetValue(0, i).GetVarchar();
-            EXPECT_TRUE(std::regex_search(line, estimate)) << "no estimate on: " << line;
-            out += std::regex_replace(line, estimate, "") + "\n";
+            std::string shape;
+            EXPECT_TRUE(test::StripEstimate(line, &shape)) << "no estimate on: " << line;
+            out += shape + "\n";
         }
         return out;
     }

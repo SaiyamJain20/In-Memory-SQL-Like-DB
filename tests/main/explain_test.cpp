@@ -6,7 +6,8 @@
 
 #include <gtest/gtest.h>
 
-#include <regex>
+#include <cctype>
+#include <cstdio>
 #include <sstream>
 
 namespace cdb {
@@ -50,28 +51,54 @@ struct Line {
     bool merged = false;
 };
 
+// One line of EXPLAIN ANALYZE, parsed by hand (std::regex trips GCC 13's -Wmaybe-uninitialized
+// under -O2 -Werror): `<indent><operator>  (est ~E, actual A rows, T ms[; build B rows, T ms | ; in
+// N rows])` or `<indent><operator>  (sorted as a top-N together with the LIMIT above)`.
+bool ParseLine(const std::string& l, Line& out) {
+    size_t indent = 0;
+    while (indent < l.size() && l[indent] == ' ') {
+        indent++;
+    }
+    const size_t merged = l.find("  (sorted as a top-N together with the LIMIT above)");
+    const size_t stats = l.find("  (est ~");
+    if (merged != std::string::npos) {
+        out.depth = static_cast<int>(indent / 2);
+        out.text = l.substr(indent, merged - indent);
+        out.merged = true;
+        return true;
+    }
+    if (stats == std::string::npos) {
+        return false;
+    }
+    long long estimate = 0, actual = 0, build = 0, consumed = 0;
+    double ms = 0;
+    int used = 0;
+    const char* p = l.c_str() + stats + 2;
+    if (std::sscanf(p, "(est ~%lld, actual %lld rows, %lf ms%n", &estimate, &actual, &ms, &used) !=
+        3) {
+        return false;
+    }
+    out.depth = static_cast<int>(indent / 2);
+    out.text = l.substr(indent, stats - indent);
+    out.estimate = estimate;
+    out.actual = actual;
+    out.ms = ms;
+    const char* rest = p + used;
+    if (std::sscanf(rest, "; build %lld rows", &build) == 1) {
+        out.build_rows = build;
+    } else if (std::sscanf(rest, "; in %lld rows", &consumed) == 1) {
+        out.in_rows = consumed;
+    }
+    return true;
+}
+
 std::vector<Line> ParseAnalyze(const std::vector<std::string>& lines) {
-    static const std::regex stats(
-        R"(^( *)(.*?)  \((?:est ~([0-9]+), actual ([0-9]+) rows, ([0-9.]+) ms(?:; build ([0-9]+) rows, [0-9.]+ ms|; in ([0-9]+) rows)?|(sorted as a top-N together with the LIMIT above))\)$)");
     std::vector<Line> out;
     for (const std::string& l : lines) {
-        std::smatch m;
-        if (!std::regex_match(l, m, stats)) {
-            continue; // the summary lines
-        }
         Line line;
-        line.depth = static_cast<int>(m[1].length() / 2);
-        line.text = m[2];
-        if (m[8].matched) {
-            line.merged = true;
-        } else {
-            line.estimate = std::stoll(m[3]);
-            line.actual = std::stoll(m[4]);
-            line.ms = std::stod(m[5]);
-            line.build_rows = m[6].matched ? std::stoll(m[6]) : -1;
-            line.in_rows = m[7].matched ? std::stoll(m[7]) : -1;
+        if (ParseLine(l, line)) { // (the summary lines are not operators)
+            out.push_back(line);
         }
-        out.push_back(line);
     }
     return out;
 }
@@ -109,9 +136,13 @@ TEST(Explain, EveryOperatorShowsItsEstimateAndAScanIsExact) {
     LoadData(s);
     const auto lines = s.Lines("EXPLAIN SELECT tag, count(*) FROM fact JOIN dim ON fact.k = dim.k "
                                "WHERE v < 3 GROUP BY tag");
-    static const std::regex annotated(R"(^ *[A-Z].*  \(~[0-9]+ rows\)$)");
     for (const std::string& l : lines) {
-        EXPECT_TRUE(std::regex_match(l, annotated)) << l;
+        std::string shape;
+        EXPECT_TRUE(test::StripEstimate(l, &shape)) << l;
+        EXPECT_FALSE(shape.empty()) << l;
+        EXPECT_NE(shape.find_first_not_of(' '), std::string::npos) << l;
+        EXPECT_TRUE(std::isupper(static_cast<unsigned char>(shape[shape.find_first_not_of(' ')])))
+            << l;
     }
     const auto scan = s.Lines("EXPLAIN SELECT * FROM fact");
     ASSERT_EQ(scan.size(), 2U) << "a PROJECT over the scan";
@@ -263,11 +294,11 @@ TEST(ExplainAnalyze, TimesAreCpuTimesSummedOverThreadsAndNeverExceedThem) {
         "EXPLAIN ANALYZE SELECT tag, sum(v) FROM fact JOIN dim ON fact.k = dim.k GROUP BY tag");
     double execution_ms = -1;
     for (const std::string& l : lines) {
-        std::smatch m;
-        if (std::regex_search(l, m,
-                              std::regex(R"(^Execution: ([0-9.]+) ms on ([0-9]+) threads?)"))) {
-            execution_ms = std::stod(m[1]);
-            EXPECT_EQ(std::stoi(m[2]), 4);
+        double ms = 0;
+        int threads = 0;
+        if (std::sscanf(l.c_str(), "Execution: %lf ms on %d thread", &ms, &threads) == 2) {
+            execution_ms = ms;
+            EXPECT_EQ(threads, 4);
         }
     }
     ASSERT_GE(execution_ms, 0);

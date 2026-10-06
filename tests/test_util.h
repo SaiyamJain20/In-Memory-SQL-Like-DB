@@ -131,4 +131,32 @@ inline bool BitIdentical(const Value& a, const Value& b) {
     return a == b;
 }
 
+// An EXPLAIN line ends with its row estimate, `  (~123 rows)`. Returns true if `line` does, and
+// stores the line without it in `*shape` (the plan's shape, which the planner tests compare).
+// (Written by hand: std::regex trips GCC 13's -Wmaybe-uninitialized under -O2 -Werror.)
+inline bool StripEstimate(const std::string& line, std::string* shape) {
+    const std::string open = "  (~", close = " rows)";
+    if (line.size() < open.size() + close.size() + 1 ||
+        line.compare(line.size() - close.size(), close.size(), close) != 0) {
+        return false;
+    }
+    const size_t at = line.rfind(open);
+    if (at == std::string::npos) {
+        return false;
+    }
+    const size_t from = at + open.size(), to = line.size() - close.size();
+    if (from >= to) {
+        return false; // no digits
+    }
+    for (size_t i = from; i < to; i++) {
+        if (line[i] < '0' || line[i] > '9') {
+            return false;
+        }
+    }
+    if (shape != nullptr) {
+        *shape = line.substr(0, at);
+    }
+    return true;
+}
+
 } // namespace cdb::test

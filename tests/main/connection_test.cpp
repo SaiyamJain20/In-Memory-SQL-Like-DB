@@ -6,7 +6,6 @@
 
 #include <filesystem>
 #include <fstream>
-#include <regex>
 
 namespace cdb {
 
@@ -226,8 +225,8 @@ TEST(Connection, CopyFailuresAreAtomicAndNameTheProblem) {
 namespace {
 // An EXPLAIN line without the row estimate that ends it.
 std::string Shape(const std::string& line) {
-    static const std::regex estimate(R"(  \(~[0-9]+ rows\)$)");
-    return std::regex_replace(line, estimate, "");
+    std::string shape;
+    return test::StripEstimate(line, &shape) ? shape : line;
 }
 } // namespace
 
