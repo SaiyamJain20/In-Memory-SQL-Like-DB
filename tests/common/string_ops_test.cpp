@@ -60,6 +60,27 @@ TEST(Utf8, LengthCountsCharacters) {
     EXPECT_EQ(Utf8Length(std::string("\0\0", 2)), 2U);
 }
 
+TEST(Utf8, ATruncatedSequenceNeverLooksPastTheEndOfTheView) {
+    // The view ends in the middle of a valid character, but the bytes that would complete it exist
+    // in memory right after the view. They must not be read: the cut-off bytes are characters of
+    // their own. (A NUL-terminated literal would hide a bug here: the byte after the end is 0, not
+    // a continuation byte.)
+    const char buf[] = "\xF0\x9F\x98\x80\xE2\x82\xAC\xC3\xA4";
+    EXPECT_EQ(Utf8CharLength(std::string_view(buf, 3), 0),
+              1U); // 4-byte character cut after 3 bytes
+    EXPECT_EQ(Utf8Length(std::string_view(buf, 3)), 3U);
+    EXPECT_EQ(Utf8CharLength(std::string_view(buf, 4), 0), 4U);     // complete
+    EXPECT_EQ(Utf8CharLength(std::string_view(buf + 4, 2), 0), 1U); // 3-byte cut after 2
+    EXPECT_EQ(Utf8Length(std::string_view(buf + 4, 2)), 2U);
+    EXPECT_EQ(Utf8CharLength(std::string_view(buf + 7, 1), 0), 1U); // 2-byte cut after 1
+    EXPECT_EQ(Utf8Length(std::string_view(buf + 7, 1)), 1U);
+    EXPECT_EQ(Utf8Length(std::string_view(buf + 7, 2)), 1U); // ... and complete
+    // the substring and LIKE built on it agree
+    EXPECT_EQ(SubstringView(std::string_view(buf + 4, 2), 1, 1), std::string_view(buf + 4, 1));
+    EXPECT_TRUE(LikeMatch(std::string_view(buf + 4, 2), "__"));
+    EXPECT_FALSE(LikeMatch(std::string_view(buf + 4, 2), "_"));
+}
+
 TEST(Utf8, LengthMatchesCharacterWalkOnRandomBytes) {
     Rng rng(11);
     for (int iter = 0; iter < 2000; iter++) {

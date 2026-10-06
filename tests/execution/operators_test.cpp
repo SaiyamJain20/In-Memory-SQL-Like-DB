@@ -302,6 +302,47 @@ TEST(Operators, LimitAndOffsetOverEveryChunkAlignment) {
     }
 }
 
+TEST(Operators, LimitSpanningSeveralSmallChunksCountsRowsAlreadyEmitted) {
+    // Chunk sizes chosen so that each limit ends inside a LATER chunk: the operator must subtract
+    // the rows it emitted from earlier ones (a limit that fits in the first chunk never shows it).
+    const std::vector<LogicalType> t = {LogicalType::Integer()};
+    Data d;
+    int32_t next = 0;
+    for (const idx_t n : {3, 4, 5, 2048, 7, 1}) {
+        DataChunk c;
+        c.Initialize(t);
+        for (idx_t i = 0; i < n; i++) {
+            c.SetValue(0, i, Value::Integer(next));
+            d.rows.push_back({Value::Integer(next)});
+            next++;
+        }
+        c.SetCardinality(n);
+        d.chunks.push_back(std::move(c));
+    }
+    const int64_t total = static_cast<int64_t>(d.rows.size());
+    for (const auto& [limit, offset] : std::vector<std::pair<int64_t, int64_t>>{{10, 0},
+                                                                                {6, 0},
+                                                                                {4, 0},
+                                                                                {8, 2},
+                                                                                {7, 3},
+                                                                                {2060, 5},
+                                                                                {3, 10},
+                                                                                {13, 0},
+                                                                                {12, 1},
+                                                                                {2063, 0}}) {
+        Simple s(t, &d.chunks);
+        s.Add<PhysicalLimit>(t, limit, offset);
+        const Rows got = s.Run(t);
+        const int64_t begin = std::min(offset, total);
+        const int64_t end = std::min(total, begin + limit);
+        ASSERT_EQ(static_cast<int64_t>(got.size()), end - begin)
+            << "limit " << limit << " offset " << offset;
+        for (int64_t i = 0; i < end - begin; i++) {
+            ASSERT_EQ(got[static_cast<size_t>(i)][0], d.rows[static_cast<size_t>(begin + i)][0]);
+        }
+    }
+}
+
 TEST(Operators, LimitStopsReadingTheSource) {
     // A source that counts how many chunks were requested: LIMIT 1 must not drain it.
     class Counting final : public PhysicalOperator {

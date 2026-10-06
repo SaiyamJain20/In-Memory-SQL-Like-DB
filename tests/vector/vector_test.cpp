@@ -825,6 +825,24 @@ TEST(VectorLazyStorage, EveryAccessPathWorksOnAResetVectorThatWasNeverWritten) {
     }
 }
 
+TEST(VectorLazyStorage, ToUnifiedOnAFreshlyResetVectorHandsOutRealStorage) {
+    // The first thing done to a reset vector is a read-only view of it (no Verify, no write
+    // before).
+    for (const LogicalType type :
+         {LogicalType::Boolean(), LogicalType::Integer(), LogicalType::BigInt(),
+          LogicalType::Double(), LogicalType::Date(), LogicalType::Varchar()}) {
+        Vector source(type);
+        Vector v(type);
+        v.Reference(source);
+        v.Reset();
+        UnifiedFormat u;
+        v.ToUnified(u);
+        ASSERT_NE(u.data, nullptr) << type.ToString();
+        EXPECT_TRUE(u.IsValid(0)) << type.ToString();
+        EXPECT_EQ(v.GetValue(0).IsNull(), false);
+    }
+}
+
 TEST(VectorLazyStorage, ReusedUnsharedVectorKeepsItsBufferAcrossResets) {
     Vector v(LogicalType::BigInt());
     v.SetValue(0, Value::BigInt(7));

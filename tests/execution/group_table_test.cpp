@@ -260,6 +260,43 @@ TEST(KeyIndex, IdsFollowFirstAppearanceAndMatchAModel) {
     }
 }
 
+TEST(KeyComparator, NullsAreEqualOnlyWhenAskedTo) {
+    // Joins never let a NULL key reach the comparator (they are filtered out first) so the
+    // `nulls_equal = false` rule has no operator-level test: check the contract directly. GROUP BY
+    // and DISTINCT use nulls_equal = true.
+    ChunkStore store({LogicalType::Integer()});
+    DataChunk stored;
+    stored.Initialize({LogicalType::Integer()});
+    stored.SetValue(0, 0, Value::Null(LogicalType::Integer()));
+    stored.SetValue(0, 1, Value::Integer(1));
+    stored.SetCardinality(2);
+    store.Append(stored);
+
+    DataChunk input;
+    input.Initialize({LogicalType::Integer()});
+    input.SetValue(0, 0, Value::Null(LogicalType::Integer()));
+    input.SetValue(0, 1, Value::Integer(1));
+    input.SetValue(0, 2, Value::Integer(2));
+    input.SetCardinality(3);
+    const std::vector<const Vector*> cols = {&input.column(0)};
+
+    const KeyComparator group(cols, /*nulls_equal=*/true);
+    EXPECT_TRUE(group.StoredEqualsInput(store, 0, 0)) << "NULL = NULL when grouping";
+    EXPECT_TRUE(group.StoredEqualsInput(store, 1, 1));
+    EXPECT_FALSE(group.StoredEqualsInput(store, 0, 1)) << "NULL never equals a value";
+    EXPECT_FALSE(group.StoredEqualsInput(store, 1, 0));
+    EXPECT_FALSE(group.StoredEqualsInput(store, 1, 2));
+    EXPECT_TRUE(group.InputEqualsInput(0, 0));
+    EXPECT_FALSE(group.InputEqualsInput(0, 1));
+
+    const KeyComparator join(cols, /*nulls_equal=*/false);
+    EXPECT_FALSE(join.StoredEqualsInput(store, 0, 0)) << "NULL = NULL is not a match in a join";
+    EXPECT_TRUE(join.StoredEqualsInput(store, 1, 1));
+    EXPECT_FALSE(join.StoredEqualsInput(store, 0, 1));
+    EXPECT_FALSE(join.InputEqualsInput(0, 0));
+    EXPECT_TRUE(join.InputEqualsInput(1, 1));
+}
+
 TEST(KeyIndex, ManyDistinctKeysForceTableGrowth) {
     KeyIndex index({LogicalType::BigInt(), LogicalType::Varchar()});
     DataChunk keys;

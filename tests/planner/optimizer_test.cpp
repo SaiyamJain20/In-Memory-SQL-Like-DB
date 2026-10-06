@@ -223,6 +223,38 @@ TEST(OptimizerShapes, JoinOrderWeighsPredicateSelectivityNotJustRelationSize) {
         "    SCAN cust [cust, nat]\n");
 }
 
+TEST(OptimizerShapes, ACompositeKeyIsSizedAsOneKeyNotAsEachColumnAlone) {
+    // li and ps both hold every (pk, sk) pair, so li JOIN ps on BOTH columns returns ~2000 rows.
+    // Each column alone has few distinct values (100 and 20); sized per column the join would look
+    // like a 100x blow-up and `other` (pk only, ~10,000 rows) would be joined first. The composite
+    // key's distinct combinations are capped by the input size, which gives the right order.
+    Env env;
+    env.Run("CREATE TABLE li (pk INTEGER, sk INTEGER, v INTEGER)");
+    env.Run("CREATE TABLE ps (pk INTEGER, sk INTEGER)");
+    env.Run("CREATE TABLE other (pk INTEGER)");
+    std::string li, ps, other;
+    for (int i = 0; i < 2000; i++) {
+        li += (i ? "," : "") + std::string("(") + std::to_string(i % 100) + "," +
+              std::to_string(i / 100) + "," + std::to_string(i) + ")";
+        ps += (i ? "," : "") + std::string("(") + std::to_string(i % 100) + "," +
+              std::to_string(i / 100) + ")";
+    }
+    for (int i = 0; i < 500; i++) {
+        other += (i ? "," : "") + std::string("(") + std::to_string(i % 100) + ")";
+    }
+    env.Run("INSERT INTO li VALUES " + li);
+    env.Run("INSERT INTO ps VALUES " + ps);
+    env.Run("INSERT INTO other VALUES " + other);
+    EXPECT_EQ(env.Explain("SELECT li.v FROM li, ps, other "
+                          "WHERE li.pk = ps.pk AND li.sk = ps.sk AND li.pk = other.pk"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (li.pk = other.pk)\n"
+              "    JOIN INNER ON ((li.pk = ps.pk) AND (li.sk = ps.sk))\n"
+              "      SCAN li [pk, sk, v]\n"
+              "      SCAN ps [pk, sk]\n"
+              "    SCAN other [pk]\n");
+}
+
 TEST(OptimizerShapes, OrBranchesShareTheirCommonConjunctsSoTheJoinGetsAKey) {
     Env env;
     env.SizedTables();
