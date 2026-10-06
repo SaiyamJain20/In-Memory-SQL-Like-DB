@@ -5,7 +5,9 @@
 // and in the same order.
 //
 // The data is generated, not checked in. If it is missing the tests skip, unless CDB_REQUIRE_TPCH
-// is set (tools/verify.sh and the CI "tpch" job set it), in which case they fail.
+// is set (tools/verify.sh and the CI test jobs set it), in which case they fail. CDB_TPCH_SF
+// selects the scale factor (default 0.01; the roadmap's exit criteria are SF0.1 and SF1, run by
+// hand).
 
 #include "main/connection.h"
 #include "main/database.h"
@@ -25,8 +27,11 @@ namespace {
 const char* const kTables[] = {"nation",   "region",   "part",   "supplier",
                                "partsupp", "customer", "orders", "lineitem"};
 
+// The scale factor under test: CDB_TPCH_SF (e.g. 0.1 or 1; data from tools/tpch_data.py --sf N),
+// default 0.01, the one the gate and CI use.
 std::string DataDir() {
-    return std::string(CDB_SOURCE_DIR) + "/data/tpch-sf0.01";
+    const char* sf = std::getenv("CDB_TPCH_SF");
+    return std::string(CDB_SOURCE_DIR) + "/data/tpch-sf" + (sf ? sf : "0.01");
 }
 
 std::string ReadFile(const std::string& path) {

@@ -218,6 +218,67 @@ double EstimateRows(const LogicalOperator& op) {
     }
 }
 
+// Distinct-value estimates for join sizing. For an integer or date column read straight from a
+// table (through filters and column-only projections) the zone maps bound the number of distinct
+// values by the value range: min(rows, max - min + 1). That alone separates the 25 nation keys
+// from the 150,000 order keys, which is what decides whether a join multiplies rows or not.
+std::optional<int64_t> AsInt64(const Value& v) {
+    switch (v.type().id()) {
+    case TypeId::Integer:
+        return v.GetInteger();
+    case TypeId::BigInt:
+        return v.GetBigInt();
+    case TypeId::Date:
+        return v.GetDate().days;
+    default:
+        return std::nullopt;
+    }
+}
+
+double TableColumnNdv(const Table& table, idx_t table_column, double rows) {
+    const auto snapshot = table.Snapshot();
+    std::optional<int64_t> lo, hi;
+    for (idx_t g = 0; g < snapshot->row_group_count(); g++) {
+        const ColumnStats& st = snapshot->row_group(g).column(table_column).stats();
+        if (!st.min || !st.max) {
+            continue; // all NULL (or no usable bounds)
+        }
+        const auto a = AsInt64(*st.min), b = AsInt64(*st.max);
+        if (!a || !b) {
+            return rows; // not an integer-like column
+        }
+        lo = lo ? std::min(*lo, *a) : *a;
+        hi = hi ? std::max(*hi, *b) : *b;
+    }
+    if (!lo || !hi) {
+        return rows;
+    }
+    return std::min(rows, static_cast<double>(*hi) - static_cast<double>(*lo) + 1.0);
+}
+
+double ColumnNdv(const LogicalOperator& op, idx_t column, double rows) {
+    switch (op.kind) {
+    case LogicalKind::Filter:
+        return std::min(rows, ColumnNdv(*op.children[0], column, EstimateRows(*op.children[0])));
+    case LogicalKind::Get: {
+        const auto& get = static_cast<const LogicalGet&>(op);
+        const double base = static_cast<double>(get.table->RowCount());
+        return std::min(rows,
+                        TableColumnNdv(*get.table, get.column_ids.at(column), std::max(1.0, base)));
+    }
+    case LogicalKind::Projection: {
+        const auto& p = static_cast<const LogicalProjection&>(op);
+        if (p.exprs.at(column)->kind == BoundKind::ColumnRef) {
+            return std::min(rows, ColumnNdv(*op.children[0], p.exprs[column]->ordinal,
+                                            EstimateRows(*op.children[0])));
+        }
+        return rows;
+    }
+    default:
+        return rows;
+    }
+}
+
 LogicalPtr Push(LogicalPtr op, Conjuncts conjuncts);
 
 // ---------------------------------------------------------------------------------- join trees
@@ -335,30 +396,69 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
         }
         order.push_back(start);
         chosen |= uint64_t{1} << start;
+        double current_rows = est[start];
         while (order.size() < n) {
-            int best_tier = 3;
+            // Next relation: among those connected to the chosen ones by some predicate, the one
+            // giving the smallest estimated intermediate result (rows x rows x selectivity, with an
+            // equality's selectivity 1 / max(distinct values of its two columns)); relations with
+            // no connecting predicate (a cross product) only when nothing else is left.
+            bool best_connected = false;
+            double best_result = 0;
             size_t best = n;
             for (size_t l = 0; l < n; l++) {
                 if (chosen >> l & 1) {
                     continue;
                 }
-                int tier = 2; // 0: equi-connected, 1: otherwise connected, 2: cross product
+                double selectivity = 1.0;
+                double key_combinations = 1.0; // product of the equalities' distinct-value counts
+                bool has_equality = false;
+                bool connected = false;
                 for (size_t c = 0; c < flat.conjuncts.size(); c++) {
                     if (consumed[c] || !(mask[c] >> l & 1) || std::popcount(mask[c]) < 2 ||
                         (mask[c] & ~(chosen | (uint64_t{1} << l))) != 0) {
                         continue;
                     }
+                    connected = true;
                     const BoundExpr& e = *flat.conjuncts[c];
-                    const bool equi = e.kind == BoundKind::Operator && e.op == OperatorKind::Eq;
-                    tier = std::min(tier, equi ? 0 : 1);
+                    const bool plain_equality = e.kind == BoundKind::Operator &&
+                                                e.op == OperatorKind::Eq &&
+                                                e.children[0]->kind == BoundKind::ColumnRef &&
+                                                e.children[1]->kind == BoundKind::ColumnRef;
+                    if (!plain_equality) {
+                        selectivity *=
+                            e.kind == BoundKind::Operator && e.op == OperatorKind::Eq ? 0.1 : 0.3;
+                        continue;
+                    }
+                    double max_ndv = 1;
+                    for (const auto& side : e.children) {
+                        const size_t leaf = leaf_of(side->ordinal);
+                        const double rows = (chosen >> leaf & 1) ? current_rows : est[leaf];
+                        max_ndv =
+                            std::max(max_ndv, ColumnNdv(*flat.leaves[leaf],
+                                                        side->ordinal - flat.base[leaf], rows));
+                    }
+                    key_combinations *= max_ndv;
+                    has_equality = true;
                 }
-                if (tier < best_tier || (tier == best_tier && est[l] < est[best])) {
-                    best_tier = tier;
+                if (has_equality) {
+                    // k equalities form a composite key: its distinct combinations cannot exceed
+                    // the larger input's row count (so (partkey, suppkey) against partsupp is ~ one
+                    // match per row, not 1 / (ndv1 * ndv2) of them).
+                    selectivity /=
+                        std::max(1.0, std::min(key_combinations, std::max(current_rows, est[l])));
+                }
+                const double result = std::max(1.0, current_rows * est[l] * selectivity);
+                if (best == n || (connected && !best_connected) ||
+                    (connected == best_connected &&
+                     (result < best_result || (result == best_result && est[l] < est[best])))) {
                     best = l;
+                    best_connected = connected;
+                    best_result = result;
                 }
             }
             order.push_back(best);
             chosen |= uint64_t{1} << best;
+            current_rows = best_result;
         }
     }
 

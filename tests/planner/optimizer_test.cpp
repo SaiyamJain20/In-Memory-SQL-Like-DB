@@ -187,6 +187,42 @@ TEST(OptimizerShapes, JoinOrderStartsFromTheLargestAndAvoidsCrossProducts) {
         "    SCAN small [k, z]\n");
 }
 
+TEST(OptimizerShapes, JoinOrderWeighsPredicateSelectivityNotJustRelationSize) {
+    // The TPC-H Q5 trap. `cust` is the smaller relation, but its only link to `fact` before `ords`
+    // joins is `cust.nat = fact.nat`, a 25-valued key: each fact row would match ~4 customers, so
+    // the intermediate result quadruples. `ords` is bigger but joins on a unique key and keeps the
+    // result at 2000 rows, so it must come first; cust then joins on both of its keys.
+    Env env;
+    env.Run("CREATE TABLE fact (id INTEGER, ord INTEGER, nat INTEGER)");
+    env.Run("CREATE TABLE ords (ord INTEGER, cust INTEGER)");
+    env.Run("CREATE TABLE cust (cust INTEGER, nat INTEGER)");
+    std::string fact, ords, cust;
+    for (int i = 0; i < 2000; i++) {
+        fact += (i ? "," : "") + std::string("(") + std::to_string(i) + "," +
+                std::to_string(i % 500) + "," + std::to_string(i % 25) + ")";
+    }
+    for (int i = 0; i < 500; i++) {
+        ords += (i ? "," : "") + std::string("(") + std::to_string(i) + "," +
+                std::to_string(i % 100) + ")";
+    }
+    for (int i = 0; i < 100; i++) {
+        cust += (i ? "," : "") + std::string("(") + std::to_string(i) + "," +
+                std::to_string(i % 25) + ")";
+    }
+    env.Run("INSERT INTO fact VALUES " + fact);
+    env.Run("INSERT INTO ords VALUES " + ords);
+    env.Run("INSERT INTO cust VALUES " + cust);
+    EXPECT_EQ(
+        env.Explain("SELECT fact.id FROM fact, ords, cust "
+                    "WHERE fact.ord = ords.ord AND ords.cust = cust.cust AND cust.nat = fact.nat"),
+        "PROJECT [id]\n"
+        "  JOIN INNER ON ((ords.cust = cust.cust) AND (cust.nat = fact.nat))\n"
+        "    JOIN INNER ON (fact.ord = ords.ord)\n"
+        "      SCAN fact [id, ord, nat]\n"
+        "      SCAN ords [ord, cust]\n"
+        "    SCAN cust [cust, nat]\n");
+}
+
 TEST(OptimizerShapes, OrBranchesShareTheirCommonConjunctsSoTheJoinGetsAKey) {
     Env env;
     env.SizedTables();
