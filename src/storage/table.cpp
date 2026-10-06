@@ -202,15 +202,15 @@ std::optional<idx_t> Table::FindColumn(const std::string& name) const {
     return std::nullopt;
 }
 
-void Table::Append(const DataChunk& chunk) {
+void Table::CheckChunkShape(const DataChunk& chunk) const {
     CDB_CHECK(chunk.ColumnCount() == schema_.size());
     for (idx_t c = 0; c < schema_.size(); c++) {
         CDB_CHECK(chunk.types()[c] == schema_[c].type);
     }
-    if (chunk.size() == 0) {
-        return;
-    }
-    // Enforce NOT NULL up front so a rejected chunk leaves the table untouched.
+}
+
+void Table::ValidateChunk(const DataChunk& chunk) const {
+    CheckChunkShape(chunk);
     for (idx_t c = 0; c < schema_.size(); c++) {
         if (!schema_[c].not_null) {
             continue;
@@ -225,6 +225,31 @@ void Table::Append(const DataChunk& chunk) {
             }
         }
     }
+}
+
+void Table::AppendRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups) {
+    for (const auto& g : groups) {
+        CDB_CHECK(g != nullptr && g->ColumnCount() == schema_.size() &&
+                  g->count() <= row_group_size_);
+    }
+    std::unique_lock lock(mutex_);
+    if (open_ && open_->count() > 0) {
+        sealed_.push_back(open_->Seal()); // so the new groups follow it in order
+    }
+    open_.reset();
+    for (auto& g : groups) {
+        sealed_.push_back(std::move(g));
+    }
+    tail_cache_.reset();
+}
+
+void Table::Append(const DataChunk& chunk) {
+    CheckChunkShape(chunk);
+    if (chunk.size() == 0) {
+        return;
+    }
+    // Enforce NOT NULL up front so a rejected chunk leaves the table untouched.
+    ValidateChunk(chunk);
     std::unique_lock lock(mutex_);
     idx_t pos = 0;
     while (pos < chunk.size()) {

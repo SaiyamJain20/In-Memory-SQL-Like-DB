@@ -80,7 +80,8 @@ QueryResult Connection::Execute(LogicalPtr plan) {
         CsvOptions options;
         options.delimiter = op.delimiter.empty() ? ',' : op.delimiter[0];
         options.header = op.header;
-        return CountResult(LoadCsvFile(*op.table, op.path, options));
+        const std::shared_ptr<TaskScheduler> scheduler = db_.scheduler();
+        return CountResult(LoadCsvFile(*op.table, op.path, options, scheduler.get()));
     }
     case LogicalKind::Explain: {
         const auto& op = static_cast<const LogicalExplain&>(*plan);

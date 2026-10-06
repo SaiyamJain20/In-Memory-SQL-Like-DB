@@ -152,6 +152,16 @@ class Table {
     // may be in any format.
     void Append(const DataChunk& chunk);
 
+    // Throws the error Append() would throw for a NULL in a NOT NULL column of `chunk`, without
+    // appending anything.
+    void ValidateChunk(const DataChunk& chunk) const;
+
+    // Appends row groups that were built and sealed elsewhere (each with this table's schema and at
+    // most row_group_size() rows), in order, after the existing rows: a still-open tail is sealed
+    // as a short group first. For loaders that build row groups on several threads. The groups
+    // are not checked against NOT NULL (see ValidateChunk).
+    void AppendRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups);
+
     // Atomically appends every row of `staging` to this table by moving its row groups in (no
     // data is copied) and adopting its still-open tail. Used for bulk loads: build the data in a
     // private staging table, then publish it all at once, so a failed load leaves no trace and
@@ -169,6 +179,8 @@ class Table {
     }
 
   private:
+    void CheckChunkShape(const DataChunk& chunk) const; // aborts on a column count / type mismatch
+
     std::string name_;
     std::vector<ColumnDefinition> schema_;
     idx_t row_group_size_;
