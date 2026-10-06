@@ -427,7 +427,8 @@ TEST(CrashCampaign, EveryOperationWithTheLogAloneAndExplicitCheckpoints) {
 
 TEST(CrashCampaign, ABigMultiFrameStatementIsAllOrNothingWhereverThePowerFails) {
     const Stats s = Campaign(Bulk(), true, 9, kBigStride);
-    EXPECT_GT(s.crash_points, 40U);
+    // (the operations covered: a sanitizer build runs every kBigStride-th crash point of them)
+    EXPECT_GT(s.crash_points * kBigStride, 70U);
     EXPECT_GT(s.without_the_in_flight_statement, 5U);
     EXPECT_GT(s.with_the_in_flight_statement, 5U);
     std::cout << "[campaign] bulk: " << s.crash_points << " crash points, " << s.recoveries
