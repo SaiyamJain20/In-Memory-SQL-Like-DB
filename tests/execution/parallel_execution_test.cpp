@@ -33,18 +33,23 @@ using Rows = std::vector<std::vector<Value>>;
 
 constexpr size_t kThreadCounts[] = {1, 2, 4, 8};
 
-// Hands out prepared chunks through an atomic cursor, tagging each with its index as the batch.
-// The parallel counterpart of a table scan.
+// Hands out prepared chunks through an atomic cursor, `chunks_per_batch` at a time: a thread claims
+// a whole batch and returns its chunks in order, all tagged with the batch number (as a table scan
+// does with a morsel). The parallel counterpart of a table scan.
 class ParallelChunkSource final : public PhysicalOperator {
   public:
-    ParallelChunkSource(std::vector<LogicalType> types, const std::vector<DataChunk>* chunks)
-        : PhysicalOperator(std::move(types)), chunks_(chunks) {}
+    ParallelChunkSource(std::vector<LogicalType> types, const std::vector<DataChunk>* chunks,
+                        size_t chunks_per_batch = 1)
+        : PhysicalOperator(std::move(types)), chunks_(chunks), per_batch_(chunks_per_batch) {}
     std::string Name() const override { return "PARALLEL_CHUNKS"; }
 
     struct Global final : GlobalSourceState {
-        std::atomic<size_t> next{0};
+        std::atomic<size_t> next_batch{0};
     };
-    struct Local final : LocalSourceState {};
+    struct Local final : LocalSourceState {
+        size_t next = 0, end = 0; // the chunks of the batch in hand
+        size_t batch = 0;
+    };
 
     std::unique_ptr<GlobalSourceState> GetGlobalSourceState(GlobalSinkState*) override {
         return std::make_unique<Global>();
@@ -54,18 +59,26 @@ class ParallelChunkSource final : public PhysicalOperator {
         return std::make_unique<Local>();
     }
     bool ParallelSource() const override { return true; }
-    idx_t MaxSourceThreads(GlobalSourceState&) const override { return chunks_->size(); }
-    bool GetData(GlobalSourceState& g, LocalSourceState& l, DataChunk& out) override {
-        const size_t i = static_cast<Global&>(g).next.fetch_add(1);
-        if (i >= chunks_->size()) {
-            return false;
+    idx_t MaxSourceThreads(GlobalSourceState&) const override {
+        return (chunks_->size() + per_batch_ - 1) / per_batch_;
+    }
+    bool GetData(GlobalSourceState& g, LocalSourceState& ls, DataChunk& out) override {
+        auto& l = static_cast<Local&>(ls);
+        if (l.next == l.end) {
+            const size_t batch = static_cast<Global&>(g).next_batch.fetch_add(1);
+            if (batch * per_batch_ >= chunks_->size()) {
+                return false;
+            }
+            l.batch = batch;
+            l.next = batch * per_batch_;
+            l.end = std::min(chunks_->size(), (batch + 1) * per_batch_);
         }
-        const DataChunk& in = (*chunks_)[i];
+        const DataChunk& in = (*chunks_)[l.next++];
         for (idx_t c = 0; c < in.ColumnCount(); c++) {
             out.column(c).Reference(in.column(c));
         }
         out.SetCardinality(in.size());
-        l.batch_index = i;
+        l.batch_index = l.batch;
         return true;
     }
 
@@ -74,6 +87,7 @@ class ParallelChunkSource final : public PhysicalOperator {
 
   private:
     const std::vector<DataChunk>* chunks_;
+    size_t per_batch_;
     std::atomic<int> locals_{0};
 };
 
@@ -362,6 +376,91 @@ TEST(ParallelExecution, AnErrorInOneThreadFailsTheQueryAndLeavesThePoolUsable) {
             rows += c.size();
         }
         ASSERT_EQ(rows, d.rows.size()) << "the scheduler must work after a failed query";
+    }
+}
+
+// A sink that only counts rows and does not declare itself parallel.
+class SerialCountSink final : public PhysicalOperator {
+  public:
+    SerialCountSink() : PhysicalOperator({LogicalType::BigInt()}) {}
+    std::string Name() const override { return "SERIAL_COUNT"; }
+    struct Global final : GlobalSinkState {
+        idx_t rows = 0;
+    };
+    struct Local final : LocalSinkState {};
+    std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override {
+        return std::make_unique<Global>();
+    }
+    std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override {
+        return std::make_unique<Local>();
+    }
+    SinkResult Sink(GlobalSinkState& g, LocalSinkState&, const DataChunk& input) override {
+        static_cast<Global&>(g).rows += input.size(); // unsynchronised: only correct on one thread
+        return SinkResult::NeedMoreInput;
+    }
+    void Combine(GlobalSinkState&, LocalSinkState&) override {}
+    void Finalize(GlobalSinkState&) override {}
+};
+
+TEST(ParallelExecution, ASerialOperatorAmongParallelOnesKeepsThePipelineOnOneThread) {
+    Rng rng(31);
+    const std::vector<LogicalType> in = {LogicalType::Integer(), LogicalType::Varchar()};
+    const Data d = MakeData(rng, in, 80, SmallGen());
+    Pipe p(in, &d.chunks);
+    p.Add<PhysicalFilter>(in, Cmp(OperatorKind::Ge, Col(0, in[0]),
+                                  BoundExpr::Constant(Value::Integer(-100)))); // parallel
+    p.Add<SerialOnly>(in);                                                     // not
+    p.Add<PhysicalProjection>(in, [&] {
+        std::vector<BoundExprPtr> e;
+        e.push_back(Col(0, in[0]));
+        e.push_back(Col(1, in[1]));
+        return e;
+    }()); // parallel again
+    p.Finish(in);
+    RunPlan(p.plan, 8);
+    EXPECT_EQ(p.source->participants(), 1) << "one operator that is not parallel decides";
+}
+
+TEST(ParallelExecution, ASinkThatIsNotParallelKeepsThePipelineOnOneThread) {
+    Rng rng(32);
+    const std::vector<LogicalType> in = {LogicalType::Integer()};
+    const Data d = MakeData(rng, in, 120, SmallGen());
+    PhysicalPlan plan;
+    auto& src = plan.Make<ParallelChunkSource>(in, &d.chunks);
+    auto& sink = plan.Make<SerialCountSink>();
+    Pipeline p;
+    p.source = &src;
+    p.sink = &sink;
+    plan.pipelines = {p};
+    plan.root = &sink;
+    TaskScheduler scheduler(8);
+    Executor ex(plan, &scheduler);
+    ex.Run();
+    EXPECT_EQ(src.participants(), 1);
+    EXPECT_EQ(static_cast<SerialCountSink::Global*>(ex.SinkState(sink))->rows, d.rows.size());
+}
+
+TEST(ParallelExecution, ChunksOfOneBatchStayTogetherAndInOrderAndBatchesComeInOrder) {
+    Rng rng(33);
+    const std::vector<LogicalType> in = {LogicalType::Integer(), LogicalType::Varchar()};
+    const Data d = MakeData(rng, in, 400, SmallGen(), 40, false);
+    for (const size_t per_batch : {size_t{1}, size_t{4}, size_t{7}}) {
+        for (const size_t threads : {size_t{2}, size_t{4}, size_t{8}}) {
+            PhysicalPlan plan;
+            auto& src = plan.Make<ParallelChunkSource>(in, &d.chunks, per_batch);
+            auto& sink = plan.Make<PhysicalResultCollector>(in);
+            Pipeline p;
+            p.source = &src;
+            p.sink = &sink;
+            plan.pipelines = {p};
+            plan.root = &sink;
+            const Rows got = RunPlan(plan, threads);
+            ASSERT_EQ(got.size(), d.rows.size());
+            for (size_t i = 0; i < got.size(); i++) {
+                ASSERT_TRUE(test::CompareTuples(got[i], d.rows[i]) == 0)
+                    << "per batch " << per_batch << " threads " << threads << " row " << i;
+            }
+        }
     }
 }
 

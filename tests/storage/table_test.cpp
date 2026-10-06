@@ -52,6 +52,85 @@ TEST(Table, AppendThenScanRoundTripsEveryType) {
     }
 }
 
+TEST(Table, AppendRowGroupsKeepsTheOpenTailAndAppendsTheGroupsInOrder) {
+    test::Rng rng(70);
+    // Three sealed groups built elsewhere (a loader that builds row groups on several threads).
+    Table source("src", AllTypesSchema(), kSmallGroup);
+    TableModel source_model(source.schema().size());
+    Fill(source, source_model, rng, 3 * kSmallGroup);
+    const auto source_snapshot = source.Snapshot();
+    ASSERT_EQ(source_snapshot->row_group_count(), 3U);
+
+    // A table with one sealed group and a partial open tail.
+    Table table("t", AllTypesSchema(), kSmallGroup);
+    TableModel expected(table.schema().size());
+    Fill(table, expected, rng, kSmallGroup + 1000);
+    ASSERT_EQ(table.Snapshot()->row_group_count(), 2U);
+
+    // Append groups 0 and 2 (not 1): the tail is sealed first, then the groups follow in order.
+    table.AppendRowGroups({source_snapshot->row_group_ptr(0), source_snapshot->row_group_ptr(2)});
+    for (idx_t c = 0; c < expected.cols.size(); c++) {
+        for (const auto& [first, last] :
+             {std::pair<idx_t, idx_t>{0, kSmallGroup},
+              std::pair<idx_t, idx_t>{2 * kSmallGroup, 3 * kSmallGroup}}) {
+            expected.cols[c].insert(expected.cols[c].end(),
+                                    source_model.cols[c].begin() + static_cast<long>(first),
+                                    source_model.cols[c].begin() + static_cast<long>(last));
+        }
+    }
+    EXPECT_EQ(table.RowCount(), expected.rows());
+    {
+        const auto snap = table.Snapshot();
+        std::vector<idx_t> sizes;
+        for (idx_t g = 0; g < snap->row_group_count(); g++) {
+            sizes.push_back(snap->row_group(g).count());
+        }
+        EXPECT_EQ(sizes, (std::vector<idx_t>{kSmallGroup, 1000, kSmallGroup, kSmallGroup}))
+            << "the open tail became a short sealed group; no open tail is left";
+        TableScan scan(snap, test::AllColumns(*snap));
+        ExpectColumnsEqual(ScanAll(scan), expected.cols, "after AppendRowGroups");
+    }
+    // Appending goes on in a fresh open group.
+    Fill(table, expected, rng, 500);
+    {
+        const auto snap = table.Snapshot();
+        EXPECT_EQ(snap->row_group_count(), 5U);
+        EXPECT_EQ(snap->row_group(4).count(), 500U);
+        TableScan scan(snap, test::AllColumns(*snap));
+        ExpectColumnsEqual(ScanAll(scan), expected.cols, "after appending again");
+    }
+    // The source groups are shared, not consumed.
+    EXPECT_EQ(source.RowCount(), 3 * kSmallGroup);
+    table.AppendRowGroups({});
+    EXPECT_EQ(table.RowCount(), expected.rows());
+}
+
+TEST(Table, ValidateChunkRejectsNullsInNotNullColumnsWithoutAppending) {
+    Table table("t",
+                {{"a", LogicalType::Integer(), /*not_null=*/true}, {"b", LogicalType::Integer()}});
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer(), LogicalType::Integer()});
+    for (idx_t r = 0; r < 4; r++) {
+        chunk.SetValue(0, r, Value::Integer(static_cast<int32_t>(r)));
+        chunk.SetValue(1, r, r % 2 ? Value::Null(LogicalType::Integer()) : Value::Integer(1));
+    }
+    chunk.SetCardinality(4);
+    EXPECT_NO_THROW(table.ValidateChunk(chunk)) << "NULLs in a nullable column are fine";
+    chunk.SetValue(0, 2, Value::Null(LogicalType::Integer()));
+    try {
+        table.ValidateChunk(chunk);
+        FAIL() << "expected a NOT NULL error";
+    } catch (const Error& e) {
+        EXPECT_NE(
+            std::string(e.what()).find("NOT NULL constraint failed: column \"a\" of table \"t\""),
+            std::string::npos)
+            << e.what();
+    }
+    EXPECT_EQ(table.RowCount(), 0U) << "validating appends nothing";
+    EXPECT_THROW(table.Append(chunk), Error) << "Append rejects the same chunk";
+    EXPECT_EQ(table.RowCount(), 0U);
+}
+
 TEST(Table, DefaultRowGroupSizeIsSixtyVectors) {
     EXPECT_EQ(kRowGroupSize, 60u * kVectorSize);
     Table t("t", {{"x", LogicalType::Integer()}});

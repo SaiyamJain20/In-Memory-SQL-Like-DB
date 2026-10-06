@@ -754,6 +754,54 @@ TEST(GroupTable, OnlyGroupedTablesWithoutDistinctCanMergeByGroup) {
     EXPECT_TRUE(distinct_rows.CanCombineGroups());
 }
 
+// CombineGroups works in vectors of 2048 groups: a call with several vectors' worth must walk its
+// list of groups, not start over each time.
+TEST(GroupTable, CombineGroupsHandlesMoreGroupsThanOneVectorInASingleCall) {
+    const std::vector<AggregateSpec> specs = {
+        {AggregateKind::CountStar, LogicalType::Integer(), false},
+        {AggregateKind::Sum, LogicalType::BigInt(), false},
+        {AggregateKind::Min, LogicalType::Varchar(), false}};
+    constexpr idx_t kGroups = 3 * kVectorSize + 123;
+    GroupTable src({LogicalType::Integer()}, specs);
+    DataChunk in;
+    in.Initialize({LogicalType::Integer(), LogicalType::BigInt(), LogicalType::Varchar()});
+    std::map<int32_t, std::pair<int64_t, std::string>> expected;
+    for (idx_t base = 0; base < kGroups; base += kVectorSize) {
+        const idx_t n = std::min<idx_t>(kVectorSize, kGroups - base);
+        in.Reset();
+        for (idx_t r = 0; r < n; r++) {
+            const auto key = static_cast<int32_t>(base + r);
+            in.SetValue(0, r, Value::Integer(key));
+            in.SetValue(1, r, Value::BigInt(static_cast<int64_t>(key) * 10));
+            in.SetValue(2, r, Value::Varchar("group-" + std::to_string(key)));
+            expected[key] = {static_cast<int64_t>(key) * 10, "group-" + std::to_string(key)};
+        }
+        in.SetCardinality(n);
+        DataChunk keys;
+        keys.Initialize({LogicalType::Integer()});
+        keys.column(0).Reference(in.column(0));
+        keys.SetCardinality(n);
+        src.Sink(keys, {nullptr, &in.column(1), &in.column(2)}, n);
+    }
+    ASSERT_EQ(src.GroupCount(), kGroups);
+    // all groups in a shuffled order, in one call
+    std::vector<uint32_t> ids(kGroups);
+    std::iota(ids.begin(), ids.end(), 0U);
+    Rng rng(63);
+    std::shuffle(ids.begin(), ids.end(), rng);
+    GroupTable dst({LogicalType::Integer()}, specs);
+    dst.CombineGroups(src, ids.data(), ids.size());
+    const auto got = ReadAll(dst);
+    ASSERT_EQ(got.size(), expected.size());
+    for (const auto& [key, want] : expected) {
+        const auto it = got.find({Value::Integer(key)});
+        ASSERT_NE(it, got.end()) << key;
+        ASSERT_EQ(it->second[0], Value::BigInt(1)) << key;
+        ASSERT_EQ(it->second[1], Value::BigInt(want.first)) << key;
+        ASSERT_EQ(it->second[2], Value::Varchar(want.second)) << key;
+    }
+}
+
 TEST(GroupTable, CombineGroupsOfNothingAndIntoAnEmptyTable) {
     const std::vector<AggregateSpec> specs = {
         {AggregateKind::CountStar, LogicalType::Integer(), false},
