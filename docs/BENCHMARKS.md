@@ -148,7 +148,7 @@ SF1 load: lineitem 5.1 s, orders 1.0 s, partsupp 0.5 s (CSV parse, single-thread
 **Reading these numbers honestly.** The geometric mean over the 12 queries is 1.7x at SF0.1 and
 3.1x at SF1 - DuckDB is faster, as it should be at this stage. Scan/aggregate queries (Q1, Q6, Q12,
 Q14, Q19) are within 1.2-1.9x. The gap opens with the multi-way joins at SF1 (Q7 10x, Q8 8x, Q9 11x), while at SF0.1 the same
-queries are 2.7-4.9x. *Hypothesis, not yet measured:* the join build side is a chained table (bucket
+queries are 2.7-4.9x. *Hypothesis (confirmed in Phase 5, see below):* the join build side is a chained table (bucket
 heads, a `next` array, a `hashes` array and a separate key store), so a probe touches several cache lines
 at random, which costs little while the tables fit in cache (SF0.1) and a lot when they do not (SF1);
 a layout that keeps hash and key together in the bucket should help. Q9 is also hurt by a crude row estimate for `LIKE '%green%'` (fixed
@@ -165,3 +165,121 @@ Environment); differences under ~15% are noise.
 | Join ordering sized by distinct-value estimates (zone-map ranges) instead of relation size alone | Q5 at SF0.1: 2693 ms -> 21 ms (a 72 M-row intermediate result avoided) |
 | Factoring conjuncts common to all branches of an `OR` (Q19's `p_partkey = l_partkey`) | Q19 at SF0.01: 46 s (nested loop over a cross product) -> 9 ms |
 | *Tried, not kept:* leaving `SelectionVector` storage uninitialised | no measurable change, so the zero-initialised contract stays |
+
+
+---
+
+## Phase 5 - compression and SIMD kernels
+
+Same machine, compiler and build as above (GCC 13.3 `-O3 -DNDEBUG`, **no `-march=native`**: every AVX2 function
+carries a per-function target attribute and is only called after a runtime CPU check, with a scalar
+fallback and a `CDB_NO_SIMD` switch). "Scalar" below is the same entry point with SIMD switched off.
+Kernel micro-benchmarks: `build/release/bench/cdb_bench --benchmark_filter='Unpack|Offsets|Select|SumInt|SumDouble|MinMax|Hash.*Column|Scan(Date|Money|Sorted|Dictionary)' --benchmark_repetitions=3`
+(medians; one 2048-row vector per iteration; "ps/row" = picoseconds per row).
+
+### Kernels: before / after
+| Kernel | Before (ps/row) | After (ps/row) | Speed-up | Notes |
+|---|---:|---:|---:|---|
+| bit unpack, width 3 | 836 | 203 | **4.1x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| bit unpack, width 8 | 808 | 187 | **4.3x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| bit unpack, width 12 | 835 | 255 | **3.3x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| bit unpack, width 17 | 871 | 300 | **2.9x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| bit unpack, width 24 | 852 | 323 | **2.6x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| bit unpack, width 33 | 877 | 606 | **1.4x** | generic loop -> width-specialised unpackers (scalar, compile-time constants) |
+| select `int32 < c` (2% / 50% / 98% selectivity ~ same) | 518 | 144 | **3.6x** | AVX2 compare + permute-compaction; selectivity-independent |
+| select `int64 < c` | 519 | 161 | **3.2x** |  |
+| select `double < c` at 50% | 768 | 174 | **4.4x** | NaN/-0.0 order preserved with ordered/unordered predicates |
+| select `double < c` at 2% | 1118 | 178 | **6.3x** | scalar version is branchy here |
+| scaled-double decode (n / 10^e) | 1114 | 282 | **4.0x** | int64->double without AVX-512 via the 2^52 mantissa trick; bit-exact |
+| SUM(int32) | 135 | 84 | **1.6x** |  |
+| SUM(int64), overflow-checked | 259 | 137 | **1.9x** | vector overflow detection (sign trick) |
+| SUM(double) | 689 | 84 | **8.2x** | scalar is a latency-bound add chain; vector re-associates (documented) |
+| MIN+MAX(int32) | 236 | 44 | **5.4x** |  |
+| MIN+MAX(int64) | 533 | 138 | **3.9x** | compare + blend (no 64-bit min in AVX2) |
+| hash int32 column | 1062 | 471 | **2.3x** | murmur finaliser; 64-bit multiply from 3 x 32-bit multiplies |
+| hash int64 column | 993 | 512 | **1.9x** |  |
+
+**What did not help, and what was fixed.** An AVX2 version of the integer decode conversions
+(`base + offset`, narrowing 64-bit lanes to 32 bits) measured *slower* than the plain loop the compiler
+already vectorises (110 vs 83 ps/row), so it was deleted. The first AVX2 min/max was 3x *slower* than
+scalar (664 vs 232 ps/row) because GCC kept the accumulators in stack slots (a store-to-load dependency
+per iteration, caused by reducing through aliased aligned arrays); keeping them in registers and
+reducing with shuffles made it 5.4x faster than scalar.
+
+### Scanning encoded segments (per 2048-row vector)
+A raw segment scans zero-copy; an encoded one decodes. Bytes/row is the segment's stored size.
+| Column shape | Encoding | Stored bytes/row (raw -> encoded) | Scan raw | Scan encoded | Decode cost |
+|---|---|---:|---:|---:|---:|
+| dates over ~7 years | bit-packed (12 bits) | 4.0 -> 1.51 | 19 ns | 744 ns | 363 ps/row |
+| prices 0.00-99999.99 (DOUBLE) | scaled double (24 bits) | 8.0 -> 3.01 | 19 ns | 1286 ns | 628 ps/row |
+| ascending BIGINT key | delta bit-packed (2 bits) | 8.0 -> 0.26 | 19 ns | 949 ns | 463 ps/row |
+| 7 distinct strings | dictionary (3 bits) | 16.0 -> 0.39 | 15 ns | 706 ns | 345 ps/row |
+
+### Memory footprint on TPC-H SF1 (stored column data, `Table::MemoryUsage`)
+`build/release/bench/cdb_tpch --sf 1 [--no-compression]`
+| Table | Rows | Raw MB | Compressed MB | Ratio |
+|---|---:|---:|---:|---:|
+| lineitem | 6,001,215 | 994.7 | 337.5 | **2.9x** |
+| orders | 1,500,000 | 221.1 | 108.4 | **2.0x** |
+| partsupp | 800,000 | 121.8 | 111.7 | **1.1x** |
+| customer | 150,000 | 32.4 | 29.1 | **1.1x** |
+| part | 200,000 | 36.1 | 23.4 | **1.5x** |
+| supplier | 10,000 | 1.9 | 1.9 | **1.0x** |
+| **all tables** | | **1408** | **612** | **2.3x** |
+
+Peak RSS after loading SF1: 1498 MB raw vs 720 MB compressed. The open tail of a table is never compressed (only sealed row groups are), and a column that does not compress (e.g. random comments, `*_comment` strings) stays raw.
+
+### TPC-H SF1: Phase 4 -> Phase 5, compressed vs raw, vs DuckDB (single thread, min of 5 runs, ms)
+| Query | Phase 4 (raw) | Phase 5 raw | Phase 5 **compressed** (default) | DuckDB 1-thread | compressed / DuckDB |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 401.0 | 237.6 | **243.5** | 207.8 | 1.2x |
+| Q3 | 149.8 | 101.2 | **126.9** | 51.7 | 2.5x |
+| Q5 | 290.0 | 220.7 | **248.2** | 60.3 | 4.1x |
+| Q6 | 43.3 | 35.6 | **44.3** | 22.9 | 1.9x |
+| Q7 | 618.7 | 478.8 | **504.1** | 60.0 | 8.4x |
+| Q8 | 286.6 | 244.4 | **277.5** | 35.4 | 7.8x |
+| Q9 | 2488.0 | 1363.4 | **1419.9** | 226.9 | 6.3x |
+| Q10 | 247.4 | 215.1 | **225.5** | 139.3 | 1.6x |
+| Q12 | 117.4 | 118.5 | **130.1** | 99.3 | 1.3x |
+| Q13 | 810.4 | 666.1 | **677.3** | 188.2 | 3.6x |
+| Q14 | 50.7 | 38.9 | **50.1** | 36.9 | 1.4x |
+| Q19 | 203.5 | 173.2 | **183.2** | 170.9 | 1.1x |
+| **geometric mean vs DuckDB** | 3.1x | 2.4x | **2.6x** | | |
+
+### TPC-H SF0.1: Phase 4 -> Phase 5, compressed vs raw, vs DuckDB (single thread, min of 5 runs, ms)
+| Query | Phase 4 (raw) | Phase 5 raw | Phase 5 **compressed** (default) | DuckDB 1-thread | compressed / DuckDB |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 41.5 | 23.9 | **24.6** | 21.7 | 1.1x |
+| Q3 | 7.2 | 7.7 | **8.5** | 6.7 | 1.3x |
+| Q5 | 16.6 | 17.4 | **18.8** | 6.8 | 2.8x |
+| Q6 | 4.3 | 3.4 | **4.3** | 2.8 | 1.5x |
+| Q7 | 43.7 | 41.2 | **42.0** | 9.0 | 4.7x |
+| Q8 | 19.0 | 19.7 | **21.3** | 7.1 | 3.0x |
+| Q9 | 61.5 | 56.4 | **57.8** | 19.9 | 2.9x |
+| Q10 | 18.0 | 19.9 | **20.1** | 22.1 | 0.9x |
+| Q12 | 11.4 | 11.7 | **12.7** | 11.9 | 1.1x |
+| Q13 | 51.7 | 51.0 | **46.9** | 14.3 | 3.3x |
+| Q14 | 3.4 | 2.2 | **3.6** | 4.2 | 0.9x |
+| Q19 | 11.9 | 11.5 | **13.0** | 18.1 | 0.7x |
+| **geometric mean vs DuckDB** | 1.7x | 1.5x | **1.7x** | | |
+
+**Reading these numbers.** Against single-threaded DuckDB the geometric mean over the 12 queries went from
+3.1x to **2.6x** at SF1 with the data 2.3x smaller (2.4x with compression off). At SF0.1 it is unchanged at 1.7x:
+the working set fits in cache there, so prefetching has little to win, and decoding costs a few percent on the
+short queries (individual SF0.1 queries move by +-10%, within the noise noted in Environment; Q1 gained 40%).
+Most of the SF1 gain is *not* compression: it is what profiling the join-heavy queries found. Compression
+costs 0-30% on scan-bound queries (decoding versus zero-copy) and is neutral on join-bound ones; the "raw"
+column is the same engine without it.
+
+What moved the numbers (measured, SF1, min ms; before -> after):
+| Change | Effect |
+|---|---|
+| Join probe: hash and chain pointer in one entry, plus a pre-pass that looks every bucket up and prefetches candidates' entries and key cells so cache misses overlap | Q9 2329 -> 1429, Q7 639 -> 523, Q5 289 -> 245, Q3 146 -> 126 (this *confirms* the Phase 4 hypothesis that the SF1 join gap was memory latency) |
+| Group-by on short string keys: hash inline strings from their 16 bytes, hash each distinct dictionary entry once, compare with `string_t::operator==` | Q1 429 -> 244 (401 in Phase 4, raw) |
+| Decode and gather write into unzeroed storage, selection vectors allocated uninitialised, `KeyIndex` scratch reuse | `memset` 8-12% of Q9's instructions removed (callgrind) |
+| Width-specialised unpack, AVX2 scaled-double decode, AVX2 compare-to-selection | compressed Q6 80.5 -> 44.3 (67.6 at that point with SIMD off), Q14 93 -> 50 |
+
+Remaining gaps against DuckDB are the multi-way joins at SF1 (Q7 8.4x, Q8 7.8x, Q9 6.3x),
+where row-wise build-side storage (one cache miss per payload row instead of one per payload column) and a better
+join order (Q9, no `LIKE` statistics) are the next steps (Phases 6 and 8).
+

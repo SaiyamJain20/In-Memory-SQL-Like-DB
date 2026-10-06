@@ -77,19 +77,25 @@ Filters do not copy data. They emit a `SelectionVector` (array of row indices); 
 operators read through it. A dictionary vector is exactly "child + selection", so slicing a chunk
 by a filter is O(selected) pointer work.
 
-## Storage — [implemented: Phase 2; encodings planned: Phase 5]
+## Storage — [implemented: Phase 2, encodings: Phase 5]
 Tables are lists of **row groups** (60 vectors = 122,880 rows). Each row group holds one
 **column segment** per column.
 
-**Segments are immutable and uncompressed [implemented]**, laid out exactly like a flat vector
-(values + validity bitmask + sealed string heap, each padded to a whole number of vectors). A scan
-therefore does no work per value: `ColumnSegment::Scan` points the output vector at precomputed
-read-only `Buffer::View`s into the segment (`Vector::ReferenceFlat`), with no copy and no
-allocation. Vectors obtained this way are read-only (asserted), and `Vector::Reset` detaches from
-them instead of reusing them for writing. Encodings chosen at seal time (constant, RLE,
-dictionary, frame-of-reference + bit-packing, delta) are **[planned: Phase 5]**; those segments
-decode into the output vector (or, for dictionary encoding, expose it zero-copy as a dictionary
-vector).
+**Segments are immutable [implemented]**. A *raw* segment is laid out exactly like a flat vector
+(values + validity bitmask + sealed string heap, each padded to a whole number of vectors), so a scan does no
+work per value: `ColumnSegment::Scan` points the output vector at precomputed read-only `Buffer::View`s
+(`Vector::ReferenceFlat`), with no copy and no allocation. Vectors obtained this way are read-only
+(asserted), and `Vector::Reset` detaches from them instead of reusing them for writing.
+
+**Encodings [implemented: Phase 5]** ([ADR 0007](adr/0007-segment-encodings-and-simd-dispatch.md)). When a
+row group seals, each column segment is encoded if that makes it at most 70% of its raw size, otherwise it
+stays raw: constant, RLE, bit-packed integers (frame of reference, or delta per vector for non-decreasing
+data), scaled doubles (`n / 10^e`, verified bit for bit so it is lossless, with a raw fallback per vector),
+and dictionary strings. Decoding is per 2048-row vector; constant vectors decode to CONSTANT vectors and
+dictionary segments expose a DICTIONARY-format vector over one shared dictionary (no string is copied, and
+hashing hashes each distinct entry once). The open tail is never encoded. On TPC-H SF1 the stored data
+shrinks from 1,408 MB to 612 MB (lineitem 2.9x); the cost is decode time on scan-bound queries
+([BENCHMARKS](BENCHMARKS.md)). `SetCompressionEnabled(false)` / `CDB_NO_COMPRESSION` keeps everything raw.
 
 **Zone maps [implemented]**: every segment carries exact min / max / null count (doubles use the
 NaN-last total order; string bounds are kept up to 64 bytes). `ColumnStats::CanSkip(op, c)` is
@@ -167,6 +173,13 @@ documented difference from the row-at-a-time interpreter: in selection position 
 evaluates `b` for rows where `a` is NULL or FALSE (they cannot be TRUE), so a run-time error in `b`
 on such a row is raised by the interpreter but not the executor; the differential test tolerates
 exactly that case.
+
+**SIMD kernels [implemented: Phase 5]** (`src/kernels/`, [ADR 0007](adr/0007-segment-encodings-and-simd-dispatch.md)).
+AVX2 versions with scalar fallbacks, dispatched at run time (`__builtin_cpu_supports`, no `-march=native`):
+compare-a-column-with-a-constant into a selection vector (used by the executor's `Select`), scaled-double
+decode, ungrouped SUM/MIN/MAX, integer hashing. Each is tested against the scalar version and an
+independent definition; results do not depend on the CPU (the one documented exception is the
+re-association of ungrouped `SUM(DOUBLE)`). `CDB_NO_SIMD` forces the scalar path.
 
 **Optimizer** ([ADR 0006](adr/0006-rule-based-optimizer.md)): filter pushdown (outer-join aware),
 zone-map hints, greedy join ordering sized by distinct-value estimates from zone maps, OR

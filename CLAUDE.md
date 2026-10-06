@@ -87,6 +87,10 @@ members `snake_case` (members suffixed `_`). No `using namespace` in headers, ev
   full (2048) vectors, and 1-row tails. Hot loops are `noexcept` and never throw per row
   (ADR 0002).
 - Check undefined behaviour by running ASan+UBSan, not by reasoning.
+- **While `tools/mutation_smoke.py` runs, build and test nothing else in the tree.** It mutates
+  `src/` in place, so a build of any other preset compiles the mutant and its results are
+  meaningless (this produced false `StringT` / `ExecutorDifferential` failures once). Docs are safe
+  to edit. Wait for the run's PID, not for `pgrep -f` (which matches its own command line).
 - **Never `git add -A` / `git commit -a` right after a mutation run or any scripted edit.** Stage
   explicit paths and read `git diff --stat` first (a mutated source file was once almost committed).
 - Scripted source edits (Python `str.replace`) must assert their anchor matched exactly once;

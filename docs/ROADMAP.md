@@ -30,7 +30,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ done (exit criteria ve
 | 2 | Columnar storage and catalog | ✅ | ~1 wk |
 | 3 | SQL front end: lexer, parser, binder, logical plan | ✅ | ~1 wk |
 | 4 | Vectorized execution: expressions, operators, pipelines (**v0.1**) | ✅ | ~1.5 wk |
-| 5 | Compression, zone maps, SIMD kernels | ⬜ | ~1.5 wk |
+| 5 | Compression, zone maps, SIMD kernels | ✅ | ~1.5 wk |
 | 6 | Morsel-driven parallelism | ⬜ | ~1 wk |
 | 7 | Persistence: on-disk format, WAL, checkpoints | ⬜ | ~1 wk |
 | 8 | Optimizer, statistics, subqueries, `EXPLAIN ANALYZE` | ⬜ | ~1.5 wk |
@@ -102,6 +102,15 @@ compare) with runtime CPU dispatch and scalar fallback.
 
 **Exit:** round-trip property tests for every encoding; before/after numbers for each kernel in
 `BENCHMARKS.md`; memory footprint reduction measured on TPC-H lineitem.
+
+**Done** (verified): constant, RLE, bit-packed (frame of reference and delta), scaled-double and
+dictionary encodings with round-trip property tests; AVX2 select / sum / min-max / decode / hash kernels
+with runtime dispatch and a scalar fallback, each with before/after numbers; TPC-H SF1 stored columns
+2.3x smaller (lineitem 2.9x); single-thread SF1 geometric mean vs DuckDB 3.1x -> 2.6x; the whole suite
+passes with SIMD and/or compression switched off, see `BENCHMARKS.md` and `PROGRESS.md`. Zone-map
+pruning of row groups already existed (Phase 4). Carried into later phases: predicates evaluated on
+compressed data (RLE / dictionary codes), the SIMD string-prefix compare, FSST / ALP-style encodings,
+and row-wise payload storage on the join build side (the remaining SF1 gap on Q7/Q8/Q9).
 
 ### Phase 6 — Morsel-driven parallelism
 Morsel dispatcher (shared atomic cursor) over a fixed thread pool; parallel scan, thread-local
