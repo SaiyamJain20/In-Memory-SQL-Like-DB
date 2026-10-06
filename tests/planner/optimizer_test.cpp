@@ -579,6 +579,71 @@ void LoadRandomTables(Env& env, Rng& rng) {
 
 } // namespace
 
+// ---------------------------------------------------------------------------------- OR factoring
+
+TEST(OptimizerShapes, OrFactoringKeepsTheCommonPartAndDropsImpliedRemainders) {
+    Env env;
+    env.Run("CREATE TABLE r1 (a INTEGER, b VARCHAR, c DOUBLE)");
+    // (a AND b1) OR (a AND b2)  ->  a AND (b1 OR b2)
+    EXPECT_EQ(env.Explain("SELECT a FROM r1 WHERE (a = 1 AND b = 'x') OR (a = 1 AND b = 'y')"),
+              "PROJECT [a]\n"
+              "  FILTER ((a = 1) AND ((b = 'x') OR (b = 'y')))\n"
+              "    SCAN r1 [a, b] prune(a = 1)\n");
+    // absorption: a OR (a AND b) = a, so the remainder disappears entirely
+    EXPECT_EQ(env.Explain("SELECT a FROM r1 WHERE a = 1 OR (a = 1 AND b = 'x')"),
+              "PROJECT [a]\n"
+              "  FILTER (a = 1)\n"
+              "    SCAN r1 [a] prune(a = 1)\n");
+    // nothing in common: left exactly as written
+    EXPECT_EQ(env.Explain("SELECT a FROM r1 WHERE (a = 1 AND b = 'x') OR (a = 2 AND b = 'y')"),
+              "PROJECT [a]\n"
+              "  FILTER (((a = 1) AND (b = 'x')) OR ((a = 2) AND (b = 'y')))\n"
+              "    SCAN r1 [a, b]\n");
+    // a conjunct that is not in EVERY branch must not be factored out
+    EXPECT_EQ(env.Explain(
+                  "SELECT a FROM r1 WHERE (a = 1 AND b = 'x') OR (a = 1 AND b = 'y') OR (b = 'z')"),
+              "PROJECT [a]\n"
+              "  FILTER ((((a = 1) AND (b = 'x')) OR ((a = 1) AND (b = 'y'))) OR (b = 'z'))\n"
+              "    SCAN r1 [a, b]\n");
+}
+
+TEST(OptimizerEquivalenceDirected, OrFactoringPreservesResultsOnNullData) {
+    const std::vector<std::string> predicates = {
+        "x.a = 1 OR (x.a = 1 AND x.b = 'a')",
+        "(x.a = 1 AND x.b = 'a') OR (x.a = 1 AND x.b = 'b')",
+        "(x.a = 1 AND x.b = 'a') OR (x.a = 2 AND x.b = 'a')",
+        "(x.a = 1 AND x.c > 1.0) OR (x.a = 1) OR (x.a = 2 AND x.c < 1.0)",
+        "(x.a > 1 AND x.b IS NULL) OR (x.a > 1 AND x.b IS NOT NULL)",
+        "(x.a > 2 AND x.b = 'a' AND x.c > 0.6) OR (x.a > 2 AND x.b = 'a' AND x.c < 0.4) OR (x.a > "
+        "2 AND x.b = 'a')",
+        "(x.a = 1 OR x.a = 2) AND ((x.b = 'a' AND x.c > 1.0) OR (x.b = 'a' AND x.c < 1.0))",
+        "NOT ((x.a = 1 AND x.b = 'a') OR (x.a = 1 AND x.b = 'b'))",
+        "(x.a IS NULL AND x.b = 'a') OR (x.a IS NULL AND x.b = 'b')",
+        "(x.a = y.a AND y.d = 1) OR (x.a = y.a AND y.d = 2)",
+        "(x.a = y.a AND y.d = 1) OR (x.a = y.a)",
+        "(x.a = y.a AND x.b = 'a') OR (x.a = y.a AND y.e = 'a') OR (x.a = y.a AND y.d > 3)",
+    };
+    for (uint64_t seed = 1; seed <= 4; seed++) {
+        Rng rng(seed * 1000);
+        Env env;
+        LoadRandomTables(env, rng);
+        for (const std::string& p : predicates) {
+            const bool join = p.find("y.") != std::string::npos;
+            const std::string sql = std::string("SELECT x.a, x.b, x.c") +
+                                    (join ? ", y.d, y.e" : "") + " FROM r1 AS x" +
+                                    (join ? ", r2 AS y" : "") + " WHERE " + p;
+            env.conn.SetOptimizerEnabled(false);
+            const QueryResult plain = env.conn.Query(sql);
+            env.conn.SetOptimizerEnabled(true);
+            const QueryResult optimized = env.conn.Query(sql);
+            ASSERT_TRUE(plain.ok()) << sql << "\n" << plain.error_message();
+            std::string why;
+            ASSERT_TRUE(SameResult(plain, optimized, /*ordered=*/false, why))
+                << sql << "\n  " << why;
+        }
+    }
+}
+
 class OptimizerEquivalence : public ::testing::TestWithParam<uint64_t> {};
 
 TEST_P(OptimizerEquivalence, RandomQueriesGiveTheSameAnswerWithAndWithoutTheOptimizer) {

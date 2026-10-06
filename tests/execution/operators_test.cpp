@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <map>
+#include <random>
+#include <tuple>
 
 namespace cdb {
 
@@ -952,6 +954,227 @@ TEST(Pipeline, PlanDescribesItsPipelines) {
     EXPECT_NE(text.find("FILTER"), std::string::npos);
     EXPECT_NE(text.find("LIMIT 5 OFFSET 2"), std::string::npos);
     EXPECT_NE(text.find("RESULT"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------------- local states
+
+// The Phase 6 scheduler will give every worker thread its own local sink state and call Combine
+// once per local state, then Finalize. These tests drive that protocol by hand with several local
+// states (the pipeline executor itself uses one) and require the same answers as a single pass.
+namespace {
+
+// Splits `chunks` randomly over `locals` local sink states of `op`, Combines them all in a random
+// order, Finalizes, and returns the global state.
+std::unique_ptr<GlobalSinkState> SinkThroughLocals(PhysicalOperator& op,
+                                                   const std::vector<DataChunk>& chunks,
+                                                   size_t locals, Rng& rng) {
+    auto global = op.GetGlobalSinkState();
+    std::vector<std::unique_ptr<LocalSinkState>> states;
+    for (size_t i = 0; i < locals; i++) {
+        states.push_back(op.GetLocalSinkState(*global));
+    }
+    for (const DataChunk& c : chunks) {
+        if (c.size() > 0) {
+            op.Sink(*global, *states[RandBelow(rng, locals)], c);
+        }
+    }
+    std::vector<size_t> order(locals);
+    for (size_t i = 0; i < locals; i++) {
+        order[i] = i;
+    }
+    std::shuffle(order.begin(), order.end(), rng);
+    for (const size_t i : order) {
+        op.Combine(*global, *states[i]);
+    }
+    op.Finalize(*global);
+    return global;
+}
+
+Rows DrainSource(PhysicalOperator& op, GlobalSinkState& sink) {
+    auto global = op.GetGlobalSourceState(&sink);
+    auto local = op.GetLocalSourceState(*global);
+    DataChunk chunk;
+    chunk.Initialize(op.types());
+    Rows rows;
+    for (;;) {
+        chunk.Reset();
+        if (!op.GetData(*global, *local, chunk)) {
+            break;
+        }
+        for (auto& r : RowsOf(chunk)) {
+            rows.push_back(std::move(r));
+        }
+    }
+    return rows;
+}
+
+} // namespace
+
+TEST(OperatorLocalStates, HashAggregateMergesLocalStatesIntoOneAnswer) {
+    Rng rng(21);
+    const std::vector<LogicalType> in = {LogicalType::Varchar(), LogicalType::Integer(),
+                                         LogicalType::BigInt()};
+    for (int round = 0; round < 12; round++) {
+        Data d = MakeData(rng, in, 8, Gen());
+        std::vector<BoundExprPtr> groups, aggs;
+        groups.push_back(Col(0, in[0]));
+        for (const auto& [kind, arg, type] :
+             {std::tuple{AggregateKind::CountStar, -1, LogicalType::BigInt()},
+              std::tuple{AggregateKind::Sum, 2, LogicalType::BigInt()},
+              std::tuple{AggregateKind::Max, 1, LogicalType::Integer()}}) {
+            std::vector<BoundExprPtr> a;
+            if (arg >= 0) {
+                a.push_back(Col(static_cast<idx_t>(arg), in[static_cast<size_t>(arg)]));
+            }
+            aggs.push_back(BoundExpr::Aggregate(kind, std::move(a), false, type));
+        }
+        const std::vector<LogicalType> out = {in[0], LogicalType::BigInt(), LogicalType::BigInt(),
+                                              in[1]};
+        PhysicalHashAggregate op(out, std::move(groups), std::move(aggs));
+        const auto global = SinkThroughLocals(op, d.chunks, 1 + RandBelow(rng, 4), rng);
+        const Rows got = DrainSource(op, *global);
+
+        std::map<std::vector<Value>, std::vector<size_t>, TupleLess> ref;
+        for (size_t r = 0; r < d.rows.size(); r++) {
+            ref[{d.rows[r][0]}].push_back(r);
+        }
+        ASSERT_EQ(got.size(), ref.size()) << "round " << round;
+        for (const auto& row : got) {
+            const auto& members = ref.at({row[0]});
+            int64_t sum = 0;
+            bool any = false;
+            std::optional<Value> mx;
+            for (const size_t r : members) {
+                if (!d.rows[r][2].IsNull()) {
+                    sum += d.rows[r][2].GetBigInt();
+                    any = true;
+                }
+                if (!d.rows[r][1].IsNull() && (!mx || Value::Compare(d.rows[r][1], *mx) > 0)) {
+                    mx = d.rows[r][1];
+                }
+            }
+            ASSERT_EQ(row[1], Value::BigInt(static_cast<int64_t>(members.size())))
+                << "round " << round;
+            ASSERT_TRUE(any ? row[2] == Value::BigInt(sum) : row[2].IsNull());
+            ASSERT_TRUE(mx ? row[3] == *mx : row[3].IsNull());
+        }
+    }
+}
+
+TEST(OperatorLocalStates, UngroupedAggregateWithNoLocalStateInputStillYieldsItsRow) {
+    PhysicalPlan unused;
+    std::vector<BoundExprPtr> aggs;
+    aggs.push_back(
+        BoundExpr::Aggregate(AggregateKind::CountStar, {}, false, LogicalType::BigInt()));
+    PhysicalHashAggregate op({LogicalType::BigInt()}, {}, std::move(aggs));
+    Rng rng(22);
+    const auto global = SinkThroughLocals(op, {}, 3, rng); // three empty local states
+    const Rows rows = DrainSource(op, *global);
+    ASSERT_EQ(rows.size(), 1U);
+    EXPECT_EQ(rows[0][0], Value::BigInt(0));
+}
+
+TEST(OperatorLocalStates, JoinBuildSideMergedFromLocalStatesProbesCorrectly) {
+    Rng rng(23);
+    const std::vector<LogicalType> lt = {LogicalType::Integer(), LogicalType::Varchar()};
+    const std::vector<LogicalType> rt = {LogicalType::Integer(), LogicalType::Double()};
+    for (int round = 0; round < 15; round++) {
+        const Data left = MakeData(rng, lt, 3, Gen(), false);
+        const Data right = MakeData(rng, rt, 6, Gen(), false);
+        std::vector<LogicalType> out = lt;
+        out.insert(out.end(), rt.begin(), rt.end());
+        std::vector<BoundExprPtr> lk, rk;
+        lk.push_back(Col(0, lt[0]));
+        rk.push_back(Col(0, rt[0]));
+        PhysicalHashJoin join(out, PhysicalJoinType::Left, lt, rt, std::move(lk), std::move(rk),
+                              nullptr);
+        const auto build = SinkThroughLocals(join, right.chunks, 1 + RandBelow(rng, 4), rng);
+        auto state = join.GetOperatorState(build.get());
+        DataChunk output;
+        output.Initialize(out);
+        Rows got;
+        for (const DataChunk& chunk : left.chunks) {
+            if (chunk.size() == 0) {
+                continue;
+            }
+            OperatorResult r;
+            do {
+                output.Reset();
+                r = join.Execute(*state, chunk, output);
+                for (auto& row : RowsOf(output)) {
+                    got.push_back(std::move(row));
+                }
+            } while (r == OperatorResult::HaveMoreOutput);
+        }
+        const auto matches = ReferenceMatches(left.rows, right.rows, {{0, 0}}, nullptr);
+        ExpectSameMultiset(got,
+                           DeriveJoin(left.rows, right.rows, matches, PhysicalJoinType::Left, rt),
+                           "round " + std::to_string(round));
+    }
+}
+
+TEST(OperatorLocalStates, OrderByAndTopNMergeLocalBuffers) {
+    Rng rng(24);
+    for (int round = 0; round < 12; round++) {
+        Data d = MakeData(rng, kTypes, 10, Gen());
+        std::vector<SortSpec> specs;
+        std::vector<SortKey> keys = RandomKeys(rng, specs);
+        auto clone = [&] {
+            std::vector<SortKey> k;
+            for (const SortKey& x : keys) {
+                k.push_back({x.expr->Clone(), x.descending, x.nulls_first});
+            }
+            return k;
+        };
+        const Rows sorted = ReferenceSort(d.rows, keys, specs);
+        {
+            PhysicalOrder op(kTypes, clone());
+            const auto global = SinkThroughLocals(op, d.chunks, 1 + RandBelow(rng, 4), rng);
+            const Rows got = DrainSource(op, *global);
+            ASSERT_EQ(got.size(), sorted.size());
+            for (size_t i = 0; i < got.size(); i++) {
+                // equal sort keys may arrive from different local buffers in any relative order, so
+                // compare the key columns only (the multiset equality of rows is checked below)
+                for (size_t k = 0; k < keys.size(); k++) {
+                    const idx_t col = keys[k].expr->ordinal;
+                    ASSERT_EQ(test::CompareWithNulls(got[i][col], sorted[i][col]), 0)
+                        << "round " << round;
+                }
+            }
+            ExpectSameMultiset(got, sorted, "order by multiset");
+        }
+        {
+            const int64_t limit = static_cast<int64_t>(1 + RandBelow(rng, 20)),
+                          offset = static_cast<int64_t>(RandBelow(rng, 10));
+            PhysicalTopN op(kTypes, clone(), limit, offset);
+            const auto global = SinkThroughLocals(op, d.chunks, 1 + RandBelow(rng, 4), rng);
+            const Rows got = DrainSource(op, *global);
+            const size_t begin = std::min<size_t>(static_cast<size_t>(offset), sorted.size());
+            const size_t end = std::min<size_t>(sorted.size(), begin + static_cast<size_t>(limit));
+            ASSERT_EQ(got.size(), end - begin) << "round " << round;
+            for (size_t i = 0; i < got.size(); i++) {
+                for (size_t k = 0; k < keys.size(); k++) {
+                    const idx_t col = keys[k].expr->ordinal;
+                    ASSERT_EQ(test::CompareWithNulls(got[i][col], sorted[begin + i][col]), 0)
+                        << "round " << round;
+                }
+            }
+        }
+    }
+}
+
+TEST(OperatorLocalStates, ResultCollectorKeepsEveryRowFromEveryLocalState) {
+    Rng rng(25);
+    Data d = MakeData(rng, kTypes, 9, Gen());
+    PhysicalResultCollector op(kTypes);
+    const auto global = SinkThroughLocals(op, d.chunks, 4, rng);
+    Rows got;
+    for (const DataChunk& c : PhysicalResultCollector::TakeChunks(*global)) {
+        for (auto& r : RowsOf(c)) {
+            got.push_back(std::move(r));
+        }
+    }
+    ExpectSameMultiset(got, d.rows, "collector");
 }
 
 } // namespace cdb
