@@ -5,7 +5,9 @@
 #include "io/memory_file_system.h"
 #include "main/connection.h"
 #include "main/database.h"
+#include "storage/binary_io.h"
 #include "storage/checksum.h"
+#include "storage/segment_io.h"
 #include "storage/wal.h"
 
 #include <gtest/gtest.h>
@@ -597,6 +599,123 @@ TEST(Persistence, StaleFilesAreCleanedUpWhenTheDatabaseOpens) {
     EXPECT_FALSE(Has(*fs, "checkpoint-0000000000000000.cdb"));
     EXPECT_TRUE(Has(*fs, "notes.txt")) << "files that are not the database's are left alone";
     EXPECT_EQ(db->catalog().ListTables(), std::vector<std::string>{"t"});
+}
+
+// ---- a log that checksums correctly but could not have been written by this database ------------
+
+namespace {
+
+// payload bytes of the log operations (the format of ADR 0009)
+std::vector<uint8_t> CreateOp(const std::string& name,
+                              const std::vector<std::pair<std::string, TypeId>>& columns,
+                              bool not_null = false, uint64_t row_group_size = 2 * kVectorSize) {
+    BinaryWriter w;
+    w.U8(1);
+    w.String(name);
+    w.U32(static_cast<uint32_t>(columns.size()));
+    for (const auto& [column, type] : columns) {
+        w.String(column);
+        w.U8(static_cast<uint8_t>(type));
+        w.U8(not_null ? 1 : 0);
+    }
+    w.U64(row_group_size);
+    return w.Take();
+}
+std::vector<uint8_t> DropOp(const std::string& name) {
+    BinaryWriter w;
+    w.U8(2);
+    w.String(name);
+    return w.Take();
+}
+std::vector<uint8_t> AppendOp(const std::string& name, const std::vector<LogicalType>& types,
+                              const std::vector<Value>& row) {
+    BinaryWriter w;
+    w.U8(3);
+    w.String(name);
+    DataChunk chunk;
+    chunk.Initialize(types);
+    for (idx_t c = 0; c < types.size(); c++) {
+        chunk.SetValue(c, 0, row[c]);
+    }
+    chunk.SetCardinality(1);
+    WriteChunk(w, chunk);
+    return w.Take();
+}
+
+// Writes wal-0 with one committed frame per payload and returns the file system.
+std::shared_ptr<MemoryFileSystem> LogWith(const std::vector<std::vector<uint8_t>>& payloads) {
+    auto fs = NewFs();
+    fs->CreateDirectories(kDir);
+    auto wal = WalWriter::Create(*fs, std::string(kDir) + "/wal-0000000000000000.log", 0);
+    for (const auto& p : payloads) {
+        wal->AppendFrame(p, true);
+    }
+    wal->Sync();
+    fs->SyncDirectory(kDir);
+    return fs;
+}
+
+} // namespace
+
+TEST(Persistence, ALogThatCouldNotHaveBeenWrittenByThisDatabaseIsCorruption) {
+    const std::vector<std::pair<std::string, TypeId>> one_int = {{"a", TypeId::Integer}};
+    const std::vector<LogicalType> int_type = {LogicalType::Integer()};
+    // sanity: a well-formed hand-made log opens
+    {
+        auto fs = LogWith({CreateOp("t", one_int), AppendOp("t", int_type, {Value::Integer(7)})});
+        auto db = Open(fs);
+        Connection conn(*db);
+        EXPECT_EQ(conn.Query("SELECT a FROM t").GetValue(0, 0), Value::Integer(7));
+    }
+    const auto expect_corrupt = [&](const std::string& what,
+                                    const std::vector<std::vector<uint8_t>>& payloads,
+                                    const std::string& message = "") {
+        auto fs = LogWith(payloads);
+        ExpectError([&] { Open(fs); }, ErrorCode::Corruption, message);
+        (void)what;
+    };
+    expect_corrupt("creating a table that exists", {CreateOp("t", one_int), CreateOp("T", one_int)},
+                   "already exists");
+    expect_corrupt("dropping a table that does not exist", {DropOp("nothing")}, "does not exist");
+    expect_corrupt("appending to an unknown table",
+                   {AppendOp("nowhere", int_type, {Value::Integer(1)})}, "unknown table");
+    expect_corrupt("an unknown operation", {{9, 1, 2, 3}}, "unknown operation");
+    expect_corrupt("a table without columns", {CreateOp("t", {})}, "at least one column");
+    expect_corrupt("duplicate column names",
+                   {CreateOp("t", {{"a", TypeId::Integer}, {"A", TypeId::Integer}})});
+    expect_corrupt("a column of an unknown type", {CreateOp("t", {{"a", static_cast<TypeId>(77)}})},
+                   "invalid column");
+    expect_corrupt("a row group size of 5", {CreateOp("t", one_int, false, 5)}, "row group size");
+    expect_corrupt("a NULL in a NOT NULL column",
+                   {CreateOp("t", one_int, true),
+                    AppendOp("t", int_type, {Value::Null(LogicalType::Integer())})});
+    expect_corrupt("an append whose rows do not match the table",
+                   {CreateOp("t", {{"a", TypeId::Integer}, {"b", TypeId::Integer}}),
+                    AppendOp("t", int_type, {Value::Integer(1)})});
+    expect_corrupt("an operation cut short", {[&] {
+                       std::vector<uint8_t> p = CreateOp("t", one_int);
+                       p.resize(p.size() - 3);
+                       return p;
+                   }()});
+    // dropping and re-creating is fine, and an empty frame says nothing
+    auto fs =
+        LogWith({CreateOp("t", one_int), DropOp("t"), CreateOp("t", {{"b", TypeId::Varchar}}), {}});
+    auto db = Open(fs);
+    EXPECT_EQ(db->catalog().GetTable("t")->schema()[0].name, "b");
+}
+
+TEST(Persistence, LogsThatSkipAnEpochOrBelongToAnotherAreCorruption) {
+    // wal-0 and wal-2 without wal-1: a hole in the chain
+    auto fs = LogWith({});
+    auto wal2 = WalWriter::Create(*fs, std::string(kDir) + "/wal-0000000000000002.log", 2);
+    wal2->Sync();
+    ExpectError([&] { Open(fs); }, ErrorCode::Corruption, "wal-0000000000000001.log");
+    // a log whose header says another epoch than its name
+    auto other = NewFs();
+    other->CreateDirectories(kDir);
+    auto w = WalWriter::Create(*other, std::string(kDir) + "/wal-0000000000000000.log", 5);
+    w->Sync();
+    ExpectError([&] { Open(other); }, ErrorCode::Corruption, "epoch");
 }
 
 // ---------------------------------------------------------------------------------- failing disks
