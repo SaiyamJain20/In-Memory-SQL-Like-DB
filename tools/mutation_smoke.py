@@ -965,7 +965,7 @@ MUTATIONS = [
     ('optimizer: a semi / anti join that removes almost nothing still sinks to the leaf',
      'src/planner/optimizer.cpp',
      'if ((in_a || in_b) && ShrinksItsInput(join)) {',
-     'if (in_a || in_b) {', None),
+     'if ((in_a || in_b) && (ShrinksItsInput(join) || true)) {', None),
     ('optimizer: a semi join pushed into the left input of an inner join keeps the old subquery columns',
      'src/planner/optimizer.cpp',
      'return o < lw ? o : o - b_width;',
