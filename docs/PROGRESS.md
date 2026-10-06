@@ -518,3 +518,77 @@ sums). The target of >= 8x at 16 threads was not met (above).
 clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job. The run before it (37442929725) ran 0 jobs
 because a step name containing `: ` made the workflow invalid YAML; `verify.sh` now parses the workflow. The regression
 run of the *older* mutants after the Phase 6 changes runs in a separate worktree and is recorded with the Phase 7 entry.
+
+## 2026-10-06 — Phase 7: Persistence
+
+**What changed** ([ADR 0009](adr/0009-persistence.md))
+- A database is a directory: `checkpoint-<epoch>.cdb` (header, one CRC-32C-checked block per column segment stored *in its
+  in-memory encoding*, footer directory, fixed trailer), `wal-<epoch>.log` (frames `[len][crc][seq][flags][payload]`, a commit
+  flag on the last frame of a transaction) and a `LOCK`. `Database(path, options)` opens it; `CHECKPOINT` is a SQL statement;
+  the shell takes `--db DIR`.
+- Commit protocol: validate and stage (INSERT ... SELECT and `COPY` already build private staging tables), log, fsync, apply -
+  under one commit mutex, so log order is apply order. A failed write or fsync **poisons** the log: nothing was applied, the
+  statement fails, the database is read-only until reopened. `SyncMode::Off` trades the last statements for speed, never order.
+- Checkpoint: snapshot every table and rotate the log under the mutex, write the file *outside* it (commits continue into the
+  new log), rename, fsync the directory, delete the old files. Recovery: newest checkpoint (**corrupt = error, never a silent
+  fallback to an older one**) + the contiguous chain of logs; a torn tail is cut at the last committed frame; stale files and
+  `*.tmp` are removed; every step is idempotent, so a crash during recovery is just another crash.
+- All I/O goes through `FileSystem`. `PosixFileSystem` is the real one; `MemoryFileSystem` has a **crash model** (per-file durable
+  image plus unsynced operations; directory entries are durable only after a directory fsync; `Crash(policy)` drops everything
+  unsynced, keeps everything, or keeps a random prefix with the last write torn at a random byte); `FaultInjector` makes the Nth
+  operation crash or fail.
+- Decoders validate what a checksum cannot: bit widths, offsets inside the payload, increasing run ends, dictionary codes, row
+  counts, and a guard against a tiny file asking for a huge allocation. Loading is parallel (a task per row group); CRC-32C uses
+  the SSE4.2 instruction with a table fallback (equal results tested).
+
+**Verified**
+| Check | Result |
+|---|---|
+| `tools/verify.sh`: debug / asan (+UBSan) / tsan / release / clang-18, each in default **and** `-parallel` mode | 835 / 835 / 835 / 833 / 835 passing (Phase 6: 671 / 671 / 671 / 669 / 671) |
+| Crash campaign: a scripted workload (several tables and types, NULLs, long and multi-frame values, DROP and re-CREATE, INSERT ... SELECT, `COPY`, `CHECKPOINT`, a tiny automatic-checkpoint threshold) crashed at **every** I/O operation under every crash policy and several seeds, then recovered and compared with an in-memory reference; then crashed again *during recovery* at every operation | state is always the state after the last acknowledged statement, or the one in flight (all or nothing) - never anything else |
+| I/O errors injected at every operation | the statement fails, nothing half-applied, the database refuses further writes, a reopen gives a committed prefix |
+| Corruption: every single-byte flip and every truncation of a valid checkpoint; every flip / truncation of a log | checkpoint: always an error; log: always a committed prefix, never garbage |
+| libFuzzer targets reading arbitrary bytes as a checkpoint and as a log (seeded from valid files) | no crash, no UB, only `Error`: 660,000 / 360,000 executions |
+| Real `kill -9` of a writer process on a real disk at random moments | every acknowledged row survived, in order |
+| SQL logic suite (DuckDB-verified) on a persistent database with a simulated power cut and recovery after **every statement**; TPC-H vs DuckDB on databases reopened from a checkpoint and from a log alone | identical |
+| Concurrent sessions committing while checkpoints run, then reopen (also under TSan) | clean |
+| `tools/mutation_smoke.py`: 42 new persistence mutants (log, commit, checkpoint, recovery, file formats, the memory file system's crash model) | all 42 killed (first run 40: one survivor and one that did not build, below; both killed / valid after the fixes) |
+
+**Performance** (tables, commands and caveats in [BENCHMARKS](BENCHMARKS.md); NVMe, ext4, GCC 13.3 `-O3`)
+- Commit latency of a single-row `INSERT`: **~0.5 ms with fsync** (1,830-1,910 statements/s, p99 0.7 ms), 40 us with
+  `SyncMode::Off`, 26 us in memory. Writing and checksumming a frame costs ~14 us; the rest is the disk.
+- TPC-H SF1 (8.66 M rows): reopening from a 504 MB checkpoint takes **0.16 s at 16 threads (0.31 s at one)**, 16x / 28x faster than
+  loading the CSV, because the file stores the already-encoded segments. Replaying the 1,041 MB log of the same data takes
+  ~3 s. A logged `COPY` costs 0.7 s more than an unlogged one at 16 threads.
+
+**Found by the process**
+1. **A mutant survived and exposed a crash-ordering hole that single-session tests cannot see.** Skipping the directory fsync after
+   the new log is created is invisible to a lone session (its commits go to the old log, which is intact). It matters when a
+   second session commits *into the new log* before the checkpoint finishes: the commit is fsynced to a file whose name was not
+   yet durable, so a crash loses an acknowledged commit. A new crash test with concurrent sessions kills the mutant.
+2. The checkpoint reader trusted a raw segment's declared row count when allocating; a tiny file could ask for a large buffer.
+   Now bounded by the bytes that remain.
+3. The `kill -9` test was flaky on a loaded machine (it warmed the child up by wall time); it now waits for 100 acknowledged rows.
+4. Several first-draft test expectations (operation counts, frame counts, number of checkpoints) were wrong about the *test*, not the
+   code, and were corrected after reading the trace; a `Run` helper silently hid `testing::Test::Run`.
+5. One asan mutant did not build under `-Werror` (unused parameters) and was rewritten.
+6. **Process:** the mutation harness had no timeout. A mutant that loses a join's hash keys turns a test into an effectively
+   endless nested loop and the run sat there for hours. `ctest --timeout 600` is now part of every mutant run; a timeout counts
+   as a kill.
+
+**Known gaps / deliberate limits**
+- **No group commit:** concurrent sessions each pay their own fsync (~0.5 ms); throughput does not scale with sessions.
+- Everything is loaded at open (no paging): open time and memory are proportional to the database. A bulk `COPY` is written twice
+  (raw rows in the log, encoded segments in the next checkpoint); replaying a long log is the slow recovery path (3 s for
+  SF1) and is bounded by checkpointing. Checkpoint writing does not use more threads usefully (it is bound by writing 504 MB).
+- One writer at a time; readers are never blocked. No `UPDATE` / `DELETE`, so the log has three operations only.
+- `kill -9` and the in-memory crash model test everything *above* the page cache; a real power cut (disk reordering, lying fsync)
+  is modelled, not exercised. POSIX only (no Windows file system). No encryption, no log compression, no single-file format, no
+  incremental checkpoints. An automatic checkpoint that fails is recorded, not raised (the triggering statement did commit).
+
+**Phase 7 exit criteria met**: the crash campaign (every write / fsync / rename / directory-fsync boundary, every policy) never
+loses an acknowledged commit and never shows a partial one; the format fuzz targets are clean.
+
+**CI (GitHub Actions, run 37455419463)** - all jobs green (format, gcc-13 and clang-18 x debug and release, asan, tsan, the libFuzzer
+parser smoke job), on the commit that added the Phase 7 benchmarks. A later commit repaired the one asan mutant and touched no
+engine code; the regression of the *older* mutants (Phases 1-6) is re-run in full with the Phase 8 entry.

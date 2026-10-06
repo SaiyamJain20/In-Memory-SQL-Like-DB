@@ -880,7 +880,7 @@ MUTATIONS = [
     ('encoding: packed vectors may lie outside their payload',
      'src/storage/encoding.cpp',
      'if (width > 0 && (offset > payload_size || PackedBytes(rows, width) > payload_size - offset)) {',
-     'if (false) {', 'asan'),
+     'if ((void)offset, (void)rows, (void)payload_size, false) {', 'asan'),
     ('table: LoadRowGroups seals a short last group instead of re-opening it',
      'src/storage/table.cpp',
      'if (!groups.empty() && groups.back()->count() < row_group_size_) {',
@@ -923,6 +923,11 @@ def pattern_for(text):
 
 
 BACKUP_DIR = ROOT / "build" / "mutation_backup"
+
+
+# The slowest legitimate test takes about a minute under TSan; a mutant that hangs or crawls
+# should be reported, not waited for.
+TEST_TIMEOUT_SECONDS = 600
 
 
 def run(cmd):
@@ -1017,10 +1022,14 @@ def main():
                 print(f"INVALID   [{preset}] mutant does not build: {name}\n    {tail!r}")
                 survivors.append(name + " (invalid mutant)")
                 continue
-            tests = run(["ctest", "--preset", preset, "-j8", "--stop-on-failure"])
+            # A mutant can make a test hang or crawl (a join that loses its hash keys, a pool that
+            # never wakes): a test that runs far past its normal time counts as failed.
+            tests = run(["ctest", "--preset", preset, "-j8", "--stop-on-failure",
+                         "--timeout", str(TEST_TIMEOUT_SECONDS)])
             if tests.returncode != 0:
                 failed = [l.strip() for l in tests.stdout.splitlines() if "***Failed" in l
-                          or "***Exception" in l or "Subprocess aborted" in l][:2]
+                          or "***Exception" in l or "***Timeout" in l
+                          or "Subprocess aborted" in l][:2]
                 print(f"killed    [{preset}] {name}\n          by: {failed}")
             else:
                 print(f"SURVIVED  [{preset}] {name}")

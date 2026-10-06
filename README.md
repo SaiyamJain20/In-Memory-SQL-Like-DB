@@ -4,7 +4,7 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phases 0–6 of 9 complete).** The engine runs SQL end to end: a
+> **Status: early development (Phases 0–7 of 9 complete).** The engine runs SQL end to end: a
 > hand-written parser and binder, a rule-based optimizer, a push-based vectorized executor
 > (hash aggregation, hash joins, sort/top-N) over compressed columnar storage (bit-packing, RLE,
 > dictionaries, lossless scaled doubles) with zone-map pruning and AVX2 kernels behind runtime CPU
@@ -16,7 +16,11 @@ optimizer — built to be small enough to read end to end, and verified against 
 > morsels. On one thread the SF1 geometric mean is 2.6x DuckDB's time; at 16 threads
 > (8 cores) the engine is **5.5x faster than on one thread** (Q1 6.4x, Q6 5.8x) and 1.7x DuckDB's
 > time at the same thread count; the 8x target was not met. `DISTINCT` aggregates do not scale yet.
-> Persistence (Phase 7) and subqueries/statistics (Phase 8) are still ahead. Every number is in
+> A database can live in a directory (`cdb_shell --db DIR`): a write-ahead log with fsync'd commits,
+> checkpoints of the encoded segments, and recovery that survives a crash at every write / fsync /
+> rename boundary (tested by deterministic crash injection, `kill -9` and fuzzing); reopening a
+> TPC-H SF1 database from a checkpoint takes 0.16 s. A durable single-row commit costs ~0.5 ms
+> (one fsync, no group commit yet). Subqueries and statistics (Phase 8) are still ahead. Every number is in
 > [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and command; see the
 > [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
 

@@ -32,7 +32,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ done (exit criteria ve
 | 4 | Vectorized execution: expressions, operators, pipelines (**v0.1**) | ✅ | ~1.5 wk |
 | 5 | Compression, zone maps, SIMD kernels | ✅ | ~1.5 wk |
 | 6 | Morsel-driven parallelism | ✅ | ~1 wk |
-| 7 | Persistence: on-disk format, WAL, checkpoints | ⬜ | ~1 wk |
+| 7 | Persistence: on-disk format, WAL, checkpoints | ✅ | ~1 wk |
 | 8 | Optimizer, statistics, subqueries, `EXPLAIN ANALYZE` | ⬜ | ~1.5 wk |
 | 9 | Stretch (pick by time): spill-to-disk, window functions, pg-wire server, Parquet reader | ⬜ | 2–3 wk |
 
@@ -133,6 +133,11 @@ behind a `FileSystem` interface so crashes can be injected deterministically.
 
 **Exit:** crash-injection campaign (kill at every fsync/write boundary) never loses an
 acknowledged commit nor surfaces a partial one; format fuzz target clean.
+
+**Status: done (2026-10-06).** Crash campaign at every I/O boundary under every crash policy, I/O-error injection, corruption
+sweeps, real `kill -9`, and fuzz targets for the checkpoint and the log all pass; reopening a TPC-H SF1 database from a checkpoint
+takes 0.16 s; a durable single-row commit costs ~0.5 ms (no group commit). See `PROGRESS.md` / `BENCHMARKS.md`. Carried forward:
+group commit, `UPDATE`/`DELETE` (needs tombstones in the checkpoint), incremental checkpoints.
 
 ### Phase 8 — Optimizer, statistics, subqueries
 Table/column statistics (row count, min/max, HyperLogLog NDV), filter and projection pushdown,
