@@ -901,40 +901,56 @@ TEST(Persistence, WritesFuzzSeedsWhenAsked) {
         out.write(reinterpret_cast<const char*>(bytes.data()),
                   static_cast<std::streamsize>(bytes.size()));
     };
-    for (const bool tiny : {true, false}) {
+    for (const std::string tag : {"tiny", "mixed", "sealed"}) {
         auto fs = NewFs();
         DatabaseOptions o = Options(fs);
         o.storage.checkpoint_on_close = false;
-        const std::vector<std::string> script =
-            tiny ? std::vector<std::string>{"CREATE TABLE t (a INTEGER, s VARCHAR)",
-                                            "INSERT INTO t VALUES (1, 'x'), (2, NULL)"}
-                 : Script();
+        std::vector<std::string> script;
+        if (tag == "tiny") {
+            script = {"CREATE TABLE t (a INTEGER, s VARCHAR)",
+                      "INSERT INTO t VALUES (1, 'x'), (2, NULL)"};
+        } else if (tag == "mixed") {
+            script = Script();
+        } else {
+            // several sealed, encoded row groups: the segments carry their distinct-value sketches
+            script = {"CREATE TABLE t (a INTEGER, s VARCHAR, x DOUBLE)",
+                      "INSERT INTO t VALUES (1, 'p', 0.5), (2, 'q', NULL), (3, 'p', 1.5)"};
+            for (int k = 0; k < 12; k++) {
+                script.push_back("INSERT INTO t SELECT a + " + std::to_string(3 << k) +
+                                 ", s, x FROM t");
+            }
+        }
         {
             auto db = Open(fs, o);
             Connection conn(*db);
             RunScript(conn, script);
         }
-        const std::string tag = tiny ? "tiny" : "mixed";
         std::vector<uint8_t> wal = fs->Contents(std::string(kDir) + "/wal-0000000000000000.log");
-        write("wal", tag + "_log_only", [&] {
-            std::vector<uint8_t> v = {1}; // mode 1: the harness supplies the header
-            v.insert(v.end(), wal.begin() + 16, wal.end());
-            return v;
-        }());
-        write("wal", tag + "_with_header", [&] {
-            std::vector<uint8_t> v = {0}; // mode 0: the bytes are the whole file
-            v.insert(v.end(), wal.begin(), wal.end());
-            return v;
-        }());
-        // mode 2: the frames' payloads (operation streams) as one frame, which the harness
-        // checksums
-        {
-            const WalScan scan = ScanWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", 0);
-            std::vector<uint8_t> v = {2};
-            ReplayWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", scan,
-                      [&](const uint8_t* p, size_t n) { v.insert(v.end(), p, p + n); });
-            write("wal", tag + "_operations", v);
+        if (tag == "sealed") {
+            wal.clear(); // (the log of a bulk of raw rows is not a useful seed)
         }
+        if (!wal.empty()) {
+            write("wal", tag + "_log_only", [&] {
+                std::vector<uint8_t> v = {1}; // mode 1: the harness supplies the header
+                v.insert(v.end(), wal.begin() + 16, wal.end());
+                return v;
+            }());
+            write("wal", tag + "_with_header", [&] {
+                std::vector<uint8_t> v = {0}; // mode 0: the bytes are the whole file
+                v.insert(v.end(), wal.begin(), wal.end());
+                return v;
+            }());
+            // mode 2: the frames' payloads (operation streams) as one frame, which the harness
+            // checksums
+            {
+                const WalScan scan =
+                    ScanWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", 0);
+                std::vector<uint8_t> v = {2};
+                ReplayWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", scan,
+                          [&](const uint8_t* p, size_t n) { v.insert(v.end(), p, p + n); });
+                write("wal", tag + "_operations", v);
+            }
+        } // (end of the log seeds)
         {
             auto db = Open(fs, o);
             db->Checkpoint();

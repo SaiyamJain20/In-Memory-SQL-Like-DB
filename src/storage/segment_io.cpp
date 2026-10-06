@@ -229,6 +229,80 @@ void ReadChunk(BinaryReader& r, const std::vector<LogicalType>& types, DataChunk
 
 // ---------------------------------------------------------------------------------- segments
 
+namespace {
+
+// A distinct-value sketch, in whichever form is smaller: [u8 0] (none), [u8 1][u16 count]
+// ([u16 register][u8 value])... for a sketch with few non-empty registers (a low-cardinality
+// column), or [u8 2] and every register for a dense one.
+constexpr uint8_t kSketchNone = 0, kSketchSparse = 1, kSketchDense = 2;
+
+void WriteSketch(BinaryWriter& w, const HyperLogLog* sketch) {
+    if (sketch == nullptr) {
+        w.U8(kSketchNone);
+        return;
+    }
+    const size_t used = sketch->NonZeroRegisters();
+    const std::vector<uint8_t>& registers = sketch->registers();
+    if (used * 3 + 2 < HyperLogLog::kRegisters) {
+        w.U8(kSketchSparse);
+        w.U8(static_cast<uint8_t>(used & 0xff));
+        w.U8(static_cast<uint8_t>(used >> 8));
+        for (size_t i = 0; i < registers.size(); i++) {
+            if (registers[i] != 0) {
+                w.U8(static_cast<uint8_t>(i & 0xff));
+                w.U8(static_cast<uint8_t>(i >> 8));
+                w.U8(registers[i]);
+            }
+        }
+        return;
+    }
+    w.U8(kSketchDense);
+    w.Bytes(registers.data(), registers.size());
+}
+
+std::shared_ptr<const HyperLogLog> ReadSketch(BinaryReader& r) {
+    const uint8_t form = r.U8();
+    std::vector<uint8_t> registers;
+    switch (form) {
+    case kSketchNone:
+        return nullptr;
+    case kSketchSparse: {
+        const size_t used = r.U8() | (static_cast<size_t>(r.U8()) << 8);
+        if (used * 3 > r.remaining()) {
+            r.Fail("a distinct-value sketch of " + std::to_string(used) + " registers in " +
+                   std::to_string(r.remaining()) + " bytes");
+        }
+        registers.assign(HyperLogLog::kRegisters, 0);
+        long previous = -1;
+        for (size_t k = 0; k < used; k++) {
+            const size_t index = r.U8() | (static_cast<size_t>(r.U8()) << 8);
+            const uint8_t value = r.U8();
+            if (index >= HyperLogLog::kRegisters || static_cast<long>(index) <= previous ||
+                value == 0) {
+                r.Fail("a malformed sparse distinct-value sketch");
+            }
+            previous = static_cast<long>(index);
+            registers[index] = value;
+        }
+        break;
+    }
+    case kSketchDense: {
+        const uint8_t* bytes = r.Bytes(HyperLogLog::kRegisters);
+        registers.assign(bytes, bytes + HyperLogLog::kRegisters);
+        break;
+    }
+    default:
+        r.Fail("a distinct-value sketch form of " + std::to_string(form));
+    }
+    auto sketch = std::make_shared<HyperLogLog>();
+    if (!HyperLogLog::FromRegisters(std::move(registers), *sketch)) {
+        r.Fail("a distinct-value sketch with an out-of-range register");
+    }
+    return sketch;
+}
+
+} // namespace
+
 void WriteSegment(BinaryWriter& w, const ColumnSegment& segment) {
     const idx_t n = segment.count();
     w.U8(static_cast<uint8_t>(segment.type().id()));
@@ -242,6 +316,7 @@ void WriteSegment(BinaryWriter& w, const ColumnSegment& segment) {
         WriteValue(w, *stats.min);
         WriteValue(w, *stats.max);
     }
+    WriteSketch(w, stats.distinct.get());
     if (segment.encoded()) {
         WriteValidity(w, segment.validity(), n);
         SerializeEncodedColumn(*segment.encoding(), w);
@@ -289,6 +364,10 @@ std::shared_ptr<ColumnSegment> ReadSegment(BinaryReader& r, LogicalType type, id
              stats.max->GetVarchar().size() > ColumnStats::kMaxBoundStringLength)) {
             r.Fail("a string bound longer than the zone-map limit");
         }
+    }
+    stats.distinct = ReadSketch(r);
+    if (stats.distinct != nullptr && stats.distinct->Empty() != stats.AllNull()) {
+        r.Fail("a distinct-value sketch that disagrees with the NULL count");
     }
     const idx_t rounded = AlignUp(count, kVectorSize);
     ValidityMask validity(rounded);

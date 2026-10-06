@@ -123,6 +123,12 @@ inline void ExpectSameSegment(const ColumnSegment& got, const ColumnSegment& wan
         EXPECT_TRUE(BitIdentical(*got.stats().min, *want.stats().min)) << ctx << ": min";
         EXPECT_TRUE(BitIdentical(*got.stats().max, *want.stats().max)) << ctx << ": max";
     }
+    // the distinct-value sketch is part of the statistics: kept bit for bit, or absent in both
+    ASSERT_EQ(got.stats().distinct == nullptr, want.stats().distinct == nullptr)
+        << ctx << ": sketch";
+    if (got.stats().distinct != nullptr) {
+        EXPECT_TRUE(*got.stats().distinct == *want.stats().distinct) << ctx << ": sketch";
+    }
     ASSERT_EQ(got.encoded(), want.encoded()) << ctx;
     if (got.encoded()) {
         EXPECT_EQ(got.encoding()->kind(), want.encoding()->kind()) << ctx;

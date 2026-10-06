@@ -1,6 +1,7 @@
 #include "storage/table.h"
 
 #include "common/error.h"
+#include "storage/table_statistics.h"
 
 #include <algorithm>
 #include <cctype>
@@ -254,6 +255,7 @@ void Table::AppendRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups)
         sealed_.push_back(std::move(g));
     }
     tail_cache_.reset();
+    version_++;
 }
 
 void Table::LoadRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups) {
@@ -292,6 +294,10 @@ void Table::Append(const DataChunk& chunk) {
     // Enforce NOT NULL up front so a rejected chunk leaves the table untouched.
     ValidateChunk(chunk);
     std::unique_lock lock(mutex_);
+    AppendLocked(chunk);
+}
+
+void Table::AppendLocked(const DataChunk& chunk) {
     idx_t pos = 0;
     while (pos < chunk.size()) {
         if (!open_) {
@@ -305,7 +311,8 @@ void Table::Append(const DataChunk& chunk) {
             open_.reset();
         }
     }
-    tail_cache_.reset(); // safe: we hold the exclusive lock, so no Snapshot() is running
+    tail_cache_.reset(); // safe: the caller holds the exclusive lock, so no Snapshot() is running
+    version_++;
 }
 
 void Table::Merge(std::unique_ptr<Table> staging) {
@@ -316,8 +323,33 @@ void Table::Merge(std::unique_ptr<Table> staging) {
         CDB_CHECK(staging->schema_[c].type == schema_[c].type);
     }
     std::unique_lock lock(mutex_);
+    const bool ours_partial = open_ && open_->count() > 0;
+    if (ours_partial && staging->sealed_.empty()) {
+        // A small load (an INSERT of a few rows): continue our open row group with its rows
+        // instead of sealing a short group per statement, which would leave a table filled by
+        // single-row INSERTs as one row group per row.
+        if (staging->open_ && staging->open_->count() > 0) {
+            const std::shared_ptr<const RowGroup> rows = staging->open_->Snapshot();
+            std::vector<LogicalType> types;
+            for (const ColumnDefinition& c : schema_) {
+                types.push_back(c.type);
+            }
+            DataChunk chunk;
+            chunk.Initialize(types, kVectorSize);
+            for (idx_t at = 0; at < rows->count(); at += kVectorSize) {
+                const idx_t n = std::min<idx_t>(kVectorSize, rows->count() - at);
+                chunk.Reset();
+                for (idx_t c = 0; c < schema_.size(); c++) {
+                    rows->column(c).Scan(at, n, chunk.column(c));
+                }
+                chunk.SetCardinality(n);
+                AppendLocked(chunk);
+            }
+        }
+        return;
+    }
     // Seal our partial tail as a (short) row group so the new rows follow it in order.
-    if (open_ && open_->count() > 0) {
+    if (ours_partial) {
         sealed_.push_back(open_->Seal());
     }
     open_.reset();
@@ -326,6 +358,7 @@ void Table::Merge(std::unique_ptr<Table> staging) {
     }
     open_ = std::move(staging->open_);
     tail_cache_.reset();
+    version_++;
 }
 
 idx_t Table::RowCount() const {
@@ -348,6 +381,33 @@ size_t Table::MemoryUsage() const {
 
 std::shared_ptr<const TableSnapshot> Table::Snapshot() const {
     std::shared_lock lock(mutex_);
+    return SnapshotLocked();
+}
+
+std::shared_ptr<const TableStatistics> Table::Statistics() const {
+    std::shared_ptr<const TableSnapshot> snapshot;
+    uint64_t version;
+    {
+        std::shared_lock lock(mutex_);
+        version = version_;
+        snapshot = SnapshotLocked();
+    }
+    {
+        std::lock_guard<std::mutex> guard(stats_mutex_);
+        if (stats_cache_ != nullptr && stats_version_ == version) {
+            return stats_cache_;
+        }
+    }
+    std::shared_ptr<const TableStatistics> computed = ComputeTableStatistics(*snapshot);
+    std::lock_guard<std::mutex> guard(stats_mutex_);
+    if (stats_cache_ == nullptr || stats_version_ <= version) {
+        stats_cache_ = computed;
+        stats_version_ = version;
+    }
+    return computed;
+}
+
+std::shared_ptr<const TableSnapshot> Table::SnapshotLocked() const {
     std::vector<std::shared_ptr<const RowGroup>> groups = sealed_;
     if (open_ && open_->count() > 0) {
         std::lock_guard<std::mutex> guard(tail_mutex_);

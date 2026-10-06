@@ -363,6 +363,14 @@ Workload Basic() {
         "INSERT INTO a SELECT id + 100, name, price, d, flag FROM a",
         "DROP TABLE a",
         "INSERT INTO b VALUES (7, 'last')",
+        // a third table: one more shape of segment (DATE and DOUBLE with NULLs, a constant
+        // column, a low-cardinality one), written by the checkpoints that the log size triggers
+        "CREATE TABLE c (d DATE, x DOUBLE, tag VARCHAR, n INTEGER)",
+        "INSERT INTO c VALUES (DATE '2021-05-06', 0.5, 'p', 1), (NULL, NULL, 'p', 1), (DATE "
+        "'1999-12-31', -2.25, 'q', 1)",
+        "INSERT INTO c SELECT d, x * 2, tag, n FROM c",
+        "INSERT INTO b SELECT k + 1000, tag FROM b WHERE k < 200",
+        "DROP TABLE c",
     };
     return w;
 }

@@ -584,6 +584,7 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
     w.U32(4);
     w.U32(0); // null_count
     w.U8(0);  // no bounds
+    w.U8(0);  // no distinct-value sketch
     w.U8(1);  // has nulls
     w.U8(0b0101);
     for (int i = 0; i < 2; i++) {
@@ -603,6 +604,7 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
     minmax.U8(1);
     minmax.U32(9); // min
     minmax.U32(3); // max < min
+    minmax.U8(0);  // no distinct-value sketch
     minmax.U8(0);
     minmax.U32(5);
     ExpectCorruption(
@@ -611,6 +613,152 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
             ReadSegment(r, LogicalType::Integer(), 1);
         },
         "minimum above maximum");
+}
+
+// ---------------------------------------------------------------------------------- sketches
+
+TEST(SegmentIo, TheDistinctSketchRoundTripsInBothFormsAndAnAbsentOneStaysAbsent) {
+    Rng rng(31);
+    // a low-cardinality column is stored sparsely, a high-cardinality one densely
+    const auto few =
+        MakeRawSegment(LogicalType::Integer(),
+                       MakeColumn(LogicalType::Integer(), Shape::SmallDomain, 3000, 0.1, rng));
+    const auto many = MakeRawSegment(
+        LogicalType::BigInt(), MakeColumn(LogicalType::BigInt(), Shape::Random, 3000, 0.1, rng));
+    for (const auto& seg : {few, many}) {
+        ASSERT_NE(seg->stats().distinct, nullptr) << "a sealed segment carries a sketch";
+        const auto back = Deserialize(Serialize(*seg), seg->type(), seg->count());
+        ASSERT_NE(back->stats().distinct, nullptr);
+        EXPECT_TRUE(*back->stats().distinct == *seg->stats().distinct);
+    }
+    EXPECT_LT(few->stats().distinct->NonZeroRegisters() * 3 + 2, HyperLogLog::kRegisters);
+    EXPECT_GE(many->stats().distinct->NonZeroRegisters() * 3 + 2, HyperLogLog::kRegisters);
+    EXPECT_LT(Serialize(*few).size(), Serialize(*many).size() / 2) << "the sparse form is smaller";
+
+    // an encoded segment keeps the sketch of its rows
+    const auto raw =
+        MakeRawSegment(LogicalType::Varchar(),
+                       MakeColumn(LogicalType::Varchar(), Shape::SmallDomain, 200, 0.0, rng));
+    const auto encoded = WithEncoding(*raw, EncodeSegment(*raw, EncodingChoice::Dictionary));
+    const auto encoded_back = Deserialize(Serialize(*encoded), LogicalType::Varchar(), 200);
+    ASSERT_NE(encoded_back->stats().distinct, nullptr);
+    EXPECT_TRUE(*encoded_back->stats().distinct == *raw->stats().distinct);
+
+    // the frozen tail of a builder has none, and still has none after a round trip
+    ColumnBuilder builder(LogicalType::Integer(), kVectorSize);
+    Vector src(LogicalType::Integer(), kVectorSize);
+    src.SetValue(0, Value::Integer(7));
+    builder.Append(src, 0, 1);
+    const auto tail = builder.Snapshot();
+    EXPECT_EQ(tail->stats().distinct, nullptr);
+    const auto tail_back = Deserialize(Serialize(*tail), LogicalType::Integer(), 1);
+    EXPECT_EQ(tail_back->stats().distinct, nullptr);
+}
+
+namespace {
+
+// A raw INTEGER segment block up to its distinct-value sketch (the rest is not reached by the
+// hostile cases below).
+BinaryWriter SketchBlock(idx_t count, idx_t null_count) {
+    BinaryWriter w;
+    w.U8(static_cast<uint8_t>(TypeId::Integer));
+    w.U8(0);
+    w.U32(static_cast<uint32_t>(count));
+    w.U32(static_cast<uint32_t>(null_count));
+    w.U8(0); // no bounds
+    return w;
+}
+
+void ExpectSketchRejected(const BinaryWriter& w, idx_t count, const std::string& what,
+                          const std::string& message_part) {
+    try {
+        BinaryReader r(w.buffer().data(), w.buffer().size(), "segment");
+        ReadSegment(r, LogicalType::Integer(), count);
+        ADD_FAILURE() << what << ": accepted";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Corruption) << what;
+        EXPECT_NE(std::string(e.what()).find(message_part), std::string::npos)
+            << what << ": " << e.what();
+    }
+}
+
+} // namespace
+
+TEST(SegmentIo, AHostileDistinctSketchIsRejectedForTheRightReason) {
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(3); // no such form
+        ExpectSketchRejected(w, 4, "unknown form", "sketch form");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // sparse
+        w.U8(200);
+        w.U8(0); // 200 entries claimed, none present
+        ExpectSketchRejected(w, 4, "count beyond the data", "registers in");
+    }
+    for (const auto& [index, value, name] :
+         {std::tuple<int, int, const char*>{4096, 3, "index out of range"},
+          {7, 0, "a zero register"},
+          {7, 200, "a register above the maximum"}}) {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1);
+        w.U8(1);
+        w.U8(0);
+        w.U8(static_cast<uint8_t>(index & 0xff));
+        w.U8(static_cast<uint8_t>(index >> 8));
+        w.U8(static_cast<uint8_t>(value));
+        ExpectSketchRejected(w, 4, name, "sketch");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // sparse with indexes that do not increase
+        w.U8(2);
+        w.U8(0);
+        for (const int index : {9, 9}) {
+            w.U8(static_cast<uint8_t>(index));
+            w.U8(0);
+            w.U8(2);
+        }
+        ExpectSketchRejected(w, 4, "repeated index", "malformed sparse");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(2); // dense with a register above the maximum
+        std::vector<uint8_t> registers(HyperLogLog::kRegisters, 1);
+        registers[17] = HyperLogLog::kMaxRegister + 1;
+        w.Bytes(registers.data(), registers.size());
+        ExpectSketchRejected(w, 4, "dense out of range", "out-of-range register");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(2); // dense, but cut short
+        const std::vector<uint8_t> registers(100, 1);
+        w.Bytes(registers.data(), registers.size());
+        ExpectCorruption(
+            [&] {
+                BinaryReader r(w.buffer().data(), w.buffer().size(), "segment");
+                ReadSegment(r, LogicalType::Integer(), 4);
+            },
+            "a truncated dense sketch");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // an empty sketch for a segment that has values
+        w.U8(0);
+        w.U8(0);
+        ExpectSketchRejected(w, 4, "empty sketch, values present", "disagrees");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 4);
+        w.U8(1); // a sketch with a value for a segment of only NULLs
+        w.U8(1);
+        w.U8(0);
+        w.U8(5);
+        w.U8(0);
+        w.U8(2);
+        ExpectSketchRejected(w, 4, "values in an all-NULL segment", "disagrees");
+    }
 }
 
 } // namespace cdb

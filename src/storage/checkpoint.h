@@ -36,7 +36,9 @@ struct CheckpointImage {
 //
 // A reader starts from the trailer, so a file that was cut short (an unfinished write) is
 // recognised at once, and every byte it uses is covered by a checksum.
-inline constexpr uint32_t kCheckpointVersion = 1;
+//
+// Version 2 adds a distinct-value sketch (HyperLogLog) to every segment's statistics.
+inline constexpr uint32_t kCheckpointVersion = 2;
 
 // Creates (or truncates) `path`, writes the image and fsyncs the file. Does not touch the
 // directory: the caller renames the file into place and fsyncs the directory. Column segments are

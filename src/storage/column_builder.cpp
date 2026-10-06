@@ -46,6 +46,10 @@ void ColumnBuilder::Append(const Vector& src, idx_t src_offset, idx_t n) {
 }
 
 std::shared_ptr<ColumnSegment> ColumnBuilder::Snapshot() const {
+    return SnapshotSegment(/*with_distinct_sketch=*/false);
+}
+
+std::shared_ptr<ColumnSegment> ColumnBuilder::SnapshotSegment(bool with_distinct_sketch) const {
     const idx_t rounded = AlignUp(count_, kVectorSize);
     auto data = Buffer::Allocate(rounded * type_.width());
     if (count_ > 0) {
@@ -59,6 +63,9 @@ std::shared_ptr<ColumnSegment> ColumnBuilder::Snapshot() const {
         validity = ValidityMask::FromBuffer(std::move(words), rounded);
     }
     ColumnStats stats = ComputeColumnStats(type_, data->data(), validity, count_);
+    if (with_distinct_sketch) {
+        stats.distinct = ComputeDistinctSketch(type_, data->data(), validity, count_);
+    }
     return std::make_shared<ColumnSegment>(type_, count_, std::move(data), std::move(validity),
                                            heap_, std::move(stats));
 }
@@ -69,10 +76,11 @@ std::shared_ptr<ColumnSegment> ColumnBuilder::Seal() {
     if (count_ > 0 && capacity_ == rounded) {
         // Common case (a full row group): hand the buffers over without copying.
         ColumnStats stats = ComputeColumnStats(type_, data_->data(), validity_, count_);
+        stats.distinct = ComputeDistinctSketch(type_, data_->data(), validity_, count_);
         segment = std::make_shared<ColumnSegment>(type_, count_, std::move(data_),
                                                   std::move(validity_), heap_, std::move(stats));
     } else {
-        segment = Snapshot();
+        segment = SnapshotSegment(/*with_distinct_sketch=*/true);
     }
     if (heap_ != nullptr) {
         heap_->Seal();

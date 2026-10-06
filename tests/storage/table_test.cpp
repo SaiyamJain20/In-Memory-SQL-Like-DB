@@ -619,6 +619,100 @@ TEST(TableMerge, ReadersSeeEitherNoneOrAllOfTheMergedRows) {
     EXPECT_EQ(table.RowCount(), kBatch * kMerges);
 }
 
+TEST(TableMerge, SmallLoadsContinueTheOpenRowGroupInsteadOfSealingShortOnes) {
+    test::Rng rng(13);
+    Table table("t", AllTypesSchema(), kSmallGroup);
+    TableModel model(table.schema().size());
+    // a table filled by single-row INSERTs (each one a staging table merged in) is one row group
+    for (int i = 0; i < 300; i++) {
+        auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+        Fill(*staging, model, rng, 1);
+        table.Merge(std::move(staging));
+    }
+    {
+        auto snap = table.Snapshot();
+        EXPECT_EQ(snap->row_count(), 300U);
+        EXPECT_EQ(snap->row_group_count(), 1U) << "not one row group per statement";
+        TableScan scan(snap, test::AllColumns(*snap));
+        ExpectColumnsEqual(ScanAll(scan), model.cols, "after 300 single-row merges");
+    }
+    // a small load that overflows the open row group fills it and continues in the next
+    {
+        const idx_t room = kSmallGroup - 300;
+        auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+        Fill(*staging, model, rng, room + 10);
+        table.Merge(std::move(staging));
+        auto snap = table.Snapshot();
+        ASSERT_EQ(snap->row_group_count(), 2U);
+        EXPECT_EQ(snap->row_group(0).count(), kSmallGroup);
+        EXPECT_EQ(snap->row_group(1).count(), 10U);
+        TableScan scan(snap, test::AllColumns(*snap));
+        ExpectColumnsEqual(ScanAll(scan), model.cols, "after the overflowing merge");
+    }
+    // a load that brings sealed row groups of its own is adopted as before: our short tail is
+    // sealed, so the order of the rows is kept
+    {
+        auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+        Fill(*staging, model, rng, 2 * kSmallGroup + 17);
+        table.Merge(std::move(staging));
+        auto snap = table.Snapshot();
+        std::vector<idx_t> counts;
+        for (idx_t g = 0; g < snap->row_group_count(); g++) {
+            counts.push_back(snap->row_group(g).count());
+        }
+        EXPECT_EQ(counts, (std::vector<idx_t>{kSmallGroup, 10, kSmallGroup, kSmallGroup, 17}));
+        TableScan scan(snap, test::AllColumns(*snap));
+        ExpectColumnsEqual(ScanAll(scan), model.cols, "after the bulk merge");
+    }
+}
+
+TEST(TableMerge, RandomMixOfAppendsAndMergesKeepsEveryRowInOrder) {
+    for (uint64_t seed = 1; seed <= 3; seed++) {
+        test::Rng rng(seed * 77);
+        Table table("t", AllTypesSchema(), kSmallGroup);
+        TableModel model(table.schema().size());
+        for (int step = 0; step < 40; step++) {
+            switch (test::RandBelow(rng, 4)) {
+            case 0:
+                Fill(table, model, rng, test::RandBelow(rng, 1500));
+                break;
+            case 1: { // a few rows, as an INSERT ... VALUES
+                auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+                Fill(*staging, model, rng, test::RandBelow(rng, 5));
+                table.Merge(std::move(staging));
+                break;
+            }
+            case 2: { // up to a bit more than a row group
+                auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+                Fill(*staging, model, rng, test::RandBelow(rng, kSmallGroup + 500));
+                table.Merge(std::move(staging));
+                break;
+            }
+            default: { // a bulk load
+                auto staging = std::make_unique<Table>("s", AllTypesSchema(), kSmallGroup);
+                Fill(*staging, model, rng, test::RandBelow(rng, 2 * kSmallGroup));
+                table.Merge(std::move(staging));
+                break;
+            }
+            }
+            if (step % 10 == 9) {
+                auto snap = table.Snapshot();
+                ASSERT_EQ(snap->row_count(), model.rows()) << "seed " << seed << " step " << step;
+                TableScan scan(snap, test::AllColumns(*snap));
+                ExpectColumnsEqual(ScanAll(scan), model.cols,
+                                   "seed " + std::to_string(seed) + " step " +
+                                       std::to_string(step));
+            }
+        }
+        // no row group is empty, none exceeds the row group size
+        auto snap = table.Snapshot();
+        for (idx_t g = 0; g < snap->row_group_count(); g++) {
+            EXPECT_GT(snap->row_group(g).count(), 0U);
+            EXPECT_LE(snap->row_group(g).count(), kSmallGroup);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- LoadRowGroups
 
 namespace {
