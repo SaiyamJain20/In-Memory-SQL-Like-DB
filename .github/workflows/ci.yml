@@ -31,6 +31,7 @@ jobs:
         preset: [debug, release]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/tpch-data
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -60,6 +61,7 @@ jobs:
         preset: [asan, tsan]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/tpch-data
       - name: Install toolchain
         run: |
           sudo apt-get update
