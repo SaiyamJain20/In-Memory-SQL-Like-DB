@@ -115,7 +115,7 @@ class StorageManager {
     std::unique_ptr<FileLock> lock_;
 
     mutable std::mutex commit_mutex_; // serialises statements; guards wal_ and the counters below
-    std::mutex checkpoint_mutex_; // one checkpoint at a time
+    std::mutex checkpoint_mutex_;     // one checkpoint at a time
     std::unique_ptr<WalWriter> wal_;
     std::atomic<uint64_t> wal_epoch_{0};
     std::atomic<uint64_t> checkpoint_epoch_{0};
