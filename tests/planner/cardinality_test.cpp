@@ -39,6 +39,7 @@ BoundExprPtr Or(BoundExprPtr a, BoundExprPtr b) {
 ColumnEstimate IntColumn(double distinct, int lo, int hi, double nulls = 0) {
     ColumnEstimate c;
     c.distinct = distinct;
+    c.domain = distinct; // as a table scan reports it
     c.null_fraction = nulls;
     c.min = Value::Integer(lo);
     c.max = Value::Integer(hi);
@@ -412,6 +413,72 @@ TEST(CardinalityRules, JoinsOfEveryKind) {
         << "100 x 20 combinations, but at most 1000 are in use";
 }
 
+// A filter thins a key column's rows out - and with them the distinct values it can still hold -
+// but the keys that are left are a sample of all the values the column has (TPC-H Q22: the
+// customers of seven country codes against the customers that have orders). The share of the
+// left keys that find a partner is the share of the key *domain* the right keys cover, whatever
+// predicates have reduced the left rows.
+TEST(CardinalityRules, SemiAndAntiJoinsMeasureTheLeftKeysAgainstTheirWholeDomain) {
+    Estimate customers; // 150 distinct keys, one row each; a balance 0..99
+    customers.rows = 150;
+    customers.columns = {IntColumn(150, 0, 149), IntColumn(100, 0, 99)};
+    Estimate with_orders; // 1000 orders by 100 of the customers
+    with_orders.rows = 1000;
+    with_orders.columns = {IntColumn(100, 0, 149)};
+    const BoundExprPtr on = Cmp(OperatorKind::Eq, Col(0), Col(2));
+
+    EXPECT_NEAR(EstimateJoin(JoinType::Anti, customers, with_orders, on.get()).rows, 50.0, 1e-9)
+        << "a third of the customers have no order";
+    // half the customers by their balance: still a third of them have no order
+    const BoundExprPtr half = Cmp(OperatorKind::Lt, Col(1), Int(50));
+    const Estimate rich = ApplyFilter(customers, *half);
+    EXPECT_NEAR(rich.rows, 75.0, 1.0);
+    EXPECT_LE(rich.columns[0].distinct, rich.rows + 1e-9) << "75 rows hold at most 75 keys";
+    EXPECT_NEAR(rich.columns[0].Domain(), 150.0, 1e-9) << "of the 150 the keys are drawn from";
+    const Estimate anti = EstimateJoin(JoinType::Anti, rich, with_orders, on.get());
+    const Estimate semi = EstimateJoin(JoinType::Semi, rich, with_orders, on.get());
+    EXPECT_NEAR(anti.rows, rich.rows / 3, 1e-6);
+    EXPECT_NEAR(semi.rows, rich.rows * 2 / 3, 1e-6);
+    EXPECT_NEAR(anti.rows + semi.rows, rich.rows, 1e-6);
+
+    // no predicate narrows the domain: not a range, an equality or a list on the key column
+    const BoundExprPtr low = Cmp(OperatorKind::Lt, Col(0), Int(30));
+    const Estimate first = ApplyFilter(customers, *low);
+    EXPECT_NEAR(first.columns[0].distinct, 30.0, 1.5) << "the key is narrowed...";
+    EXPECT_EQ(first.columns[0].Domain(), 150.0) << "...its domain is not";
+    // (the orders are not restricted to the low keys: a third of those 30 customers has none)
+    EXPECT_NEAR(EstimateJoin(JoinType::Anti, first, with_orders, on.get()).rows, first.rows / 3,
+                1e-6);
+    const BoundExprPtr one = Cmp(OperatorKind::Eq, Col(0), Int(7));
+    EXPECT_EQ(ApplyFilter(customers, *one).columns[0].distinct, 1.0);
+    EXPECT_EQ(ApplyFilter(customers, *one).columns[0].Domain(), 150.0);
+    std::vector<BoundExprPtr> keys;
+    for (const int k : {3, 5, 8}) {
+        keys.push_back(Int(k));
+    }
+    const BoundExprPtr list = BoundExpr::InList(Col(0), std::move(keys), false);
+    EXPECT_LE(ApplyFilter(customers, *list).columns[0].distinct, 3.0);
+    EXPECT_EQ(ApplyFilter(customers, *list).columns[0].Domain(), 150.0);
+
+    // a join keeps the domains of both sides' columns
+    Estimate small;
+    small.rows = 20;
+    small.columns = {IntColumn(20, 0, 19)};
+    const Estimate joined = EstimateJoin(JoinType::Inner, customers, small, on.get());
+    EXPECT_EQ(joined.columns[0].distinct, 20.0) << "the keys of the join are the smaller set";
+    EXPECT_EQ(joined.columns[0].Domain(), 150.0);
+    EXPECT_EQ(joined.columns[2].Domain(), 20.0);
+    // a right side that covers every key: nothing is left for an anti join
+    Estimate everyone;
+    everyone.rows = 500;
+    everyone.columns = {IntColumn(150, 0, 149)};
+    EXPECT_EQ(EstimateJoin(JoinType::Anti, rich, everyone, on.get()).rows, 0.0);
+    // a column that no scan produced (no domain recorded) falls back on its distinct count
+    ColumnEstimate derived;
+    derived.distinct = 12;
+    EXPECT_EQ(derived.Domain(), 12.0);
+}
+
 namespace {
 
 struct Env {
@@ -545,6 +612,16 @@ TEST(CardinalityEstimates, JoinsAndAggregatesOfSyntheticSchemasAreCloseToTheTrut
         "SELECT * FROM cust WHERE NOT EXISTS (SELECT 1 FROM ord WHERE ord.ck = cust.ck AND "
         "ord.price < 5)",
         "SELECT * FROM cust WHERE ck IN (SELECT ck FROM ord WHERE price < 100)",
+        // the left rows are a sample of the key domain, however they were chosen: the orders of
+        // the first 667 customers cover two thirds of every group of customers
+        "SELECT * FROM cust WHERE nation < 5 AND NOT EXISTS (SELECT 1 FROM ord WHERE ord.ck = "
+        "cust.ck AND ord.ck < 667)",
+        "SELECT * FROM cust WHERE nation < 5 AND EXISTS (SELECT 1 FROM ord WHERE ord.ck = cust.ck "
+        "AND ord.ck < 667)",
+        // a range on the key itself, orders of a different kind: 26% of the customers have one
+        "SELECT * FROM cust WHERE ck < 300 AND NOT EXISTS (SELECT 1 FROM ord WHERE ord.ck = "
+        "cust.ck AND ord.price < 30)",
+        "SELECT * FROM cust WHERE ck < 300 AND ck IN (SELECT ck FROM ord WHERE price < 30)",
         "SELECT * FROM ord WHERE ok IN (SELECT ok FROM item WHERE qty > 49)",
         "SELECT nation, count(*) FROM cust GROUP BY nation",
         "SELECT ck, count(*) FROM ord GROUP BY ck",

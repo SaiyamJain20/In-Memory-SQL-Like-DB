@@ -425,6 +425,18 @@ bool ShrinksItsInput(const LogicalJoin& join) {
     return out.rows <= 0.9 * left.rows;
 }
 
+// Does an inner join have an input of (an estimated) one row, such as the value of a scalar
+// subquery? Joining it costs a comparison per row on the other input: a filter in all but name,
+// and far cheaper per row than a semi / anti join, which probes a hash table of its subquery's
+// rows. The semi / anti join then stays above it and sees only the rows that are left (TPC-H Q22:
+// the NOT EXISTS over `orders` probed all 42,000 customers of the country codes, instead of the
+// 14,000 whose balance is above the average).
+bool HasOneRowInput(const LogicalJoin& join) {
+    CardinalityEstimator estimator;
+    return estimator.Of(*join.children[0]).rows <= 1.5 ||
+           estimator.Of(*join.children[1]).rows <= 1.5;
+}
+
 // Semi / anti joins (unnested subqueries). Their output is the left side, so a predicate above them
 // refers to left columns only and moves to the left child; a condition part that only mentions the
 // right side filters the subquery's rows before the join. And the join itself moves down: if its
@@ -461,7 +473,7 @@ LogicalPtr PushFilterJoin(LogicalPtr op, Conjuncts conjuncts) {
             }
             const bool in_a = !left_refs.empty() && *left_refs.rbegin() < a_width;
             const bool in_b = !left_refs.empty() && *left_refs.begin() >= a_width;
-            if ((in_a || in_b) && ShrinksItsInput(join)) {
+            if ((in_a || in_b) && !HasOneRowInput(inner) && ShrinksItsInput(join)) {
                 // Semi(A x B, S) -> Semi(A, S) x B  or  A x Semi(B, S); the inner join's own
                 // condition and everything above keep their meaning (the output columns are
                 // unchanged).

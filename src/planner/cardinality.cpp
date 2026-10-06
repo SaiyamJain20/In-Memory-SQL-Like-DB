@@ -561,7 +561,9 @@ Estimate EstimateJoin(JoinType type, const Estimate& left, const Estimate& right
             match = 1.0;
             for (const KeyPair& k : keys) {
                 const ColumnEstimate &l = left.columns[k.left], &r = right.columns[k.right];
-                match = std::min(match, Clamp01(r.distinct / std::max(1.0, l.distinct)) *
+                // the share of the left keys' domain that the right keys cover: not of the distinct
+                // values the left rows hold, which every predicate that thins them out reduces
+                match = std::min(match, Clamp01(r.distinct / std::max(1.0, l.Domain())) *
                                             (1.0 - l.null_fraction));
                 partners_per_key = std::max(1.0, right.rows / std::max(1.0, r.distinct));
             }
@@ -831,6 +833,7 @@ Estimate CardinalityEstimator::Compute(const LogicalOperator& op) {
             const ColumnStatistics& s = stats->columns.at(column);
             ColumnEstimate c;
             c.distinct = std::max(1.0, s.distinct);
+            c.domain = c.distinct;
             c.null_fraction = stats->NullFraction(column);
             c.min = s.min;
             c.max = s.max;

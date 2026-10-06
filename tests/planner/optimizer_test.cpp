@@ -445,6 +445,37 @@ TEST(OptimizerShapes, ASemiOrAntiJoinThatRemovesAlmostNothingStaysAboveTheJoins)
               "      SCAN big [k]\n");
 }
 
+TEST(OptimizerShapes, ASemiOrAntiJoinStaysAboveTheJoinWithAScalarSubquery) {
+    // The join with a scalar subquery's one row is a comparison per row, a filter in all but name;
+    // the semi / anti join probes a hash table per row. Sunk below it, the semi join would probe
+    // every row the comparison is about to discard (TPC-H Q22 probed 42,000 customers with its NOT
+    // EXISTS instead of the 14,000 above the average balance: 95 ms instead of 71). small.k matches
+    // 5 of big.k's 1000 distinct keys, so on its own the semi join does sink (see above).
+    Env env;
+    env.SizedTables();
+    EXPECT_EQ(env.Explain("SELECT v FROM big WHERE v > (SELECT avg(w) FROM mid) AND EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.k)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON (k = k)\n"
+              "    JOIN INNER ON (CAST(v AS DOUBLE) > $scalar0)\n"
+              "      SCAN big [k, v]\n"
+              "      PROJECT [avg(CAST(w AS DOUBLE)) AS avg(w)]\n"
+              "        AGGREGATE groups=[] aggregates=[avg(CAST(w AS DOUBLE))]\n"
+              "          SCAN mid [w]\n"
+              "    SCAN small [k]\n");
+    // a guarded scalar (a subquery that is not an aggregate) is one row as well
+    EXPECT_EQ(env.Explain("SELECT v FROM big WHERE v = (SELECT w FROM mid) AND EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.k)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON (k = k)\n"
+              "    JOIN INNER ON (v = $scalar0)\n"
+              "      SCAN big [k, v]\n"
+              "      SCALAR_GUARD (one row, NULL if none, error if several)\n"
+              "        PROJECT [w]\n"
+              "          SCAN mid [w]\n"
+              "    SCAN small [k]\n");
+}
+
 TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {
     Env env;
     env.SizedTables();

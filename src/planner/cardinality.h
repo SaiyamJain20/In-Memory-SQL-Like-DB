@@ -2,6 +2,7 @@
 
 #include "planner/logical_plan.h"
 
+#include <algorithm>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +15,13 @@ struct ColumnEstimate {
     double null_fraction = 0; // of the operator's rows
     std::optional<Value> min; // bounds of the non-NULL values, when known
     std::optional<Value> max;
+    // How many values the column's values were drawn from: its distinct count in the table it comes
+    // from, which no predicate narrows. A filter that keeps half of a customer table's rows leaves
+    // its key with at most half the distinct values (`distinct`), but the keys that remain are
+    // still a sample of all of them: what share of them an orders table covers is not what share of
+    // the remaining ones it covers. 0: no more than `distinct` (a derived column).
+    double domain = 0;
+    double Domain() const { return std::max(distinct, domain); }
 };
 
 // How many rows an operator is expected to produce, and what its columns look like. Derived from
