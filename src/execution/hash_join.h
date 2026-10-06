@@ -40,12 +40,14 @@ class PhysicalHashJoin final : public PhysicalOperator {
     std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override;
     std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override;
     SinkResult Sink(GlobalSinkState&, LocalSinkState&, const DataChunk& input) override;
+    bool ParallelSink() const override { return true; }
     void Combine(GlobalSinkState&, LocalSinkState&) override;
     void Finalize(GlobalSinkState&) override;
 
     // probe side (streaming)
     std::unique_ptr<OperatorState> GetOperatorState(GlobalSinkState* sink_state) override;
     OperatorResult Execute(OperatorState&, const DataChunk& input, DataChunk& output) override;
+    bool ParallelOperator() const override { return true; } // probes read the finished build side
 
   private:
     PhysicalJoinType join_type_;

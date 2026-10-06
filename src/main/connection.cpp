@@ -113,7 +113,8 @@ QueryResult Connection::Execute(LogicalPtr plan) {
 QueryResult Connection::ExecuteSelect(LogicalPtr plan) {
     LogicalPtr optimized = optimize_ ? Optimize(std::move(plan)) : std::move(plan);
     const std::unique_ptr<PhysicalPlan> physical = PlanSelect(*optimized);
-    Executor executor(*physical);
+    const std::shared_ptr<TaskScheduler> scheduler = db_.scheduler();
+    Executor executor(*physical, scheduler.get());
     executor.Run();
     std::vector<DataChunk> chunks =
         PhysicalResultCollector::TakeChunks(*executor.SinkState(*physical->root));
@@ -124,7 +125,8 @@ QueryResult Connection::ExecuteInsert(LogicalPtr plan) {
     LogicalPtr optimized = optimize_ ? Optimize(std::move(plan)) : std::move(plan);
     const auto& insert = static_cast<const LogicalInsert&>(*optimized);
     const std::unique_ptr<PhysicalPlan> physical = PlanInsert(insert);
-    Executor executor(*physical);
+    const std::shared_ptr<TaskScheduler> scheduler = db_.scheduler();
+    Executor executor(*physical, scheduler.get());
     executor.Run();
     return CountResult(PhysicalInsert::InsertedRows(*executor.SinkState(*physical->root)));
 }

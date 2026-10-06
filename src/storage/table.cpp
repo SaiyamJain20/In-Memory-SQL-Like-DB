@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace cdb {
@@ -46,17 +47,25 @@ TableScan::TableScan(std::shared_ptr<const TableSnapshot> snapshot, std::vector<
     }
 }
 
+namespace {
+// True if the row group is empty or a zone map proves that no row can satisfy a filter.
+bool CanSkipGroup(const RowGroup& g, const std::vector<TableFilter>& filters) {
+    if (g.count() == 0) {
+        return true;
+    }
+    for (const TableFilter& f : filters) {
+        if (g.column(f.column_index).stats().CanSkip(f.op, f.constant)) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
 bool TableScan::AdvanceToNextGroup() {
     while (next_group_ < snapshot_->row_group_count()) {
         const RowGroup& g = snapshot_->row_group(next_group_++);
-        bool skip = g.count() == 0;
-        for (const TableFilter& f : filters_) {
-            if (skip) {
-                break;
-            }
-            skip = g.column(f.column_index).stats().CanSkip(f.op, f.constant);
-        }
-        if (skip) {
+        if (CanSkipGroup(g, filters_)) {
             skipped_++;
             continue;
         }
@@ -84,6 +93,84 @@ bool TableScan::Next(DataChunk& out) {
     out.SetCardinality(n);
     offset_ += n;
     return true;
+}
+
+// ---------------------------------------------------------------- MorselScan
+
+namespace {
+std::atomic<idx_t>& MorselRowsSetting() {
+    static std::atomic<idx_t> rows{[] {
+        const char* env = std::getenv("CDB_MORSEL_ROWS");
+        const long long v = env != nullptr ? std::atoll(env) : 0;
+        return v > 0 ? AlignUp(static_cast<idx_t>(v), kVectorSize) : idx_t{0};
+    }()};
+    return rows;
+}
+} // namespace
+
+idx_t MorselScan::DefaultMorselRows() noexcept {
+    const idx_t set = MorselRowsSetting().load(std::memory_order_relaxed);
+    return set != 0 ? set : kDefaultMorselRows;
+}
+
+void MorselScan::SetDefaultMorselRows(idx_t rows) noexcept {
+    MorselRowsSetting().store(rows == 0 ? 0 : AlignUp(rows, kVectorSize),
+                              std::memory_order_relaxed);
+}
+
+MorselScan::MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> column_ids,
+                       std::vector<TableFilter> filters, idx_t morsel_rows)
+    : snapshot_(std::move(snapshot)), column_ids_(std::move(column_ids)) {
+    if (morsel_rows == 0) {
+        morsel_rows = DefaultMorselRows();
+    }
+    CDB_CHECK(morsel_rows % kVectorSize == 0);
+    const auto& schema = snapshot_->schema();
+    for (const idx_t c : column_ids_) {
+        CDB_CHECK(c < schema.size());
+        types_.push_back(schema[c].type);
+    }
+    for (const TableFilter& f : filters) {
+        CDB_CHECK(f.column_index < schema.size());
+    }
+    for (idx_t g = 0; g < snapshot_->row_group_count(); g++) {
+        const RowGroup& group = snapshot_->row_group(g);
+        if (CanSkipGroup(group, filters)) {
+            skipped_++;
+            continue;
+        }
+        scanned_++;
+        for (idx_t offset = 0; offset < group.count(); offset += morsel_rows) {
+            ScanMorsel m;
+            m.group = &group;
+            m.offset = offset;
+            m.count = std::min(morsel_rows, group.count() - offset);
+            m.index = morsels_.size();
+            rows_ += m.count;
+            morsels_.push_back(m);
+        }
+    }
+}
+
+bool MorselScan::Next(ScanMorsel& morsel) {
+    const idx_t i = next_.fetch_add(1, std::memory_order_relaxed);
+    if (i >= morsels_.size()) {
+        return false;
+    }
+    morsel = morsels_[i];
+    return true;
+}
+
+idx_t MorselScan::ReadVector(const ScanMorsel& morsel, idx_t vector_index, DataChunk& out) const {
+    CDB_CHECK(out.types() == types_ && out.capacity() == kVectorSize);
+    const idx_t first = vector_index * kVectorSize;
+    CDB_CHECK(first < morsel.count);
+    const idx_t n = std::min(kVectorSize, morsel.count - first);
+    for (idx_t i = 0; i < column_ids_.size(); i++) {
+        morsel.group->column(column_ids_[i]).Scan(morsel.offset + first, n, out.column(i));
+    }
+    out.SetCardinality(n);
+    return n;
 }
 
 // ---------------------------------------------------------------- Table

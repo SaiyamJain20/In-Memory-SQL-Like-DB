@@ -4,6 +4,7 @@
 #include "storage/column_definition.h"
 #include "storage/row_group.h"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -72,6 +73,63 @@ class TableScan {
     idx_t offset_ = 0;
     idx_t scanned_ = 0;
     idx_t skipped_ = 0;
+};
+
+// A run of consecutive rows of one row group: the unit of parallel scanning ("morsel"). Its rows
+// are read one vector at a time with MorselScan::ReadVector().
+struct ScanMorsel {
+    const RowGroup* group = nullptr;
+    idx_t offset = 0; // first row within the group (a multiple of kVectorSize)
+    idx_t count = 0;  // rows in the morsel
+    idx_t index = 0;  // position in scan order: 0, 1, 2, ... over the whole scan
+};
+
+// The shared half of a parallel scan. Row groups that the zone maps rule out are dropped, the rest
+// are cut into morsels of up to `morsel_rows` rows, and any number of threads claim morsels with
+// Next() (an atomic cursor, so each is handed out exactly once) and read them with ReadVector().
+// A single thread consuming morsels in order sees exactly the chunks TableScan produces.
+class MorselScan {
+  public:
+    static constexpr idx_t kDefaultMorselRows = 8 * kVectorSize;
+
+    // The morsel size used when none is given: kDefaultMorselRows, or CDB_MORSEL_ROWS from the
+    // environment, or whatever SetDefaultMorselRows() last set (tests use one vector to force many
+    // morsels, and so many interleavings, on small tables).
+    static idx_t DefaultMorselRows() noexcept;
+    static void SetDefaultMorselRows(idx_t rows) noexcept; // 0 restores the built-in default
+
+    // `morsel_rows` must be a positive multiple of kVectorSize; 0 means DefaultMorselRows().
+    MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> column_ids,
+               std::vector<TableFilter> filters = {}, idx_t morsel_rows = 0);
+
+    const std::vector<LogicalType>& types() const noexcept { return types_; }
+    idx_t MorselCount() const noexcept { return morsels_.size(); }
+    idx_t RowCount() const noexcept { return rows_; } // rows in the morsels (after pruning)
+    idx_t row_groups_scanned() const noexcept { return scanned_; }
+    idx_t row_groups_skipped() const noexcept { return skipped_; }
+
+    // Claims the next unclaimed morsel; false when all are taken. Thread-safe.
+    bool Next(ScanMorsel& morsel);
+
+    // The number of vectors the morsel spans.
+    static idx_t VectorCount(const ScanMorsel& morsel) noexcept {
+        return (morsel.count + kVectorSize - 1) / kVectorSize;
+    }
+
+    // Fills `out` (Initialize()d with types()) with vector `vector_index` of the morsel and returns
+    // its row count (<= kVectorSize). The vectors are zero-copy views of the stored segments,
+    // exactly as with TableScan. Thread-safe: reads only immutable data.
+    idx_t ReadVector(const ScanMorsel& morsel, idx_t vector_index, DataChunk& out) const;
+
+  private:
+    std::shared_ptr<const TableSnapshot> snapshot_; // keeps the row groups alive
+    std::vector<idx_t> column_ids_;
+    std::vector<LogicalType> types_;
+    std::vector<ScanMorsel> morsels_;
+    idx_t rows_ = 0;
+    idx_t scanned_ = 0;
+    idx_t skipped_ = 0;
+    std::atomic<idx_t> next_{0};
 };
 
 // An append-only columnar table. Writers append whole DataChunks; readers take snapshots and

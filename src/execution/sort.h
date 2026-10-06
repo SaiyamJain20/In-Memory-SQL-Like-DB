@@ -60,6 +60,7 @@ class PhysicalOrder : public PhysicalOperator {
     std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override;
     std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override;
     SinkResult Sink(GlobalSinkState&, LocalSinkState&, const DataChunk& input) override;
+    bool ParallelSink() const override { return true; }
     void Combine(GlobalSinkState&, LocalSinkState&) override;
     void Finalize(GlobalSinkState&) override;
 
