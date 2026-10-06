@@ -316,6 +316,12 @@ TEST(CardinalityRules, AFilterScalesTheRowsAndNarrowsWhatItConstrains) {
     EXPECT_EQ(Value::Compare(*out.columns[0].max, Value::Integer(7)), 0);
     EXPECT_EQ(out.columns[0].null_fraction, 0.0);
     EXPECT_LE(out.columns[1].distinct, 10.0) << "other columns cannot have more values than rows";
+    // `a < 2` leaves 20 rows, so the text column (50 distinct values among 1000 rows) has at most
+    // 20
+    out = ApplyFilter(in, *Cmp(OperatorKind::Lt, Col(0), Int(2)));
+    EXPECT_NEAR(out.rows, 20.0, 1e-9);
+    EXPECT_LE(out.columns[2].distinct, 20.0 + 1e-9);
+    EXPECT_GE(out.columns[2].distinct, 1.0);
     // a < 25 and a >= 10: the range [10, 24] of [0, 99]
     out = ApplyFilter(
         in, *And(Cmp(OperatorKind::Lt, Col(0), Int(25)), Cmp(OperatorKind::Ge, Col(0), Int(10))));

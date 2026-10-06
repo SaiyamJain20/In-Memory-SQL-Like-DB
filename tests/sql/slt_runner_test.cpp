@@ -9,6 +9,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -89,6 +92,96 @@ std::string Render(const Value& v) {
     return v.ToString();
 }
 
+// ---- comparing a result with DuckDB's, to the last digit or to rounding
+// ---------------------------
+
+std::vector<std::string> SplitCells(const std::string& line) {
+    std::vector<std::string> cells;
+    size_t from = 0;
+    for (;;) {
+        const size_t tab = line.find('\t', from);
+        cells.push_back(line.substr(from, tab == std::string::npos ? tab : tab - from));
+        if (tab == std::string::npos) {
+            return cells;
+        }
+        from = tab + 1;
+    }
+}
+
+bool AsNumber(const std::string& s, double& out) {
+    char* end = nullptr;
+    out = std::strtod(s.c_str(), &end);
+    return !s.empty() && end == s.c_str() + s.size();
+}
+
+// Two cells are the same if their text is, or both are numbers equal to 1e-12 relative: DuckDB
+// averages integers and adds doubles in an order and with a rounding of its own, so the last digit
+// of such an answer is not part of the contract (ADR 0003).
+bool CellsMatch(const std::string& a, const std::string& b) {
+    if (a == b) {
+        return true;
+    }
+    double x, y;
+    if (!AsNumber(a, x) || !AsNumber(b, y)) {
+        return false;
+    }
+    return (std::isnan(x) && std::isnan(y)) ||
+           std::fabs(x - y) <= 1e-12 * std::max(std::fabs(x), std::fabs(y));
+}
+
+bool LinesMatch(const std::string& a, const std::string& b) {
+    const auto x = SplitCells(a), y = SplitCells(b);
+    if (x.size() != y.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < x.size(); i++) {
+        if (!CellsMatch(x[i], y[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A sort key that does not change when a number moves in its last digits.
+std::string RoundedKey(const std::string& line) {
+    std::string key;
+    for (const std::string& cell : SplitCells(line)) {
+        double v;
+        if (AsNumber(cell, v) && cell.find_first_of(".eE") != std::string::npos) {
+            char buffer[40];
+            std::snprintf(buffer, sizeof(buffer), "%.9g", v);
+            key += buffer;
+        } else {
+            key += cell;
+        }
+        key += '\t';
+    }
+    return key;
+}
+
+bool ResultsMatch(std::vector<std::string> got, std::vector<std::string> expected, bool rowsort,
+                  bool approximate) {
+    if (!approximate) {
+        return got == expected;
+    }
+    if (got.size() != expected.size()) {
+        return false;
+    }
+    if (rowsort) {
+        const auto by_key = [](const std::string& a, const std::string& b) {
+            return RoundedKey(a) < RoundedKey(b);
+        };
+        std::stable_sort(got.begin(), got.end(), by_key);
+        std::stable_sort(expected.begin(), expected.end(), by_key);
+    }
+    for (size_t i = 0; i < got.size(); i++) {
+        if (!LinesMatch(got[i], expected[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<std::string> SqlFiles() {
     std::vector<std::string> files;
     const fs::path dir = fs::path(CDB_SOURCE_DIR) / "tests" / "sql";
@@ -164,6 +257,9 @@ struct RunOptions {
     bool persistent = false;
     bool optimizer = true;
     int* unsupported = nullptr;
+    // Doubles may differ from DuckDB's in the last digits (generated files, which average and add
+    // freely; the hand-written files keep every digit)
+    bool approximate_doubles = false;
 };
 
 void RunSqlFile(const std::string& path, const RunOptions& options) {
@@ -206,7 +302,7 @@ void RunSqlFile(const std::string& path, const RunOptions& options) {
             if (b.rowsort) {
                 std::sort(got.begin(), got.end());
             }
-            if (got != b.expected) {
+            if (!ResultsMatch(got, b.expected, b.rowsort, options.approximate_doubles)) {
                 std::string diff;
                 const size_t n = std::max(got.size(), b.expected.size());
                 int shown = 0;
@@ -293,7 +389,9 @@ TEST(SqlFuzz, RandomQueriesMatchDuckDBWithAndWithoutTheOptimizer) {
         SCOPED_TRACE(file);
         for (const bool optimizer : {true, false}) {
             int skipped = 0;
-            RunSqlFile(file, {.optimizer = optimizer, .unsupported = &skipped});
+            RunSqlFile(
+                file,
+                {.optimizer = optimizer, .unsupported = &skipped, .approximate_doubles = true});
             if (::testing::Test::HasFatalFailure()) {
                 return;
             }
