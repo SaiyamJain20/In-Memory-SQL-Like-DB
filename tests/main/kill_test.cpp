@@ -74,8 +74,8 @@ TEST(Kill9, AKilledWriterLeavesEveryAcknowledgedRowAndNothingElse) {
             ChildMain(dir, fds[1]);
         }
         close(fds[1]);
-        // let the child get going whatever the machine's load (at least 100 acknowledged rows, which
-        // is several checkpoints at this threshold), then kill it at a random moment
+        // let the child get going whatever the machine's load (at least 100 acknowledged rows,
+        // which is several checkpoints at this threshold), then kill it at a random moment
         int64_t acked = 0, last = -1;
         while (acked < 100 &&
                read(fds[0], &last, sizeof(last)) == static_cast<ssize_t>(sizeof(last))) {
