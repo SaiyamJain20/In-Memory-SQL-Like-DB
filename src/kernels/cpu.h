@@ -13,6 +13,10 @@ bool UseAvx2() noexcept;
 // True if the CPU supports AVX2, whether or not SIMD kernels are enabled (tests skip when false).
 bool CpuHasAvx2() noexcept;
 
+// True if the CPU has the SSE4.2 CRC32 instruction and SIMD kernels are enabled (storage
+// checksums).
+bool UseSse42Crc() noexcept;
+
 // Process-wide switch (default: on, unless the environment variable CDB_NO_SIMD is set). Used by
 // tests to compare both implementations and by benchmarks to measure the difference.
 void SetSimdEnabled(bool enabled) noexcept;

@@ -18,6 +18,8 @@ const char* ErrorCodeName(ErrorCode code) noexcept {
         return "Execution Error";
     case ErrorCode::Io:
         return "IO Error";
+    case ErrorCode::Corruption:
+        return "Corruption Error";
     case ErrorCode::NotImplemented:
         return "Not Implemented";
     }

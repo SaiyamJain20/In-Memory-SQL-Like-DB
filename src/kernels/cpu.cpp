@@ -28,6 +28,18 @@ bool UseAvx2() noexcept {
     return SimdState().load(std::memory_order_relaxed) != 0 && CpuHasAvx2();
 }
 
+bool UseSse42Crc() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    static const bool has = [] {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("sse4.2") != 0;
+    }();
+    return has && SimdState().load(std::memory_order_relaxed) != 0;
+#else
+    return false;
+#endif
+}
+
 void SetSimdEnabled(bool enabled) noexcept {
     SimdState().store(enabled ? 1 : 0, std::memory_order_relaxed);
 }
