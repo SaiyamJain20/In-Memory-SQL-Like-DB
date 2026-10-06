@@ -292,6 +292,12 @@ std::shared_ptr<ColumnSegment> ReadSegment(BinaryReader& r, LogicalType type, id
     }
     const idx_t rounded = AlignUp(count, kVectorSize);
     ValidityMask validity(rounded);
+    if (encoded == 0 && r.remaining() < (count + 7) / 8) {
+        // a raw column of n rows needs at least a bit per row (its NULL bitmap) in the file; say so
+        // before allocating n elements for a header that merely claims them
+        r.Fail("a raw column of " + std::to_string(count) + " rows in " +
+               std::to_string(r.remaining()) + " bytes");
+    }
     if (encoded == 1) {
         const idx_t nulls = ReadValidity(r, count, validity);
         if (nulls != stats.null_count) {

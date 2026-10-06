@@ -3,12 +3,15 @@
 //   cdb_shell                    interactive (reads statements from stdin; a statement ends at ';')
 //   cdb_shell -c "SELECT 1"      run the given SQL and exit
 //   cdb_shell -f script.sql      run a script
+//   cdb_shell --db DIR           use (create) the persistent database in directory DIR, with any of
+//                                the above; every statement is durable when it returns, CHECKPOINT
+//                                folds the log into a snapshot, closing the shell checkpoints
 //
 // Dot commands (interactive or in scripts):
 //   .tables   .schema [table]   .read FILE   .timer on|off   .maxrows N|off   .threads N|auto
 //   .help   .quit
 // Queries use one thread per hardware thread by default (CDB_THREADS overrides).
-// The database lives in memory for the lifetime of the process.
+// Without --db the database lives in memory for the lifetime of the process.
 
 #include "common/version.h"
 #include "main/connection.h"
@@ -18,6 +21,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 
@@ -62,14 +66,12 @@ bool RunSql(cdb::Connection& conn, const std::string& sql, const Settings& setti
 } // namespace
 
 int main(int argc, char** argv) {
-    cdb::Database db(std::getenv("CDB_THREADS") != nullptr ? cdb::Database::DefaultThreads() : 0);
-    cdb::Connection conn(db);
-    Settings settings;
-
-    std::string command_sql, script;
+    std::string command_sql, script, db_path;
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
-        if (arg == "-c" && i + 1 < argc) {
+        if (arg == "--db" && i + 1 < argc) {
+            db_path = argv[++i];
+        } else if (arg == "-c" && i + 1 < argc) {
             command_sql = argv[++i];
         } else if (arg == "-f" && i + 1 < argc) {
             bool ok;
@@ -79,10 +81,33 @@ int main(int argc, char** argv) {
                 return 2;
             }
         } else {
-            std::cerr << "usage: cdb_shell [-c SQL | -f FILE]\n";
+            std::cerr << "usage: cdb_shell [--db DIR] [-c SQL | -f FILE]\n";
             return 2;
         }
     }
+    const size_t threads =
+        std::getenv("CDB_THREADS") != nullptr ? cdb::Database::DefaultThreads() : 0;
+    std::unique_ptr<cdb::Database> database;
+    try {
+        if (db_path.empty()) {
+            database = std::make_unique<cdb::Database>(threads);
+        } else {
+            cdb::DatabaseOptions options;
+            options.threads = threads;
+            database = std::make_unique<cdb::Database>(db_path, options);
+            const cdb::RecoveryStats& r = database->storage()->recovery();
+            std::cerr << (r.created ? "created database " : "opened database ") << db_path << " ("
+                      << r.tables << " tables from the checkpoint, " << r.transactions
+                      << " statements replayed from the log"
+                      << (r.discarded_bytes != 0 ? ", a torn log tail discarded" : "") << ")\n";
+        }
+    } catch (const cdb::Error& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+    cdb::Database& db = *database;
+    cdb::Connection conn(db);
+    Settings settings;
     int exit_code = 0;
     if (!command_sql.empty()) {
         return RunSql(conn, command_sql, settings) ? 0 : 1;

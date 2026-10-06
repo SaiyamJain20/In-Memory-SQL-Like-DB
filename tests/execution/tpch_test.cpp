@@ -9,6 +9,7 @@
 // selects the scale factor (default 0.01; the roadmap's exit criteria are SF0.1 and SF1, run by
 // hand).
 
+#include "io/memory_file_system.h"
 #include "main/connection.h"
 #include "main/database.h"
 
@@ -80,39 +81,82 @@ std::vector<std::vector<std::string>> ReadPipeRows(const std::string& path) {
     return rows;
 }
 
+// Where the data the queries run on lives: loaded straight into memory; loaded into a persistent
+// database that is then closed (which checkpoints) and reopened from the checkpoint file; or loaded
+// into one whose log is all there is, so that reopening replays the COPY statements from the log.
+enum class Source { Memory = 0, Checkpoint = 1, Log = 2 };
+
+const char* SourceName(Source s) {
+    switch (s) {
+    case Source::Memory:
+        return "Memory";
+    case Source::Checkpoint:
+        return "ReopenedFromCheckpoint";
+    case Source::Log:
+        return "ReopenedFromLog";
+    }
+    return "?";
+}
+
 struct Tpch {
-    Database db;
-    Connection conn{db};
+    std::shared_ptr<MemoryFileSystem> disk;
+    std::unique_ptr<Database> db;
+    std::unique_ptr<Connection> conn;
     bool ready = false;
     std::string problem;
 
-    Tpch() {
+    explicit Tpch(Source source) {
         if (!std::filesystem::exists(DataDir() + "/manifest.json")) {
             problem =
                 "TPC-H data not generated (run: .venv/bin/python tools/tpch_data.py --sf 0.01)";
             return;
         }
+        DatabaseOptions options;
+        if (source != Source::Memory) {
+            disk = std::make_shared<MemoryFileSystem>();
+            options.storage.fs = disk;
+            options.storage.checkpoint_on_close = source == Source::Checkpoint;
+            options.storage.checkpoint_wal_bytes = 0;
+        }
+        Open(source, options);
         std::istringstream schema(ReadFile(std::string(CDB_SOURCE_DIR) + "/bench/tpch/schema.sql"));
-        const QueryResult created = conn.Query(schema.str());
+        const QueryResult created = conn->Query(schema.str());
         if (!created.ok()) {
             problem = "schema: " + created.error_message();
             return;
         }
         for (const char* t : kTables) {
-            const QueryResult r = conn.Query(std::string("COPY ") + t + " FROM '" + DataDir() +
-                                             "/" + t + ".csv' (DELIMITER '|', HEADER FALSE)");
+            const QueryResult r = conn->Query(std::string("COPY ") + t + " FROM '" + DataDir() +
+                                              "/" + t + ".csv' (DELIMITER '|', HEADER FALSE)");
             if (!r.ok()) {
                 problem = std::string("loading ") + t + ": " + r.error_message();
                 return;
             }
         }
+        if (source != Source::Memory) {
+            conn.reset();
+            db.reset(); // closing: a checkpoint, or (Log) nothing but the fsynced log
+            Open(source, options);
+            if (db->storage()->recovery().had_checkpoint != (source == Source::Checkpoint)) {
+                problem = "the database was not recovered the way this test expects";
+                return;
+            }
+        }
         ready = true;
+    }
+
+    void Open(Source source, const DatabaseOptions& options) {
+        db = source == Source::Memory ? std::make_unique<Database>()
+                                      : std::make_unique<Database>("/db", options);
+        conn = std::make_unique<Connection>(*db);
     }
 };
 
-Tpch& Shared() {
-    static Tpch instance;
-    return instance;
+Tpch& Shared(Source source) {
+    static Tpch memory(Source::Memory);
+    static Tpch checkpoint(Source::Checkpoint);
+    static Tpch log(Source::Log);
+    return source == Source::Memory ? memory : (source == Source::Checkpoint ? checkpoint : log);
 }
 
 bool CellMatches(const Value& got, const std::string& want, std::string& why) {
@@ -146,10 +190,11 @@ bool CellMatches(const Value& got, const std::string& want, std::string& why) {
 
 } // namespace
 
-class TpchDifferential : public ::testing::TestWithParam<int> {};
+class TpchDifferential : public ::testing::TestWithParam<std::tuple<Source, int>> {};
 
 TEST_P(TpchDifferential, MatchesDuckDB) {
-    Tpch& t = Shared();
+    const auto [source, query] = GetParam();
+    Tpch& t = Shared(source);
     if (!t.ready) {
         if (std::getenv("CDB_REQUIRE_TPCH")) {
             FAIL() << t.problem;
@@ -157,10 +202,10 @@ TEST_P(TpchDifferential, MatchesDuckDB) {
         GTEST_SKIP() << t.problem;
     }
     char name[16];
-    std::snprintf(name, sizeof name, "q%02d", GetParam());
+    std::snprintf(name, sizeof name, "q%02d", query);
     const std::string sql =
         ReadFile(std::string(CDB_SOURCE_DIR) + "/bench/tpch/queries/" + name + ".sql");
-    const QueryResult result = t.conn.Query(sql);
+    const QueryResult result = t.conn->Query(sql);
     ASSERT_TRUE(result.ok()) << name << ": " << result.error_message();
     const auto expected = ReadPipeRows(DataDir() + "/expected/" + name + ".csv");
     ASSERT_EQ(result.RowCount(), expected.size()) << name << " row count";
@@ -175,10 +220,13 @@ TEST_P(TpchDifferential, MatchesDuckDB) {
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(Queries, TpchDifferential,
-                         ::testing::Values(1, 3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 19),
-                         [](const ::testing::TestParamInfo<int>& param_info) {
-                             return "Q" + std::to_string(param_info.param);
-                         });
+INSTANTIATE_TEST_SUITE_P(
+    Queries, TpchDifferential,
+    ::testing::Combine(::testing::Values(Source::Memory, Source::Checkpoint, Source::Log),
+                       ::testing::Values(1, 3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 19)),
+    [](const ::testing::TestParamInfo<std::tuple<Source, int>>& param_info) {
+        return std::string(SourceName(std::get<0>(param_info.param))) + "_Q" +
+               std::to_string(std::get<1>(param_info.param));
+    });
 
 } // namespace cdb

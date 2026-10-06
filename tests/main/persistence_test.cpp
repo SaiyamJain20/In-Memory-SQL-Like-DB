@@ -767,4 +767,62 @@ TEST(Persistence, ARealDirectoryOnDiskWorksTheSameWay) {
     std::filesystem::remove_all(dir);
 }
 
+// Not a test: when CDB_WRITE_FUZZ_SEEDS names a directory, writes the seed corpora of the
+// checkpoint and WAL fuzz targets there (real files of a small database), the way fuzz/corpus/ was
+// made.
+TEST(Persistence, WritesFuzzSeedsWhenAsked) {
+    const char* dir = std::getenv("CDB_WRITE_FUZZ_SEEDS");
+    if (dir == nullptr) {
+        GTEST_SKIP() << "set CDB_WRITE_FUZZ_SEEDS=<dir> to regenerate the fuzz seeds";
+    }
+    const auto write = [&](const std::string& target, const std::string& name,
+                           const std::vector<uint8_t>& bytes) {
+        std::filesystem::create_directories(std::filesystem::path(dir) / target);
+        std::ofstream out(std::filesystem::path(dir) / target / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+    };
+    for (const bool tiny : {true, false}) {
+        auto fs = NewFs();
+        DatabaseOptions o = Options(fs);
+        o.storage.checkpoint_on_close = false;
+        const std::vector<std::string> script =
+            tiny ? std::vector<std::string>{"CREATE TABLE t (a INTEGER, s VARCHAR)",
+                                            "INSERT INTO t VALUES (1, 'x'), (2, NULL)"}
+                 : Script();
+        {
+            auto db = Open(fs, o);
+            Connection conn(*db);
+            RunScript(conn, script);
+        }
+        const std::string tag = tiny ? "tiny" : "mixed";
+        std::vector<uint8_t> wal = fs->Contents(std::string(kDir) + "/wal-0000000000000000.log");
+        write("wal", tag + "_log_only", [&] {
+            std::vector<uint8_t> v = {1}; // mode 1: the harness supplies the header
+            v.insert(v.end(), wal.begin() + 16, wal.end());
+            return v;
+        }());
+        write("wal", tag + "_with_header", [&] {
+            std::vector<uint8_t> v = {0}; // mode 0: the bytes are the whole file
+            v.insert(v.end(), wal.begin(), wal.end());
+            return v;
+        }());
+        // mode 2: the frames' payloads (operation streams) as one frame, which the harness
+        // checksums
+        {
+            const WalScan scan = ScanWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", 0);
+            std::vector<uint8_t> v = {2};
+            ReplayWal(*fs, std::string(kDir) + "/wal-0000000000000000.log", scan,
+                      [&](const uint8_t* p, size_t n) { v.insert(v.end(), p, p + n); });
+            write("wal", tag + "_operations", v);
+        }
+        {
+            auto db = Open(fs, o);
+            db->Checkpoint();
+        }
+        write("checkpoint", tag,
+              fs->Contents(std::string(kDir) + "/checkpoint-0000000000000001.cdb"));
+    }
+}
+
 } // namespace cdb

@@ -2,6 +2,7 @@
 // in them were produced by DuckDB (tools/gen_slt.py), so these are differential tests that do not
 // need DuckDB at run time. See tools/gen_slt.py for the format.
 
+#include "io/memory_file_system.h"
 #include "main/connection.h"
 #include "main/database.h"
 
@@ -103,18 +104,57 @@ std::vector<std::string> SqlFiles() {
 
 } // namespace
 
-class SqlLogicTest : public ::testing::TestWithParam<std::string> {};
+// The database a file runs against: in memory, or a persistent one that is killed and recovered
+// after every single statement (the machine loses power, everything not fsynced is gone, and the
+// next statement runs on what recovery makes of the disk). The expected results are the same.
+class Subject {
+  public:
+    explicit Subject(bool persistent) : persistent_(persistent) {
+        if (persistent_) {
+            disk_ = std::make_shared<MemoryFileSystem>();
+            Open();
+        } else {
+            db_ = std::make_unique<Database>();
+        }
+        conn_ = std::make_unique<Connection>(*db_);
+    }
+    QueryResult Query(const std::string& sql) {
+        QueryResult r = conn_->Query(sql);
+        if (persistent_) {
+            conn_.reset();
+            const auto survivors = disk_->Crash(CrashPolicy::DropUnsynced());
+            db_.reset(); // closing writes into the old disk, which is gone
+            disk_ = survivors;
+            Open();
+            conn_ = std::make_unique<Connection>(*db_);
+        }
+        return r;
+    }
+    int restarts() const { return restarts_; }
 
-TEST_P(SqlLogicTest, MatchesDuckDBExpectedResults) {
-    const std::vector<Block> blocks = ParseFile(GetParam());
-    ASSERT_FALSE(blocks.empty()) << GetParam();
-    Database db;
-    Connection conn(db);
+  private:
+    void Open() {
+        DatabaseOptions o;
+        o.storage.fs = disk_;
+        o.storage.checkpoint_wal_bytes = 64 * 1024; // recoveries from checkpoints and from the log
+        db_ = std::make_unique<Database>("/db", o);
+        restarts_++;
+    }
+    bool persistent_;
+    std::shared_ptr<MemoryFileSystem> disk_;
+    std::unique_ptr<Database> db_;
+    std::unique_ptr<Connection> conn_;
+    int restarts_ = 0;
+};
+
+void RunSqlFile(const std::string& path, bool persistent) {
+    const std::vector<Block> blocks = ParseFile(path);
+    ASSERT_FALSE(blocks.empty()) << path;
+    Subject subject(persistent);
     int queries = 0;
     for (const Block& b : blocks) {
-        const std::string where =
-            fs::path(GetParam()).filename().string() + ":" + std::to_string(b.line);
-        const QueryResult r = conn.Query(b.sql);
+        const std::string where = fs::path(path).filename().string() + ":" + std::to_string(b.line);
+        const QueryResult r = subject.Query(b.sql);
         switch (b.kind) {
         case Block::Kind::StatementOk:
             ASSERT_TRUE(r.ok()) << where << "\n" << b.sql << "\n" << r.error_message();
@@ -160,9 +200,30 @@ TEST_P(SqlLogicTest, MatchesDuckDBExpectedResults) {
         }
     }
     EXPECT_GT(queries, 0) << "a .test file with no queries tests nothing";
+    if (persistent) {
+        EXPECT_GT(subject.restarts(), static_cast<int>(blocks.size()))
+            << "the database was recovered after every statement";
+    }
+}
+
+class SqlLogicTest : public ::testing::TestWithParam<std::string> {};
+class SqlLogicPersistentTest : public ::testing::TestWithParam<std::string> {};
+
+TEST_P(SqlLogicTest, MatchesDuckDBExpectedResults) {
+    RunSqlFile(GetParam(), false);
+}
+
+TEST_P(SqlLogicPersistentTest, MatchesDuckDBExpectedResultsAcrossACrashAfterEveryStatement) {
+    RunSqlFile(GetParam(), true);
 }
 
 INSTANTIATE_TEST_SUITE_P(Files, SqlLogicTest, ::testing::ValuesIn(SqlFiles()),
+                         [](const ::testing::TestParamInfo<std::string>& param_info) {
+                             std::string name = fs::path(param_info.param).stem().string();
+                             std::replace(name.begin(), name.end(), '-', '_');
+                             return name;
+                         });
+INSTANTIATE_TEST_SUITE_P(Files, SqlLogicPersistentTest, ::testing::ValuesIn(SqlFiles()),
                          [](const ::testing::TestParamInfo<std::string>& param_info) {
                              std::string name = fs::path(param_info.param).stem().string();
                              std::replace(name.begin(), name.end(), '-', '_');
