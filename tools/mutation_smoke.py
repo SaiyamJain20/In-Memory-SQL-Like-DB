@@ -880,7 +880,7 @@ MUTATIONS = [
     ('encoding: packed vectors may lie outside their payload',
      'src/storage/encoding.cpp',
      'if (width > 0 && (offset > payload_size || PackedBytes(rows, width) > payload_size - offset)) {',
-     'if (false) {', 'asan'),
+     'if ((void)offset, (void)rows, (void)payload_size, false) {', 'asan'),
     ('table: LoadRowGroups seals a short last group instead of re-opening it',
      'src/storage/table.cpp',
      'if (!groups.empty() && groups.back()->count() < row_group_size_) {',
