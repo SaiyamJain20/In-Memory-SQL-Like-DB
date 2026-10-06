@@ -1085,12 +1085,22 @@ const std::vector<std::vector<KeySpec>> kKeyShapes = {
     {{3, true, false}, {2, false, false}, {0, false, false}} // d desc (NaN, -0.0), s, id
 };
 
+// No unique last key: rows that compare equal must keep their input order (the order is stable),
+// and the id column of the output shows whether they did.
+const std::vector<std::vector<KeySpec>> kTieShapes = {
+    {{1, false, false}},                 // k only: a handful of values, huge groups of ties
+    {{2, true, true}, {1, false, true}}, // s desc nulls first, k asc
+    {{3, false, true}},                  // d only: NaN and -0.0 tie with 0.0 groups
+};
+
 } // namespace
 
 TEST(SortBuffer, ParallelSortGivesExactlyTheSerialStableOrder) {
     Rng rng(21);
     const ScopedMinSortRows parallel(1);
-    for (const auto& shape : kKeyShapes) {
+    std::vector<std::vector<KeySpec>> shapes = kKeyShapes;
+    shapes.insert(shapes.end(), kTieShapes.begin(), kTieShapes.end());
+    for (const auto& shape : shapes) {
         for (const idx_t rows_hint : {idx_t{0}, idx_t{1}, idx_t{3}, idx_t{2000}, idx_t{40000}}) {
             std::vector<SortSpec> specs;
             for (const KeySpec& k : shape) {

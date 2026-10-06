@@ -141,13 +141,13 @@ on ~4,300 generated expressions (`tests/planner/golden_expression_test.cpp`).
 same way), `EXPLAIN` (the optimized logical plan) and `SELECT` run. **12 of the 22 TPC-H queries
 run** (and match DuckDB); the other 10 stop precisely at a subquery or `WITH` (Phase 8).
 
-## Execution — [implemented: Phase 4, single-threaded; parallel scheduling planned: Phase 6]
+## Execution — [implemented: Phase 4; morsel-driven parallelism: Phase 6]
 **Push-based pipelines** ([ADR 0005](adr/0005-push-pipelines-with-global-and-local-state.md)).
 A query compiles to pipelines `source → streaming operators → sink`, run in dependency order.
 Pipeline breakers (hash aggregate, join build, sort, top-N) are a sink in one pipeline and the
 source of the next. Operators implement the full global/local state protocol - per-thread
 accumulation in local state, merged in `Combine`, built in `Finalize` - and the tests drive it with
-several local states; Phase 6 adds the scheduler and morsel dispatch, not a rewrite. Streaming
+several local states; Phase 6 added the scheduler and morsel dispatch, not a rewrite. Streaming
 operators can report `Finished` (a satisfied `LIMIT`), which stops the source being read.
 
 **Operators.** Table scan (snapshot per query, zone-map pruning), `VALUES`, filter (selection
@@ -190,10 +190,29 @@ factoring, `LIMIT` below projections (top-N), column pruning. Statistics-based c
 interpreter; random queries optimizer on vs off; every operator against a naive reference;
 `tools/mutation_smoke.py`. Numbers vs DuckDB are in [BENCHMARKS](BENCHMARKS.md).
 
-**Morsel-driven parallelism — [planned: Phase 6].** Sources hand out morsels (a row group, or a
-range of chunks) from a shared atomic cursor; a fixed pool of workers each run the *whole* pipeline
-on their morsel with thread-local state. Work stays cache-hot and there is no per-tuple
-synchronisation.
+**Morsel-driven parallelism — [implemented: Phase 6]** ([ADR 0008](adr/0008-morsel-driven-parallelism.md)).
+`Database` owns a fixed pool (`TaskScheduler`; one thread by default, `CDB_THREADS` / `SetThreads`, the
+shell and the benchmark use every hardware thread). A job is `body(participant)` run by up to N threads;
+the caller is participant 0, so nested and concurrent jobs cannot deadlock, and the first exception is
+rethrown after all participants return. A pipeline runs on several threads only if its source, every
+operator and its sink allow it (default: no; `LIMIT` says no). Each participant has its own local states
+and claims *morsels* (8 vectors, never across a row group) from an atomic cursor, then hands its state
+over in `Combine`:
+- **aggregate:** per-thread `GroupTable`s merged by hash partition (from 32,768 groups; each partition
+  merged by one task, no locks); integer `SUM` is exact in 128 bits so the result never depends on the
+  thread count;
+- **join:** per-thread row stores adopted whole, hashed in parallel and linked into bucket chains without
+  atomics (radix scatter by bucket partition); probing was already per-thread;
+- **sort:** parallel stable merge sort with co-rank slices, equal to the serial stable order; top-N
+  prunes per thread first;
+- **CSV:** mmap, record boundaries found in parallel (or by a serial quote scanner), whole row groups
+  parsed, sealed and compressed per task, published in file order; same errors as the serial loader.
+
+Chunks carry a *batch index* (morsel number), so `SELECT ... WHERE` over a scan and `INSERT ... SELECT`
+keep table order on any thread count. Not defined with more than one thread: the order of groups,
+of matches within one probe row, and of ties in a sort without a total key (none of which SQL promises).
+Floating-point `SUM`/`AVG` re-associate. The whole test suite runs a second time in `-parallel` mode
+(4 threads, one-vector morsels, every parallel threshold at 1) under debug, release, ASan and TSan.
 
 ## Error handling
 See [ADR 0002](adr/0002-error-handling.md): exceptions for query-level errors at module
@@ -207,6 +226,6 @@ result with an error state.
 | SQL | `sqllogictest`-style files in `tests/sql/` (DuckDB-generated expected results) **[implemented]** |
 | Differential | 12 TPC-H queries vs DuckDB (SF0.01 in the gate, SF0.1/SF1 by hand) **[implemented]**; random expressions vs the interpreter and random queries optimizer-on vs off **[implemented]**; random SQL fuzzing vs DuckDB [planned: Phase 8] |
 | Fuzz | libFuzzer on parser, later on file-format readers |
-| Concurrency | ThreadSanitizer in CI |
+| Concurrency | ThreadSanitizer in CI, the whole suite also in `-parallel` mode (4 threads, 1-vector morsels, all thresholds at 1) **[implemented]** |
 | Crash safety | deterministic fault injection through the `FileSystem` interface (Phase 7) |
 | Performance | Google Benchmark micro-benchmarks + TPC-H runner; results in `BENCHMARKS.md` |
