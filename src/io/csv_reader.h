@@ -3,7 +3,9 @@
 #include "execution/task_scheduler.h"
 #include "storage/table.h"
 
+#include <functional>
 #include <istream>
+#include <memory>
 #include <string>
 
 namespace cdb {
@@ -21,6 +23,10 @@ struct CsvOptions {
     // Parallel loading finds record boundaries in byte chunks of this size (0 = chosen from the
     // file size and the thread count). Tests use tiny chunks to put boundaries everywhere.
     size_t parallel_chunk_bytes = 0;
+    // What to do with the fully built staging table once the whole input is valid. Empty: merge it
+    // into the target (Table::Merge). A persistent database sets this to log the rows before they
+    // are merged.
+    std::function<void(std::unique_ptr<Table> staging)> commit = {};
 };
 
 // Loads CSV text into `target`, atomically: rows are parsed into a private staging table and

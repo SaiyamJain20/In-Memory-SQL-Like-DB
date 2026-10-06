@@ -38,7 +38,8 @@
                                                   └──────────┬───────────┘
                                                              │ Phase 7
                                                              ▼
-                                                  FileSystem ▸ WAL ▸ checkpoint
+                                                  StorageManager ▸ WAL ▸ checkpoint
+                                                  ▸ FileSystem (real / crash-simulating)
 ```
 
 ## Data model — [implemented: Phase 1]
@@ -214,6 +215,38 @@ of matches within one probe row, and of ties in a sort without a total key (none
 Floating-point `SUM`/`AVG` re-associate. The whole test suite runs a second time in `-parallel` mode
 (4 threads, one-vector morsels, every parallel threshold at 1) under debug, release, ASan and TSan.
 
+## Persistence — [implemented: Phase 7]
+([ADR 0009](adr/0009-persistence.md).) `Database(path)` opens a directory: `checkpoint-<epoch>.cdb`
+(a complete snapshot, written once, never modified), `wal-<epoch>.log` (the statements committed since
+that snapshot) and a `LOCK`. The engine is in-memory first: tables are loaded into memory at open and
+scanned zero-copy as before, so persistence is a log plus snapshots, not a buffer pool.
+
+**Commit.** Every state-changing statement is one transaction: validate / stage -> write log frames and
+fsync -> apply to memory, under one commit mutex (readers are never blocked; they use snapshots). INSERT
+and COPY already stage rows in a private table, so every error that can happen has happened before
+anything is logged and the in-memory apply (`Table::Merge`) cannot fail. A statement is a sequence of
+frames `[length][CRC-32C][sequence][flags][payload]`, the last carrying a commit flag; recovery trusts
+a frame only if it is complete, verifies, continues the sequence, and a commit frame follows. Any
+failure writing or switching logs makes the database read-only until reopened (after a failed fsync the
+file's contents are unknown).
+
+**Checkpoint.** Under the commit mutex: snapshot every table (cheap: immutable row groups plus a copy
+of each open tail), fsync the log, start a new one; then, outside it, write the snapshot to
+`*.tmp`, fsync, rename into place, fsync the directory, delete what it supersedes. A checkpoint file
+stores each column segment in the encoding it has in memory (so loading is a read, not a re-encode),
+every block checksummed, a footer directory and a fixed trailer; writing and loading are parallel per
+row group. Triggered by `CHECKPOINT`, by log size, and on close.
+
+**Recovery.** Newest checkpoint (a corrupt one is an error, never worked around) + the chain of logs
+from its epoch on (no gaps; an older log must be intact), replayed; a torn tail of the newest log is cut
+off and made durable before appending; stale files removed. Recovery never writes anything else, so a
+crash during it is just another crash.
+
+**FileSystem.** All I/O goes through `FileSystem`/`FileHandle` (positional reads and writes, fsync,
+atomic rename, directory fsync, locks). `PosixFileSystem` is the real one; `MemoryFileSystem` models
+durability (unsynced writes, unsynced directory operations) and can produce the file system a power
+cut would leave behind under several policies; `FaultInjector` crashes at, or fails, the Nth operation.
+
 ## Error handling
 See [ADR 0002](adr/0002-error-handling.md): exceptions for query-level errors at module
 boundaries (parse/bind/runtime), no exceptions in inner loops; the public API converts them to a
@@ -225,7 +258,7 @@ result with an error state.
 | Unit | GoogleTest, every format × type × null combination for data structures |
 | SQL | `sqllogictest`-style files in `tests/sql/` (DuckDB-generated expected results) **[implemented]** |
 | Differential | 12 TPC-H queries vs DuckDB (SF0.01 in the gate, SF0.1/SF1 by hand) **[implemented]**; random expressions vs the interpreter and random queries optimizer-on vs off **[implemented]**; random SQL fuzzing vs DuckDB [planned: Phase 8] |
-| Fuzz | libFuzzer on parser, later on file-format readers |
+| Fuzz | libFuzzer on the parser, the checkpoint file reader and write-ahead-log recovery **[implemented]** |
 | Concurrency | ThreadSanitizer in CI, the whole suite also in `-parallel` mode (4 threads, 1-vector morsels, all thresholds at 1) **[implemented]** |
-| Crash safety | deterministic fault injection through the `FileSystem` interface (Phase 7) |
+| Crash safety | a crash at **every** mutating I/O operation of several workloads x six power-cut policies (torn and reordered writes included), then a second cut at every operation of the recovery; an I/O error at every operation; 25 real `kill -9`s; the SQL suite with a power cut after every statement; TPC-H on reopened databases; every bit flip and truncation of a checkpoint detected **[implemented]** |
 | Performance | Google Benchmark micro-benchmarks + TPC-H runner; results in `BENCHMARKS.md` |

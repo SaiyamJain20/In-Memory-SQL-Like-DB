@@ -97,6 +97,43 @@ inline void ExpectColumnsEqual(const std::vector<std::vector<Value>>& got,
     }
 }
 
+// Every row of a segment, vector by vector (raw and encoded alike).
+inline std::vector<Value> ScanSegment(const ColumnSegment& seg) {
+    std::vector<Value> out;
+    Vector v(seg.type(), kVectorSize);
+    for (idx_t at = 0; at < seg.count(); at += kVectorSize) {
+        const idx_t n = std::min<idx_t>(kVectorSize, seg.count() - at);
+        seg.Scan(at, n, v);
+        v.Verify(n);
+        for (idx_t i = 0; i < n; i++)
+            out.push_back(v.GetValue(i));
+    }
+    return out;
+}
+
+// Two segments hold the same bits, the same statistics, and are stored the same way.
+inline void ExpectSameSegment(const ColumnSegment& got, const ColumnSegment& want,
+                              const std::string& ctx) {
+    ASSERT_EQ(got.type(), want.type()) << ctx;
+    ASSERT_EQ(got.count(), want.count()) << ctx;
+    EXPECT_EQ(got.stats().null_count, want.stats().null_count) << ctx;
+    EXPECT_EQ(got.stats().min.has_value(), want.stats().min.has_value()) << ctx;
+    EXPECT_EQ(got.stats().max.has_value(), want.stats().max.has_value()) << ctx;
+    if (got.stats().min && want.stats().min) {
+        EXPECT_TRUE(BitIdentical(*got.stats().min, *want.stats().min)) << ctx << ": min";
+        EXPECT_TRUE(BitIdentical(*got.stats().max, *want.stats().max)) << ctx << ": max";
+    }
+    ASSERT_EQ(got.encoded(), want.encoded()) << ctx;
+    if (got.encoded()) {
+        EXPECT_EQ(got.encoding()->kind(), want.encoding()->kind()) << ctx;
+    }
+    const std::vector<Value> a = ScanSegment(got), b = ScanSegment(want);
+    for (size_t i = 0; i < a.size(); i++) {
+        ASSERT_TRUE(BitIdentical(a[i], b[i]))
+            << ctx << ": row " << i << " got " << a[i].ToString() << " want " << b[i].ToString();
+    }
+}
+
 // Does `value <op> constant` hold under SQL semantics (NULL never satisfies)?
 inline bool Satisfies(const Value& value, CompareOp op, const Value& constant) {
     if (value.IsNull() || constant.IsNull())

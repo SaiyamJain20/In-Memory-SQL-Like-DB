@@ -79,7 +79,7 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}-parallel
 
   fuzz-smoke:
-    name: libFuzzer parser (45 s)
+    name: libFuzzer parser, checkpoint reader, log recovery (2 min)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -93,3 +93,7 @@ jobs:
           cmake --build --preset fuzz
       - name: Fuzz the SQL parser
         run: tools/run_fuzz.sh parser 45
+      - name: Fuzz the checkpoint file reader
+        run: tools/run_fuzz.sh checkpoint 40
+      - name: Fuzz write-ahead-log recovery
+        run: tools/run_fuzz.sh wal 40

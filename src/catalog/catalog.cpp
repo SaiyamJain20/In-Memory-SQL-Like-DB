@@ -34,6 +34,15 @@ std::shared_ptr<Table> Catalog::CreateTable(const std::string& name,
     return table;
 }
 
+void Catalog::AddTable(std::shared_ptr<Table> table) {
+    CDB_CHECK(table != nullptr);
+    const std::string key = Key(table->name());
+    std::unique_lock lock(mutex_);
+    if (!tables_.emplace(key, table).second) {
+        throw Error(ErrorCode::Catalog, "table \"" + table->name() + "\" already exists");
+    }
+}
+
 std::shared_ptr<Table> Catalog::TryGetTable(const std::string& name) const {
     std::shared_lock lock(mutex_);
     auto it = tables_.find(Key(name));

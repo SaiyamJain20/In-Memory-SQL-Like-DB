@@ -377,6 +377,22 @@ TEST(ParserDml, Explain) {
     EXPECT_EQ(StatementError("EXPLAIN EXPLAIN SELECT 1").code, ErrorCode::Syntax);
 }
 
+TEST(ParserCheckpoint, IsAStatementButNotAReservedWord) {
+    EXPECT_EQ(Canon("CHECKPOINT"), "CHECKPOINT");
+    EXPECT_EQ(Canon("checkpoint;"), "CHECKPOINT");
+    EXPECT_EQ(Canon("  CheckPoint  ;  "), "CHECKPOINT");
+    auto stmts = ParseStatements("CREATE TABLE t (a INTEGER); CHECKPOINT; SELECT 1");
+    ASSERT_EQ(stmts.size(), 3u);
+    EXPECT_EQ(stmts[1]->kind, StatementKind::Checkpoint);
+    // it is a word, not a keyword: a table or column may still be called checkpoint
+    EXPECT_EQ(Canon("CREATE TABLE checkpoint (checkpoint INTEGER)"),
+              "CREATE TABLE checkpoint (checkpoint INTEGER)");
+    EXPECT_EQ(Canon("SELECT checkpoint FROM checkpoint"), "SELECT checkpoint FROM checkpoint");
+    // and nothing may follow it
+    EXPECT_EQ(StatementError("CHECKPOINT t").code, ErrorCode::Syntax);
+    EXPECT_EQ(StatementError("CHECKPOINT; garbage here").code, ErrorCode::Syntax);
+}
+
 TEST(ParserScript, MultipleStatements) {
     EXPECT_TRUE(ParseStatements("").empty());
     EXPECT_TRUE(ParseStatements(" ; ;; -- nothing\n").empty());

@@ -1,6 +1,7 @@
 #include "storage/encoding.h"
 
 #include "kernels/decode.h"
+#include "storage/binary_io.h"
 #include "storage/bitpacking.h"
 
 #include <algorithm>
@@ -89,6 +90,26 @@ size_t RawDataBytes(const ColumnSegment& raw) {
     return bytes;
 }
 
+// The number of 2048-row vectors of a segment of `count` rows, and the rows in vector `v`.
+idx_t VectorsOf(idx_t count) {
+    return (count + kVectorSize - 1) / kVectorSize;
+}
+idx_t RowsIn(idx_t count, idx_t v) {
+    return std::min<idx_t>(kVectorSize, count - v * kVectorSize);
+}
+
+// Checks that the packed data of vector `v` (`rows` values of `width` bits) lies inside a payload
+// of `payload_size` bytes starting at `offset`, the way BitUnpack will read it.
+void CheckPacked(const BinaryReader& r, uint32_t offset, uint8_t width, idx_t rows,
+                 size_t payload_size) {
+    if (width > 64) {
+        r.Fail("bit width " + std::to_string(width) + " is out of range");
+    }
+    if (width > 0 && (offset > payload_size || PackedBytes(rows, width) > payload_size - offset)) {
+        r.Fail("a packed vector at offset " + std::to_string(offset) + " does not fit the payload");
+    }
+}
+
 // Packs a vector's values (already offset to start at 0) and returns where they went.
 uint32_t AppendPacked(std::vector<uint8_t>& payload, const uint64_t* values, idx_t n,
                       uint8_t width) {
@@ -118,6 +139,48 @@ class BitpackedInts final : public EncodedColumn {
 
     EncodingKind kind() const noexcept override {
         return constant_ ? EncodingKind::Constant : EncodingKind::Bitpacked;
+    }
+    void Serialize(BinaryWriter& w) const override {
+        w.U32(static_cast<uint32_t>(meta_.size()));
+        for (const Meta& m : meta_) {
+            w.I64(m.base);
+            w.U32(m.offset);
+            w.U8(m.width);
+            w.U8(m.delta);
+        }
+        w.U32(static_cast<uint32_t>(payload_.size()));
+        w.Bytes(payload_.data(), payload_.size());
+    }
+    static std::shared_ptr<BitpackedInts> Read(BinaryReader& r, LogicalType type, idx_t count) {
+        if (!IsIntLike(type)) {
+            r.Fail("bit-packed integers for a " + type.ToString() + " column");
+        }
+        const uint32_t n = r.Count(14);
+        if (n != VectorsOf(count)) {
+            r.Fail("bit-packed metadata for " + std::to_string(n) + " vectors, the column has " +
+                   std::to_string(VectorsOf(count)));
+        }
+        std::vector<Meta> meta(n);
+        for (Meta& m : meta) {
+            m.base = r.I64();
+            m.offset = r.U32();
+            m.width = r.U8();
+            m.delta = r.U8();
+        }
+        const uint32_t payload_size = r.U32();
+        const uint8_t* payload = r.Bytes(payload_size);
+        for (idx_t v = 0; v < n; v++) {
+            Meta& m = meta[v];
+            if (m.delta > 1) {
+                r.Fail("a delta flag of " + std::to_string(m.delta));
+            }
+            CheckPacked(r, m.offset, m.width, RowsIn(count, v), payload_size);
+            if (m.width == 0) {
+                m.offset = 0; // nothing is read: keep a stray offset out of pointer arithmetic
+            }
+        }
+        return std::make_shared<BitpackedInts>(
+            type, std::move(meta), std::vector<uint8_t>(payload, payload + payload_size));
     }
     size_t MemoryUsage() const noexcept override {
         return payload_.size() + meta_.size() * sizeof(Meta);
@@ -229,6 +292,64 @@ class RleInts final : public EncodedColumn {
           first_run_(std::move(first_run)) {}
 
     EncodingKind kind() const noexcept override { return EncodingKind::Rle; }
+    void Serialize(BinaryWriter& w) const override {
+        w.U32(static_cast<uint32_t>(values_.size()));
+        for (const int64_t v : values_) {
+            w.I64(v);
+        }
+        for (const uint32_t e : ends_) {
+            w.U32(e);
+        }
+        w.U32(static_cast<uint32_t>(first_run_.size()));
+        for (const uint32_t f : first_run_) {
+            w.U32(f);
+        }
+    }
+    static std::shared_ptr<RleInts> Read(BinaryReader& r, LogicalType type, idx_t count) {
+        if (!IsIntLike(type)) {
+            r.Fail("run-length integers for a " + type.ToString() + " column");
+        }
+        const uint32_t runs = r.Count(12);
+        if (runs == 0 || runs > count) {
+            r.Fail(std::to_string(runs) + " runs for " + std::to_string(count) + " rows");
+        }
+        std::vector<int64_t> values(runs);
+        for (int64_t& v : values) {
+            v = r.I64();
+        }
+        std::vector<uint32_t> ends(runs);
+        uint64_t previous = 0;
+        for (uint32_t& e : ends) {
+            e = r.U32();
+            if (e <= previous || e > count) {
+                r.Fail("run ends are not increasing within the column");
+            }
+            previous = e;
+        }
+        if (previous != count) {
+            r.Fail("the runs cover " + std::to_string(previous) + " of " + std::to_string(count) +
+                   " rows");
+        }
+        const uint32_t n = r.Count(4);
+        if (n != VectorsOf(count)) {
+            r.Fail("run starts for " + std::to_string(n) + " vectors, the column has " +
+                   std::to_string(VectorsOf(count)));
+        }
+        std::vector<uint32_t> first_run(n);
+        uint32_t run = 0;
+        for (idx_t v = 0; v < n; v++) {
+            first_run[v] = r.U32();
+            while (ends[run] <= v * kVectorSize) { // the run holding the vector's first row
+                run++;
+            }
+            if (first_run[v] != run) {
+                r.Fail("vector " + std::to_string(v) + " claims to start in run " +
+                       std::to_string(first_run[v]) + ", it is run " + std::to_string(run));
+            }
+        }
+        return std::make_shared<RleInts>(type, std::move(values), std::move(ends),
+                                         std::move(first_run));
+    }
     size_t MemoryUsage() const noexcept override {
         return values_.size() * sizeof(int64_t) + ends_.size() * sizeof(uint32_t) +
                first_run_.size() * sizeof(uint32_t);
@@ -323,6 +444,58 @@ class ScaledDoubles final : public EncodedColumn {
         : meta_(std::move(meta)), payload_(std::move(payload)) {}
 
     EncodingKind kind() const noexcept override { return EncodingKind::ScaledDouble; }
+    void Serialize(BinaryWriter& w) const override {
+        w.U32(static_cast<uint32_t>(meta_.size()));
+        for (const Meta& m : meta_) {
+            w.I64(m.base);
+            w.U32(m.offset);
+            w.U8(m.width);
+            w.U8(m.exponent);
+        }
+        w.U32(static_cast<uint32_t>(payload_.size()));
+        w.Bytes(payload_.data(), payload_.size());
+    }
+    static std::shared_ptr<ScaledDoubles> Read(BinaryReader& r, LogicalType type, idx_t count) {
+        if (type.physical() != PhysicalType::Double) {
+            r.Fail("scaled doubles for a " + type.ToString() + " column");
+        }
+        const uint32_t n = r.Count(14);
+        if (n != VectorsOf(count)) {
+            r.Fail("scaled-double metadata for " + std::to_string(n) + " vectors, the column has " +
+                   std::to_string(VectorsOf(count)));
+        }
+        std::vector<Meta> meta(n);
+        for (Meta& m : meta) {
+            m.base = r.I64();
+            m.offset = r.U32();
+            m.width = r.U8();
+            m.exponent = r.U8();
+        }
+        const uint32_t payload_size = r.U32();
+        const uint8_t* payload = r.Bytes(payload_size);
+        for (idx_t v = 0; v < n; v++) {
+            Meta& m = meta[v];
+            const idx_t rows = RowsIn(count, v);
+            if (m.exponent == kConst) {
+                m.offset = 0;
+                m.width = 0;
+            } else if (m.exponent == kRaw) {
+                if (m.offset > payload_size || rows * sizeof(double) > payload_size - m.offset) {
+                    r.Fail("raw doubles at offset " + std::to_string(m.offset) +
+                           " do not fit the payload");
+                }
+            } else if (m.exponent <= kMaxExponent) {
+                CheckPacked(r, m.offset, m.width, rows, payload_size);
+                if (m.width == 0) {
+                    m.offset = 0;
+                }
+            } else {
+                r.Fail("a decimal exponent of " + std::to_string(m.exponent));
+            }
+        }
+        return std::make_shared<ScaledDoubles>(
+            std::move(meta), std::vector<uint8_t>(payload, payload + payload_size));
+    }
     bool all_const() const noexcept {
         return std::all_of(meta_.begin(), meta_.end(),
                            [](const Meta& m) { return m.exponent == kConst; });
@@ -467,13 +640,93 @@ std::shared_ptr<EncodedColumn> EncodeScaledDoubles(const ColumnSegment& raw) {
 
 class DictionaryStrings final : public EncodedColumn {
   public:
-    DictionaryStrings(std::shared_ptr<Vector> dictionary, uint8_t width,
-                      std::vector<uint32_t> offsets, std::vector<uint8_t> payload,
+    DictionaryStrings(std::shared_ptr<Vector> dictionary, uint32_t entries, bool has_null,
+                      uint8_t width, std::vector<uint32_t> offsets, std::vector<uint8_t> payload,
                       size_t dictionary_bytes)
-        : dictionary_(std::move(dictionary)), width_(width), offsets_(std::move(offsets)),
-          payload_(std::move(payload)), dictionary_bytes_(dictionary_bytes) {}
+        : dictionary_(std::move(dictionary)), entries_(entries), has_null_(has_null), width_(width),
+          offsets_(std::move(offsets)), payload_(std::move(payload)),
+          dictionary_bytes_(dictionary_bytes) {}
 
     EncodingKind kind() const noexcept override { return EncodingKind::Dictionary; }
+    void Serialize(BinaryWriter& w) const override {
+        w.U32(entries_);
+        w.U8(has_null_ ? 1 : 0);
+        const auto* strings = dictionary_->FlatData<string_t>();
+        for (uint32_t i = 0; i < entries_; i++) {
+            w.String(strings[i].view());
+        }
+        w.U8(width_);
+        w.U32(static_cast<uint32_t>(offsets_.size()));
+        for (const uint32_t o : offsets_) {
+            w.U32(o);
+        }
+        w.U32(static_cast<uint32_t>(payload_.size()));
+        w.Bytes(payload_.data(), payload_.size());
+    }
+    static std::shared_ptr<DictionaryStrings> Read(BinaryReader& r, LogicalType type, idx_t count) {
+        if (type.physical() != PhysicalType::String) {
+            r.Fail("a string dictionary for a " + type.ToString() + " column");
+        }
+        const uint32_t entries = r.Count(4);
+        if (entries > kVectorSize - 1) {
+            r.Fail("a dictionary of " + std::to_string(entries) + " strings");
+        }
+        const uint8_t has_null = r.U8();
+        if (has_null > 1) {
+            r.Fail("a dictionary NULL flag of " + std::to_string(has_null));
+        }
+        const uint32_t dictionary_size = entries + has_null;
+        auto dictionary = std::make_shared<Vector>(LogicalType::Varchar(), kVectorSize);
+        string_t* d = dictionary->FlatData<string_t>();
+        size_t dictionary_bytes = dictionary_size * sizeof(string_t);
+        for (uint32_t i = 0; i < entries; i++) {
+            const std::string_view s = r.String();
+            d[i] = dictionary->AddString(s);
+            dictionary_bytes += s.size() > string_t::kInlineCapacity ? s.size() : 0;
+        }
+        if (has_null != 0) {
+            dictionary->Validity().SetInvalid(entries);
+        }
+        const uint8_t width = r.U8();
+        if (width > 12) {
+            r.Fail("a dictionary code width of " + std::to_string(width));
+        }
+        const uint32_t n = r.Count(4);
+        if (n != VectorsOf(count)) {
+            r.Fail("dictionary codes for " + std::to_string(n) + " vectors, the column has " +
+                   std::to_string(VectorsOf(count)));
+        }
+        std::vector<uint32_t> offsets(n);
+        for (uint32_t& o : offsets) {
+            o = r.U32();
+        }
+        const uint32_t payload_size = r.U32();
+        const uint8_t* payload = r.Bytes(payload_size);
+        // every code of every vector must name an entry: BitUnpack of an unchecked stream could
+        // index the dictionary out of range
+        uint64_t codes[kVectorSize];
+        for (idx_t v = 0; v < n; v++) {
+            const idx_t rows = RowsIn(count, v);
+            if (width == 0) {
+                offsets[v] = 0;
+                if (dictionary_size == 0) {
+                    r.Fail("rows with codes but an empty dictionary");
+                }
+                continue;
+            }
+            CheckPacked(r, offsets[v], width, rows, payload_size);
+            BitUnpack(payload + offsets[v], rows, width, codes);
+            for (idx_t i = 0; i < rows; i++) {
+                if (codes[i] >= dictionary_size) {
+                    r.Fail("a dictionary code of " + std::to_string(codes[i]) +
+                           " in a dictionary of " + std::to_string(dictionary_size));
+                }
+            }
+        }
+        return std::make_shared<DictionaryStrings>(
+            std::move(dictionary), entries, has_null != 0, width, std::move(offsets),
+            std::vector<uint8_t>(payload, payload + payload_size), dictionary_bytes);
+    }
     size_t MemoryUsage() const noexcept override {
         return payload_.size() + offsets_.size() * sizeof(uint32_t) + dictionary_bytes_;
     }
@@ -497,6 +750,8 @@ class DictionaryStrings final : public EncodedColumn {
 
   private:
     std::shared_ptr<Vector> dictionary_;
+    uint32_t entries_;
+    bool has_null_;
     uint8_t width_;
     std::vector<uint32_t> offsets_;
     std::vector<uint8_t> payload_;
@@ -552,8 +807,9 @@ std::shared_ptr<EncodedColumn> EncodeDictionary(const ColumnSegment& raw) {
         }
         offsets.push_back(width == 0 ? 0 : AppendPacked(payload, packed.data(), n, width));
     }
-    return std::make_shared<DictionaryStrings>(std::move(dictionary), width, std::move(offsets),
-                                               std::move(payload), dictionary_bytes);
+    return std::make_shared<DictionaryStrings>(
+        std::move(dictionary), static_cast<uint32_t>(entries.size()), has_nulls, width,
+        std::move(offsets), std::move(payload), dictionary_bytes);
 }
 
 } // namespace
@@ -631,6 +887,33 @@ std::shared_ptr<EncodedColumn> EncodeSegment(const ColumnSegment& raw, EncodingC
         }
     }
     return best;
+}
+
+void SerializeEncodedColumn(const EncodedColumn& column, BinaryWriter& w) {
+    w.U8(static_cast<uint8_t>(column.kind()));
+    column.Serialize(w);
+}
+
+std::shared_ptr<EncodedColumn> DeserializeEncodedColumn(BinaryReader& r, LogicalType type,
+                                                        idx_t count) {
+    if (count == 0) {
+        r.Fail("an encoded column with no rows");
+    }
+    const uint8_t kind = r.U8();
+    switch (static_cast<EncodingKind>(kind)) {
+    case EncodingKind::Constant:
+    case EncodingKind::Bitpacked:
+        return BitpackedInts::Read(r, type, count);
+    case EncodingKind::Rle:
+        return RleInts::Read(r, type, count);
+    case EncodingKind::ScaledDouble:
+        return ScaledDoubles::Read(r, type, count);
+    case EncodingKind::Dictionary:
+        return DictionaryStrings::Read(r, type, count);
+    case EncodingKind::Uncompressed:
+        break;
+    }
+    r.Fail("an unknown encoding kind " + std::to_string(kind));
 }
 
 std::shared_ptr<ColumnSegment> CompressSegment(std::shared_ptr<ColumnSegment> raw) {

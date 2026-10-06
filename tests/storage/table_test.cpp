@@ -619,6 +619,116 @@ TEST(TableMerge, ReadersSeeEitherNoneOrAllOfTheMergedRows) {
     EXPECT_EQ(table.RowCount(), kBatch * kMerges);
 }
 
+// ---------------------------------------------------------------- LoadRowGroups
+
+namespace {
+std::vector<std::shared_ptr<const RowGroup>> GroupsOf(const Table& table) {
+    const auto snap = table.Snapshot();
+    std::vector<std::shared_ptr<const RowGroup>> groups;
+    for (idx_t g = 0; g < snap->row_group_count(); g++) {
+        groups.push_back(snap->row_group_ptr(g));
+    }
+    return groups;
+}
+} // namespace
+
+TEST(TableLoadRowGroups, RebuildsATableFromItsRowGroupsForEveryLengthAroundTheBoundaries) {
+    for (idx_t total : {idx_t{0}, idx_t{1}, idx_t{2047}, idx_t{2048}, idx_t{4095}, idx_t{4096},
+                        idx_t{4097}, idx_t{9000}, idx_t{3 * kSmallGroup}}) {
+        test::Rng rng(total + 5);
+        Table original("t", AllTypesSchema(), kSmallGroup);
+        TableModel model(AllTypesSchema().size());
+        Fill(original, model, rng, total);
+        Table loaded("t", AllTypesSchema(), kSmallGroup);
+        loaded.LoadRowGroups(GroupsOf(original));
+        EXPECT_EQ(loaded.RowCount(), total);
+        auto scan = loaded.Scan(test::AllColumns(*loaded.Snapshot()));
+        ExpectColumnsEqual(ScanAll(scan), model.cols, "total " + std::to_string(total));
+        // and it keeps accepting rows, in order
+        TableModel more(AllTypesSchema().size());
+        loaded.Append(RandomChunk(loaded.schema(), rng, 100, more));
+        for (size_t c = 0; c < model.cols.size(); c++) {
+            model.cols[c].insert(model.cols[c].end(), more.cols[c].begin(), more.cols[c].end());
+        }
+        auto again = loaded.Scan(test::AllColumns(*loaded.Snapshot()));
+        ExpectColumnsEqual(ScanAll(again), model.cols,
+                           "after appending, total " + std::to_string(total));
+    }
+}
+
+TEST(TableLoadRowGroups, AShortLastGroupBecomesTheOpenTailSoRestartsDoNotFragmentTheTable) {
+    test::Rng rng(11);
+    Table original("t", AllTypesSchema(), kSmallGroup);
+    TableModel model(AllTypesSchema().size());
+    Fill(original, model, rng, kSmallGroup + 100); // one full group and a tail of 100
+    const auto original_groups = GroupsOf(original);
+    ASSERT_EQ(original_groups.size(), 2U);
+    for (int restart = 0; restart < 5; restart++) {
+        Table loaded("t", AllTypesSchema(), kSmallGroup);
+        loaded.LoadRowGroups(GroupsOf(original));
+        TableModel extra(AllTypesSchema().size());
+        loaded.Append(RandomChunk(loaded.schema(), rng, 50, extra));
+        EXPECT_EQ(loaded.Snapshot()->row_group_count(), 2U)
+            << "the tail group was re-opened and continued, not sealed as a short group";
+        EXPECT_EQ(loaded.RowCount(), kSmallGroup + 150);
+    }
+}
+
+TEST(TableLoadRowGroups, AFullLastGroupStaysSealedAndShortOnesInTheMiddleStayShort) {
+    test::Rng rng(12);
+    // groups: full, short (a bulk load left it), full
+    Table source("t", AllTypesSchema(), kSmallGroup);
+    TableModel model(AllTypesSchema().size());
+    std::vector<std::shared_ptr<const RowGroup>> groups;
+    for (const idx_t rows : {kSmallGroup, idx_t{300}, kSmallGroup}) {
+        Table piece("p", AllTypesSchema(), kSmallGroup);
+        TableModel m(AllTypesSchema().size());
+        Fill(piece, m, rng, rows);
+        for (size_t c = 0; c < m.cols.size(); c++) {
+            model.cols[c].insert(model.cols[c].end(), m.cols[c].begin(), m.cols[c].end());
+        }
+        for (auto& g : GroupsOf(piece)) {
+            groups.push_back(g);
+        }
+    }
+    ASSERT_EQ(groups.size(), 3U);
+    Table loaded("t", AllTypesSchema(), kSmallGroup);
+    loaded.LoadRowGroups(groups);
+    const auto snap = loaded.Snapshot();
+    ASSERT_EQ(snap->row_group_count(), 3U);
+    EXPECT_EQ(snap->row_group(1).count(), 300U);
+    auto scan = loaded.Scan(test::AllColumns(*snap));
+    ExpectColumnsEqual(ScanAll(scan), model.cols);
+}
+
+TEST(TableLoadRowGroups, TheReopenedTailStillEnforcesNotNull) {
+    std::vector<ColumnDefinition> schema = {{"x", LogicalType::Integer(), true}};
+    Table nullable("t", {{"x", LogicalType::Integer()}}, kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer()});
+    chunk.SetValue(0, 0, Value::Integer(1));
+    chunk.SetValue(0, 1, Value::Null(LogicalType::Integer()));
+    chunk.SetCardinality(2);
+    nullable.Append(chunk);
+    Table strict("t", schema, kSmallGroup);
+    try {
+        strict.LoadRowGroups(GroupsOf(nullable));
+        FAIL() << "a NULL in a NOT NULL column must not be loaded silently";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Execution);
+    }
+}
+
+TEST(TableLoadRowGroupsDeathTest, OnlyAnEmptyTableCanBeLoaded) {
+    Table table("t", {{"x", LogicalType::Integer()}}, kSmallGroup);
+    DataChunk chunk;
+    chunk.Initialize({LogicalType::Integer()});
+    chunk.SetValue(0, 0, Value::Integer(1));
+    chunk.SetCardinality(1);
+    table.Append(chunk);
+    EXPECT_DEATH(table.LoadRowGroups({}), "CDB_CHECK");
+}
+
 TEST(TableMergeDeathTest, StagingMustMatchTheTable) {
     Table table("t", {{"x", LogicalType::Integer()}}, kSmallGroup);
     EXPECT_DEATH(

@@ -366,7 +366,11 @@ void PhysicalInsert::Finalize(GlobalSinkState& global) {
         c.second = DataChunk();      // free the copy as soon as it is staged
     }
     g.chunks.clear();
-    target_->Merge(std::move(g.staging));
+    if (commit_) {
+        commit_(std::move(g.staging));
+    } else {
+        target_->Merge(std::move(g.staging));
+    }
 }
 idx_t PhysicalInsert::InsertedRows(GlobalSinkState& global) {
     return static_cast<InsertGlobalState&>(global).rows.load();

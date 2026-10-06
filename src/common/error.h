@@ -17,6 +17,7 @@ enum class ErrorCode : uint8_t {
     Type,           // type mismatch, invalid cast
     Execution,      // runtime failure: overflow, division by zero, out of memory
     Io,             // file system failure
+    Corruption,     // a database file failed validation (checksum, structure, format version)
     NotImplemented, // valid SQL that this engine does not support (yet)
 };
 

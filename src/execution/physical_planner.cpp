@@ -252,12 +252,13 @@ std::unique_ptr<PhysicalPlan> PlanSelect(const LogicalOperator& root) {
     return plan;
 }
 
-std::unique_ptr<PhysicalPlan> PlanInsert(const LogicalInsert& insert) {
+std::unique_ptr<PhysicalPlan> PlanInsert(const LogicalInsert& insert,
+                                         PhysicalInsert::Commit commit) {
     auto plan = std::make_unique<PhysicalPlan>();
     Builder builder(*plan);
     Pipeline top;
     builder.Build(*insert.children[0], top);
-    auto& sink = plan->Make<PhysicalInsert>(insert.table);
+    auto& sink = plan->Make<PhysicalInsert>(insert.table, std::move(commit));
     top.sink = &sink;
     plan->root = &sink;
     builder.Finish(std::move(top));

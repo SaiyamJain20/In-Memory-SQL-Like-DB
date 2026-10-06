@@ -1,5 +1,6 @@
 #pragma once
 
+#include "execution/basic_operators.h"
 #include "execution/pipeline.h"
 #include "planner/logical_plan.h"
 
@@ -28,6 +29,7 @@ namespace cdb {
 // PlanSelect's root is a PhysicalResultCollector; PlanInsert's is a PhysicalInsert (its child must
 // already produce the target table's column types).
 std::unique_ptr<PhysicalPlan> PlanSelect(const LogicalOperator& root);
-std::unique_ptr<PhysicalPlan> PlanInsert(const LogicalInsert& insert);
+std::unique_ptr<PhysicalPlan> PlanInsert(const LogicalInsert& insert,
+                                         PhysicalInsert::Commit commit = {});
 
 } // namespace cdb

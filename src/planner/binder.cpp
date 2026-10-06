@@ -99,6 +99,8 @@ LogicalPtr Binder::Bind(const Statement& statement) {
         return BindCopy(static_cast<const CopyStatement&>(statement));
     case StatementKind::Explain:
         return BindExplain(static_cast<const ExplainStatement&>(statement));
+    case StatementKind::Checkpoint:
+        return std::make_unique<LogicalCheckpoint>();
     }
     throw Error(ErrorCode::Internal, "unknown statement kind");
 }

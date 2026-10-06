@@ -255,7 +255,15 @@ struct SubqueryRef : TableRef {
 // Statements
 // ---------------------------------------------------------------------------------------------
 
-enum class StatementKind : uint8_t { Select, CreateTable, DropTable, Insert, Copy, Explain };
+enum class StatementKind : uint8_t {
+    Select,
+    CreateTable,
+    DropTable,
+    Insert,
+    Copy,
+    Explain,
+    Checkpoint
+};
 
 struct Statement {
     StatementKind kind;
@@ -330,6 +338,12 @@ struct CopyStatement : Statement {
     std::string delimiter = ",";
     bool header = false;
     CopyStatement() : Statement(StatementKind::Copy) {}
+    std::string ToString() const override;
+};
+
+// CHECKPOINT: write a checkpoint now (a no-op for an in-memory database).
+struct CheckpointStatement : Statement {
+    CheckpointStatement() : Statement(StatementKind::Checkpoint) {}
     std::string ToString() const override;
 };
 

@@ -21,6 +21,10 @@ class Catalog {
                                        bool if_not_exists = false,
                                        idx_t row_group_size = kRowGroupSize);
 
+    // Registers an existing table object (recovery, and CREATE TABLE once its log record is
+    // written). Throws Error(Catalog) if the name exists.
+    void AddTable(std::shared_ptr<Table> table);
+
     // Throws Error(Catalog) if the table does not exist.
     std::shared_ptr<Table> GetTable(const std::string& name) const;
     std::shared_ptr<Table> TryGetTable(const std::string& name) const;

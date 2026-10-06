@@ -32,9 +32,9 @@ TEST(Error, IsCatchableAsStdException) {
 }
 
 TEST(Error, EveryCodeHasADistinctName) {
-    const ErrorCode all[] = {ErrorCode::Internal, ErrorCode::Syntax,        ErrorCode::Binder,
-                             ErrorCode::Catalog,  ErrorCode::Type,          ErrorCode::Execution,
-                             ErrorCode::Io,       ErrorCode::NotImplemented};
+    const ErrorCode all[] = {ErrorCode::Internal, ErrorCode::Syntax,     ErrorCode::Binder,
+                             ErrorCode::Catalog,  ErrorCode::Type,       ErrorCode::Execution,
+                             ErrorCode::Io,       ErrorCode::Corruption, ErrorCode::NotImplemented};
     for (size_t i = 0; i < std::size(all); i++) {
         for (size_t j = i + 1; j < std::size(all); j++) {
             EXPECT_STRNE(ErrorCodeName(all[i]), ErrorCodeName(all[j]));

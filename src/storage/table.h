@@ -170,6 +170,14 @@ class Table {
     // are not checked against NOT NULL (see ValidateChunk).
     void AppendRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups);
 
+    // Fills an empty table from row groups read back from a checkpoint, in order. Groups become
+    // sealed row groups as they are, except that a last group with fewer than row_group_size()
+    // rows is re-opened as the table's tail so that later appends continue it (restarting a
+    // database many times must not leave a short row group behind each time). NOT NULL columns
+    // are checked in the re-opened tail only: the sealed groups are trusted, they were written by
+    // a table that enforced it.
+    void LoadRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups);
+
     // Atomically appends every row of `staging` to this table by moving its row groups in (no
     // data is copied) and adopting its still-open tail. Used for bulk loads: build the data in a
     // private staging table, then publish it all at once, so a failed load leaves no trace and
