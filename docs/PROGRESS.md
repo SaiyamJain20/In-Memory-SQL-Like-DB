@@ -423,3 +423,7 @@ thread, DuckDB 1.5.6 pinned to one thread):
 
 **Phase 5 exit criteria met**: round-trip property tests for every encoding; before/after numbers for
 each kernel in `BENCHMARKS.md`; memory footprint measured on TPC-H lineitem (2.9x).
+
+**CI (GitHub Actions, run 37421340867, the last commit that changed code)** - all 8 jobs green: format,
+gcc-13 and clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job; every test
+job generated the TPC-H data and required the 12 differential tests (CDB_REQUIRE_TPCH=1).
