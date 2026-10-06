@@ -525,6 +525,42 @@ TEST(DoubleEncoding, NegativeZeroIsNotMergedWithZero) {
     }
 }
 
+// Offsets of 53 and 54 bits (integer-valued doubles below 9e15 spanning a huge range) cannot take
+// the "OR into the mantissa of 2^52" conversion, which is only exact below 2^52.
+TEST(DoubleEncoding, OffsetsWiderThan52BitsDecodeExactly) {
+    Rng rng(9);
+    struct Case {
+        double lo, hi; // the offsets need 53, 54, 52 and 53 bits respectively
+    };
+    for (const Case c :
+         {Case{0.0, 8.9e15}, Case{-8.0e15, 8.0e15}, Case{0.0, 4.5e15}, Case{-4.0e15, 4.0e15}}) {
+        for (const idx_t count : {idx_t{1}, idx_t{2}, idx_t{70}, kVectorSize, idx_t{5000}}) {
+            std::vector<Value> values;
+            for (idx_t i = 0; i < count; i++) {
+                double d;
+                if (i % kVectorSize == 0) {
+                    d = c.lo; // every vector spans the whole range
+                } else if (i % kVectorSize == 1) {
+                    d = c.hi;
+                } else {
+                    d = std::floor(c.lo + (c.hi - c.lo) *
+                                              static_cast<double>(RandBelow(rng, 1000000)) /
+                                              1000000.0);
+                }
+                values.push_back(Chance(rng, 0.05) && i % kVectorSize > 1
+                                     ? Value::Null(LogicalType::Double())
+                                     : Value::Double(d));
+            }
+            const std::string what = "range [" + std::to_string(c.lo) + ", " +
+                                     std::to_string(c.hi) + "] n " + std::to_string(count);
+            const auto e =
+                RoundTrip(LogicalType::Double(), values, EncodingChoice::Bitpacked, what);
+            ASSERT_NE(e, nullptr) << what;
+            EXPECT_EQ(e->kind(), EncodingKind::ScaledDouble) << what;
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------ strings
 
 namespace {
@@ -575,6 +611,34 @@ TEST(DictionaryEncoding, TooManyDistinctStringsIsNotEncoded) {
     const auto raw = MakeRawSegment(LogicalType::Varchar(), values);
     EXPECT_EQ(EncodeSegment(*raw, EncodingChoice::Dictionary), nullptr);
     EXPECT_EQ(EncodeSegment(*raw, EncodingChoice::Auto), nullptr);
+}
+
+// A dictionary is one vector of kVectorSize entries and must always have room for a NULL entry, so
+// 2047 distinct strings is the most it takes - with NULLs or without.
+TEST(DictionaryEncoding, TheLimitIs2047DistinctStringsAndIsExact) {
+    const auto column = [](idx_t distinct, bool with_nulls) {
+        std::vector<Value> values;
+        for (idx_t i = 0; i < 2 * kVectorSize + 5; i++) {
+            if (with_nulls && i % 7 == 3) {
+                values.push_back(Value::Null(LogicalType::Varchar()));
+            } else {
+                values.push_back(Value::Varchar("s" + std::to_string(i % distinct)));
+            }
+        }
+        return values;
+    };
+    for (const bool with_nulls : {false, true}) {
+        const std::string what = with_nulls ? " with NULLs" : " without NULLs";
+        const auto fits = column(kVectorSize - 1, with_nulls);
+        ASSERT_NE(RoundTrip(LogicalType::Varchar(), fits, EncodingChoice::Dictionary,
+                            "2047 distinct" + what),
+                  nullptr);
+        for (const idx_t distinct : {kVectorSize, kVectorSize + 1}) {
+            const auto raw = MakeRawSegment(LogicalType::Varchar(), column(distinct, with_nulls));
+            EXPECT_EQ(EncodeSegment(*raw, EncodingChoice::Dictionary), nullptr)
+                << distinct << " distinct" << what;
+        }
+    }
 }
 
 TEST(DictionaryEncoding, ScansHandBackDictionaryVectorsWithoutCopyingStrings) {
