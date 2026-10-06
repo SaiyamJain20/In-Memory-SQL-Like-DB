@@ -11,7 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
+#include <numeric>
 #include <set>
 
 namespace cdb {
@@ -652,6 +654,128 @@ TEST(GroupTable, MergingPartialTablesEqualsOneTable) {
             merged.Combine(*t);
         }
         ExpectMatchesReference(in, merged, "merged");
+    }
+}
+
+// What a parallel aggregate does: the groups of several tables are split by hash partition and each
+// partition is merged on its own. Merged partition by partition, in any order and in pieces, the
+// result must be the one that merging the whole tables gives.
+TEST(GroupTable, MergingByHashPartitionEqualsMergingWholeTables) {
+    Rng rng(61);
+    const test::ValueGen exact = [](Rng& rng_, LogicalType t) {
+        if (t.id() == TypeId::Double) {
+            return Chance(rng_, 0.15) ? Value::Null(t)
+                                      : Value::Double(static_cast<double>(RandBelow(rng_, 9)) - 4);
+        }
+        return SmallDomainValue(rng_, t);
+    };
+    for (int round = 0; round < 40; round++) {
+        const LogicalType arg = kAllTypes[RandBelow(rng, kAllTypes.size())];
+        std::vector<AggregateSpec> specs;
+        for (const AggregateSpec& s : AllSpecsFor(arg)) {
+            if (!s.distinct) { // DISTINCT states merge whole tables only (checked below)
+                specs.push_back(s);
+            }
+        }
+        specs.push_back({AggregateKind::CountStar, LogicalType::Integer(), false});
+        std::vector<LogicalType> groups = {kAllTypes[RandBelow(rng, kAllTypes.size())]};
+        if (Chance(rng, 0.5)) {
+            groups.push_back(kAllTypes[RandBelow(rng, kAllTypes.size())]);
+        }
+        AggInput in = MakeInput(rng, groups, specs, 8, 0.15, exact);
+
+        const size_t ntables = 1 + RandBelow(rng, 4);
+        std::vector<std::unique_ptr<GroupTable>> tables;
+        for (size_t t = 0; t < ntables; t++) {
+            tables.push_back(std::make_unique<GroupTable>(in.group_types, in.specs));
+        }
+        for (const DataChunk& c : in.chunks) {
+            SinkChunk(*tables[RandBelow(rng, ntables)], in, c);
+        }
+        ASSERT_TRUE(tables[0]->CanCombineGroups());
+
+        GroupTable whole(in.group_types, in.specs);
+        for (const auto& t : tables) {
+            whole.Combine(*t);
+        }
+        const auto want = ReadAll(whole);
+
+        const uint64_t partitions = 1 + RandBelow(rng, 16);
+        std::map<std::vector<Value>, std::vector<Value>, TupleLess> got;
+        for (uint64_t p = 0; p < partitions; p++) {
+            GroupTable merged(in.group_types, in.specs);
+            for (const auto& t : tables) {
+                std::vector<uint32_t> ids;
+                for (idx_t id = 0; id < t->GroupCount(); id++) {
+                    if (t->GroupHash(id) % partitions == p) {
+                        ids.push_back(static_cast<uint32_t>(id));
+                    }
+                }
+                std::shuffle(ids.begin(), ids.end(), rng);
+                // in pieces of random size: CombineGroups can be called repeatedly
+                for (size_t at = 0; at < ids.size();) {
+                    const size_t n = std::min<size_t>(ids.size() - at, 1 + RandBelow(rng, 50));
+                    merged.CombineGroups(*t, ids.data() + at, n);
+                    at += n;
+                }
+            }
+            for (auto& [key, values] : ReadAll(merged)) {
+                ASSERT_TRUE(got.emplace(key, std::move(values)).second)
+                    << "a group landed in two partitions";
+            }
+        }
+        ASSERT_EQ(got.size(), want.size()) << "round " << round;
+        for (const auto& [key, values] : want) {
+            const auto it = got.find(key);
+            ASSERT_NE(it, got.end()) << "round " << round << ": group missing";
+            for (size_t a = 0; a < values.size(); a++) {
+                ASSERT_TRUE(SameValue(it->second[a], values[a]))
+                    << "round " << round << " aggregate " << a << ": got "
+                    << it->second[a].ToString() << " want " << values[a].ToString();
+            }
+        }
+    }
+}
+
+TEST(GroupTable, OnlyGroupedTablesWithoutDistinctCanMergeByGroup) {
+    EXPECT_TRUE(
+        GroupTable({LogicalType::Integer()}, {{AggregateKind::Sum, LogicalType::BigInt(), false},
+                                              {AggregateKind::Min, LogicalType::Varchar(), false}})
+            .CanCombineGroups());
+    EXPECT_FALSE(
+        GroupTable({LogicalType::Integer()}, {{AggregateKind::Count, LogicalType::Integer(), true}})
+            .CanCombineGroups())
+        << "DISTINCT keeps (group, value) pairs";
+    EXPECT_FALSE(GroupTable({}, {{AggregateKind::CountStar, LogicalType::Integer(), false}})
+                     .CanCombineGroups())
+        << "an ungrouped table has a single group";
+    // grouping with no aggregates at all (SELECT DISTINCT) merges by group too
+    GroupTable distinct_rows({LogicalType::Integer(), LogicalType::Varchar()}, {});
+    EXPECT_TRUE(distinct_rows.CanCombineGroups());
+}
+
+TEST(GroupTable, CombineGroupsOfNothingAndIntoAnEmptyTable) {
+    const std::vector<AggregateSpec> specs = {
+        {AggregateKind::CountStar, LogicalType::Integer(), false},
+        {AggregateKind::Sum, LogicalType::BigInt(), false}};
+    Rng rng(62);
+    AggInput in = MakeInput(rng, {LogicalType::Integer()}, specs, 3);
+    GroupTable src(in.group_types, in.specs);
+    for (const DataChunk& c : in.chunks) {
+        SinkChunk(src, in, c);
+    }
+    GroupTable dst(in.group_types, in.specs);
+    dst.CombineGroups(src, nullptr, 0);
+    EXPECT_EQ(dst.GroupCount(), 0U);
+    std::vector<uint32_t> all(src.GroupCount());
+    std::iota(all.begin(), all.end(), 0U);
+    dst.CombineGroups(src, all.data(), all.size());
+    ExpectMatchesReference(in, dst, "all groups into an empty table");
+    dst.CombineGroups(src, all.data(), all.size()); // a second time doubles every group
+    EXPECT_EQ(dst.GroupCount(), src.GroupCount());
+    const auto once = ReadAll(src);
+    for (const auto& [key, values] : ReadAll(dst)) {
+        EXPECT_EQ(values[0].GetBigInt(), 2 * once.at(key)[0].GetBigInt());
     }
 }
 

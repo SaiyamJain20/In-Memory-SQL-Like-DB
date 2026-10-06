@@ -2,15 +2,33 @@
 
 #include "execution/expression_executor.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <mutex>
 
 namespace cdb {
 
 namespace {
 
+// Below this many groups (summed over the threads' tables) one table is merged serially: the
+// partitioning has a fixed cost that only pays off for large results.
+constexpr idx_t kDefaultMinGroupsToPartition = 32768;
+
+std::atomic<idx_t>& MinGroupsSetting() {
+    static std::atomic<idx_t> groups{[] {
+        const char* env = std::getenv("CDB_PARTITION_MIN_GROUPS");
+        const long long v = env != nullptr ? std::atoll(env) : 0;
+        return v > 0 ? static_cast<idx_t>(v) : idx_t{0};
+    }()};
+    return groups;
+}
+
 struct AggGlobalState final : GlobalSinkState {
     std::mutex mutex;
-    std::unique_ptr<GroupTable> table;
+    std::vector<std::unique_ptr<GroupTable>> locals; // each thread's table, until Finalize
+    // The result: one table, or one per hash partition (their group sets are disjoint).
+    std::vector<std::unique_ptr<GroupTable>> tables;
 };
 
 struct AggLocalState final : LocalSinkState {
@@ -24,9 +42,14 @@ struct AggLocalState final : LocalSinkState {
     DataChunk args;
 };
 
+// The output cut into chunk-sized ranges of groups, claimed from an atomic cursor.
 struct AggSourceState final : GlobalSourceState {
-    const GroupTable* table = nullptr;
-    idx_t next = 0;
+    struct Range {
+        const GroupTable* table;
+        idx_t first, count;
+    };
+    std::vector<Range> ranges;
+    std::atomic<size_t> next{0};
 };
 struct AggLocalSourceState final : LocalSourceState {};
 
@@ -41,6 +64,15 @@ PhysicalHashAggregate::PhysicalHashAggregate(std::vector<LogicalType> types,
     for (const auto& a : aggregates_) {
         CDB_CHECK(a->kind == BoundKind::Aggregate);
     }
+}
+
+idx_t PhysicalHashAggregate::MinGroupsToPartition() noexcept {
+    const idx_t set = MinGroupsSetting().load(std::memory_order_relaxed);
+    return set != 0 ? set : kDefaultMinGroupsToPartition;
+}
+
+void PhysicalHashAggregate::SetMinGroupsToPartition(idx_t groups) noexcept {
+    MinGroupsSetting().store(groups, std::memory_order_relaxed);
 }
 
 std::vector<LogicalType> PhysicalHashAggregate::GroupTypes() const {
@@ -121,25 +153,91 @@ SinkResult PhysicalHashAggregate::Sink(GlobalSinkState&, LocalSinkState& state,
 void PhysicalHashAggregate::Combine(GlobalSinkState& global, LocalSinkState& local) {
     auto& g = static_cast<AggGlobalState&>(global);
     auto& l = static_cast<AggLocalState&>(local);
+    auto table = std::make_unique<GroupTable>(std::move(l.table));
     const std::lock_guard<std::mutex> lock(g.mutex);
-    if (!g.table) {
-        g.table = std::make_unique<GroupTable>(std::move(l.table)); // adopt the first table
-    } else {
-        g.table->Combine(l.table);
-    }
+    g.locals.push_back(std::move(table));
 }
 
 void PhysicalHashAggregate::Finalize(GlobalSinkState& global) {
+    ExecutionContext serial;
+    FinalizeParallel(global, serial);
+}
+
+void PhysicalHashAggregate::FinalizeParallel(GlobalSinkState& global, ExecutionContext& context) {
     auto& g = static_cast<AggGlobalState&>(global);
-    if (!g.table) { // no thread ever produced a local state
-        g.table = std::make_unique<GroupTable>(GroupTypes(), Specs());
+    auto& locals = g.locals;
+    g.tables.clear();
+    if (locals.empty()) { // no thread ever produced a local state
+        g.tables.push_back(std::make_unique<GroupTable>(GroupTypes(), Specs()));
+        return;
     }
+    idx_t total = 0;
+    for (const auto& t : locals) {
+        total += t->GroupCount();
+    }
+    const bool partitioned = locals.size() > 1 && !groups_.empty() && context.threads() > 1 &&
+                             total >= MinGroupsToPartition() && locals[0]->CanCombineGroups();
+    if (!partitioned) {
+        // One table: adopt the first and merge the others into it (an ungrouped aggregate has one
+        // group per table, so this is cheap).
+        for (size_t i = 1; i < locals.size(); i++) {
+            locals[0]->Combine(*locals[i]);
+        }
+        g.tables.push_back(std::move(locals[0]));
+        locals.clear();
+        return;
+    }
+
+    // Partition by the top bits of each group's hash (KeyIndex slots use the low bits, so the two
+    // are independent). Several partitions per thread keep the tasks balanced when keys are skewed.
+    size_t partitions = 16;
+    while (partitions < context.threads() * 8 && partitions < 256) {
+        partitions *= 2;
+    }
+    unsigned bits = 0;
+    while ((size_t{1} << bits) < partitions) {
+        bits++;
+    }
+    const unsigned shift = 64 - bits;
+
+    // by_partition[t][p]: ids of table t's groups that fall in partition p.
+    std::vector<std::vector<std::vector<uint32_t>>> by_partition(
+        locals.size(), std::vector<std::vector<uint32_t>>(partitions));
+    context.ParallelFor(locals.size(), [&](size_t t) {
+        const GroupTable& table = *locals[t];
+        for (idx_t id = 0; id < table.GroupCount(); id++) {
+            by_partition[t][table.GroupHash(id) >> shift].push_back(static_cast<uint32_t>(id));
+        }
+    });
+
+    std::vector<std::unique_ptr<GroupTable>> merged(partitions);
+    context.ParallelFor(partitions, [&](size_t p) {
+        auto table = std::make_unique<GroupTable>(GroupTypes(), Specs());
+        for (size_t t = 0; t < locals.size(); t++) {
+            const std::vector<uint32_t>& ids = by_partition[t][p];
+            if (!ids.empty()) {
+                table->CombineGroups(*locals[t], ids.data(), ids.size());
+            }
+        }
+        merged[p] = std::move(table);
+    });
+    for (auto& table : merged) {
+        if (table->GroupCount() > 0) {
+            g.tables.push_back(std::move(table));
+        }
+    }
+    locals.clear();
 }
 
 std::unique_ptr<GlobalSourceState>
 PhysicalHashAggregate::GetGlobalSourceState(GlobalSinkState* sink_state) {
     auto s = std::make_unique<AggSourceState>();
-    s->table = static_cast<AggGlobalState*>(sink_state)->table.get();
+    for (const auto& table : static_cast<AggGlobalState*>(sink_state)->tables) {
+        for (idx_t first = 0; first < table->GroupCount(); first += kVectorSize) {
+            s->ranges.push_back(
+                {table.get(), first, std::min<idx_t>(kVectorSize, table->GroupCount() - first)});
+        }
+    }
     return s;
 }
 
@@ -147,14 +245,20 @@ std::unique_ptr<LocalSourceState> PhysicalHashAggregate::GetLocalSourceState(Glo
     return std::make_unique<AggLocalSourceState>();
 }
 
-bool PhysicalHashAggregate::GetData(GlobalSourceState& global, LocalSourceState&, DataChunk& out) {
+idx_t PhysicalHashAggregate::MaxSourceThreads(GlobalSourceState& global) const {
+    return static_cast<AggSourceState&>(global).ranges.size();
+}
+
+bool PhysicalHashAggregate::GetData(GlobalSourceState& global, LocalSourceState& local,
+                                    DataChunk& out) {
     auto& s = static_cast<AggSourceState&>(global);
-    if (s.next >= s.table->GroupCount()) {
+    const size_t i = s.next.fetch_add(1, std::memory_order_relaxed);
+    if (i >= s.ranges.size()) {
         return false;
     }
-    const idx_t n = std::min<idx_t>(kVectorSize, s.table->GroupCount() - s.next);
-    s.table->Scan(s.next, n, out);
-    s.next += n;
+    const AggSourceState::Range& r = s.ranges[i];
+    r.table->Scan(r.first, r.count, out);
+    local.batch_index = i;
     return true;
 }
 

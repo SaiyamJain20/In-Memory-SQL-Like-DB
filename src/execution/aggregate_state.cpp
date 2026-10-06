@@ -10,6 +10,10 @@
 
 namespace cdb {
 
+void AggregateState::CombineSubset(const AggregateState&, const uint32_t*, const uint32_t*, idx_t) {
+    CDB_UNREACHABLE("this aggregate state cannot merge a subset of groups");
+}
+
 void AggregateState::UpdateUngrouped(const Vector* arg, idx_t count) {
     thread_local std::vector<uint32_t> zeros;
     if (zeros.size() < count) {
@@ -59,6 +63,13 @@ class CountStarState final : public AggregateState {
             counts_[dst[g]] += s.counts_[g];
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const CountStarState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            counts_[to[i]] += s.counts_[from[i]];
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         int64_t* o = out.FlatData<int64_t>();
         for (idx_t i = 0; i < count; i++) {
@@ -92,6 +103,13 @@ class CountState final : public AggregateState {
         const auto& s = static_cast<const CountState&>(src);
         for (idx_t g = 0; g < n; g++) {
             counts_[dst[g]] += s.counts_[g];
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const CountState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            counts_[to[i]] += s.counts_[from[i]];
         }
     }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
@@ -166,6 +184,16 @@ template <class In> class SumIntState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const SumIntState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                sums_[to[i]] += s.sums_[from[i]];
+                has_[to[i]] = 1;
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         int64_t* o = out.FlatData<int64_t>();
         for (idx_t i = 0; i < count; i++) {
@@ -224,6 +252,16 @@ class SumDoubleState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const SumDoubleState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                sums_[to[i]] += s.sums_[from[i]];
+                has_[to[i]] = 1;
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         double* o = out.FlatData<double>();
         for (idx_t i = 0; i < count; i++) {
@@ -262,6 +300,14 @@ template <class In> class AvgState final : public AggregateState {
         for (idx_t g = 0; g < n; g++) {
             sums_[dst[g]] += s.sums_[g];
             counts_[dst[g]] += s.counts_[g];
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const AvgState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            sums_[to[i]] += s.sums_[from[i]];
+            counts_[to[i]] += s.counts_[from[i]];
         }
     }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
@@ -326,6 +372,15 @@ template <class T, bool kMax> class MinMaxState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const MinMaxState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                Offer(to[i], static_cast<T>(s.values_[from[i]]));
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         T* o = out.FlatData<T>();
         for (idx_t i = 0; i < count; i++) {
@@ -373,6 +428,15 @@ template <bool kMax> class MinMaxStringState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const MinMaxStringState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                Offer(to[i], s.values_[from[i]]);
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         string_t* o = out.FlatData<string_t>();
         for (idx_t i = 0; i < count; i++) {
@@ -408,6 +472,9 @@ class DistinctState final : public AggregateState {
     }
 
     void Resize(idx_t groups) override { inner_->Resize(groups); }
+    // The (group, value) pairs are keyed by group id, so merging a subset of groups would have to
+    // scan every pair for each subset.
+    bool SupportsCombineSubset() const override { return false; }
 
     void Update(const uint32_t* groups, const Vector* arg, idx_t count) override {
         for (idx_t done = 0; done < count; done += kVectorSize) {

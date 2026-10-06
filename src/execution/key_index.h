@@ -48,6 +48,8 @@ class KeyIndex {
     // Number of distinct keys so far.
     idx_t Count() const noexcept { return hashes_.size(); }
     const ChunkStore& keys() const noexcept { return keys_; }
+    // The hash of key `id` (what HashColumns computed for it), e.g. to split keys into partitions.
+    uint64_t Hash(idx_t id) const noexcept { return hashes_[id]; }
 
     // For each row i < count of `keys` (columns match the key types) stores its id in ids[i],
     // inserting unseen keys. Returns how many new keys were inserted; their input rows (in id
