@@ -56,6 +56,27 @@ TEST(HyperLogLog, EstimatesWithinAFewPercentAtEveryMagnitude) {
     EXPECT_NEAR(Sketch(0, 50).Estimate(), 50.0, 0.5);
 }
 
+// Around 2.5 m distinct values the raw harmonic-mean estimator is biased high (+2.6% at 10,000 with
+// 4096 registers); linear counting is not. The estimate must stay near the truth across the switch.
+TEST(HyperLogLog, TheEstimateIsAccurateAcrossTheSwitchBetweenLinearCountingAndTheHarmonicMean) {
+    Rng rng(5);
+    for (const uint64_t n : {6000ULL, 8000ULL, 10000ULL, 11000ULL, 12000ULL, 14000ULL, 20000ULL}) {
+        double sum_error = 0;
+        constexpr int kTrials = 60;
+        for (int trial = 0; trial < kTrials; trial++) {
+            HyperLogLog s;
+            for (uint64_t i = 0; i < n; i++) {
+                s.Add(rng());
+            }
+            sum_error += (s.Estimate() - static_cast<double>(n)) / static_cast<double>(n);
+        }
+        // the mean error of 60 sketches: linear counting is unbiased, the harmonic mean keeps a
+        // bias of about +1% just above the switch (the raw estimator alone: +2.6% at 10,000,
+        // +5.9% at 8,000, which this bound rejects)
+        EXPECT_LT(std::fabs(sum_error / kTrials), 0.015) << "n = " << n;
+    }
+}
+
 TEST(HyperLogLog, RepeatedValuesCountOnce) {
     HyperLogLog s;
     for (int rep = 0; rep < 1000; rep++) {
