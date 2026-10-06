@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/error.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
