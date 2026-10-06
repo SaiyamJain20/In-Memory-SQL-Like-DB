@@ -104,17 +104,20 @@ idx_t KeyIndex::FindOrInsert(const DataChunk& keys, idx_t count, uint32_t* ids,
         return created;
     }
 
-    std::vector<const Vector*> cols(columns);
+    scratch_columns_.resize(columns);
     for (idx_t c = 0; c < columns; c++) {
-        cols[c] = &keys.column(c);
+        scratch_columns_[c] = &keys.column(c);
     }
-    std::vector<uint64_t> hashes(count);
-    HashColumns(cols.data(), columns, count, hashes.data());
-    const KeyComparator cmp(cols, /*nulls_equal=*/true);
+    scratch_hashes_.resize(count);
+    uint64_t* hashes = scratch_hashes_.data();
+    HashColumns(scratch_columns_.data(), columns, count, hashes);
+    const KeyComparator cmp(scratch_columns_, /*nulls_equal=*/true);
 
     EnsureCapacity(count);
     const idx_t stored = hashes_.size();
-    std::vector<sel_t> pending; // input rows that created the new ids stored, stored + 1, ...
+    std::vector<sel_t>& pending =
+        scratch_pending_; // input rows that created the ids stored, stored + 1, ...
+    pending.clear();
     for (idx_t i = 0; i < count; i++) {
         const uint64_t h = hashes[i];
         uint64_t pos = h & mask_;

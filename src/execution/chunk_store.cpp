@@ -46,7 +46,7 @@ void ChunkStore::Gather(idx_t column, const uint32_t* rows, idx_t n, Vector& out
     CDB_ASSERT(column < types_.size() && out.format() == VectorFormat::Flat && out.capacity() >= n);
     DispatchPhysical(types_[column].physical(), [&](auto tag) {
         using T = decltype(tag);
-        T* dst = out.FlatData<T>();
+        T* dst = out.FlatDataForOverwrite<T>();
         ValidityMask& dv = out.Validity();
         for (idx_t i = 0; i < n; i++) {
             const idx_t row = rows[i];
