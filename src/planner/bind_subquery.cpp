@@ -516,8 +516,18 @@ void Binder::ApplyExists(LogicalPtr& plan, const SelectStatement& sub, bool nega
                  "supported yet",
                  pos);
         }
-        for (const auto& item : sub.items) { // the select list of an EXISTS is not evaluated
-            (void)item;
+        // The select list of an EXISTS is not evaluated - except that an aggregate in it (without
+        // GROUP BY) makes the subquery return one row whatever the WHERE clause lets through, so
+        // the EXISTS is always TRUE and this is not a semi join.
+        const ExprContext select_ctx{&block.scope, /*allow_aggregates=*/true, &ctx, &inner};
+        for (const auto& item : sub.items) {
+            if (item.expr->kind != ExprKind::Star &&
+                BindExpr(*item.expr, select_ctx)->ContainsAggregate()) {
+                Fail(ErrorCode::NotImplemented,
+                     "a correlated EXISTS subquery with an aggregate in its select list is not "
+                     "supported yet",
+                     pos);
+            }
         }
         Correlation corr = SplitCorrelation(block.correlated);
         for (auto& [inner_expr, outer_expr] : corr.keys) {

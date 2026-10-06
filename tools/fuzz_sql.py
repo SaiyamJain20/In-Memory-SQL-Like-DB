@@ -337,12 +337,15 @@ class Gen:
         if not outer_int or not inner_int:
             return None
         kind = rng.choice(["in", "not_in", "exists", "not_exists", "scalar", "scalar_corr", "exists_resid",
-                           "in_corr", "nested"])
+                           "in_corr", "nested", "exists_agg"])
         inner_where = f" WHERE {self.bool_expr(inner, 1)}" if rng.random() < 0.5 else ""
         if kind == "in":
             return f"{rng.choice(outer_int)} IN (SELECT {rng.choice(inner_int)} FROM {n} AS {s}{inner_where})"
         if kind == "not_in":
             return f"{rng.choice(outer_int)} NOT IN (SELECT {rng.choice(inner_int)} FROM {n} AS {s}{inner_where})"
+        if kind == "exists_agg":  # an aggregate select list: one row whatever the WHERE lets through
+            neg = "NOT " if rng.random() < 0.5 else ""
+            return f"{neg}EXISTS (SELECT {rng.choice(['max', 'min', 'sum', 'count'])}({rng.choice(inner_int)}) FROM {n} AS {s}{inner_where})"
         corr = f"{rng.choice(inner_int)} = {rng.choice(outer_int)}"
         if kind == "exists":
             extra = f" AND {self.bool_expr(inner, 1)}" if rng.random() < 0.4 else ""

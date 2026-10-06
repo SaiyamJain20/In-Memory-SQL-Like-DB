@@ -544,6 +544,23 @@ SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT 1 FROM nothing);
 ----
 11
 
+# an aggregate in the select list makes the subquery return a row whatever its WHERE lets through:
+# EXISTS is TRUE, even over an empty table
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT count(*) FROM nothing);
+----
+11
+
+query I
+SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT max(n) FROM nothing);
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT sum(budget) FROM proj WHERE budget > 1000);
+----
+11
+
 # EXISTS over an empty table, correlated
 query T
 SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM nothing n WHERE n.n = e.id) ORDER BY id LIMIT 3;

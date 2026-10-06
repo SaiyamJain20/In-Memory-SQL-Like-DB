@@ -537,6 +537,9 @@ TEST(BinderNotImplemented, UnsupportedSubqueryShapesPointAtTheOffendingExpressio
         // IN / EXISTS only as AND-ed WHERE conjuncts
         {"SELECT a FROM t WHERE a IN (SELECT a FROM u) OR b = 1", "IN", "AND-ed conditions"},
         {"SELECT a IN (SELECT a FROM u) FROM t", "IN", "AND-ed conditions"},
+        // an aggregate select list makes a correlated EXISTS always TRUE: not a semi join
+        {"SELECT a FROM t WHERE EXISTS (SELECT count(*) FROM u WHERE u.a = t.a)", "EXISTS",
+         "aggregate in its select list"},
         // NOT IN with a correlated subquery needs a per-group null-aware anti join
         {"SELECT a FROM t WHERE a NOT IN (SELECT u.a FROM u WHERE u.x = t.s)", "NOT IN",
          "use NOT EXISTS"},
