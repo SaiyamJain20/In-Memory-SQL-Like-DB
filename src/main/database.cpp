@@ -30,6 +30,51 @@ Database::Database(size_t threads) {
     SetThreads(threads);
 }
 
+Database::Database(const std::string& path, DatabaseOptions options)
+    : row_group_size_(options.row_group_size) {
+    SetThreads(options.threads.value_or(DefaultThreads()));
+    storage_ = std::make_unique<StorageManager>(catalog_, path, std::move(options.storage),
+                                                [this] { return scheduler(); });
+}
+
+Database::~Database() = default;
+
+std::shared_ptr<Table> Database::CreateTable(const std::string& name,
+                                             std::vector<ColumnDefinition> schema,
+                                             bool if_not_exists) {
+    if (storage_ != nullptr) {
+        return storage_->CreateTable(name, std::move(schema), if_not_exists, row_group_size_);
+    }
+    return catalog_.CreateTable(name, std::move(schema), if_not_exists, row_group_size_);
+}
+
+void Database::DropTable(const std::string& name, bool if_exists) {
+    if (storage_ != nullptr) {
+        storage_->DropTable(name, if_exists);
+        return;
+    }
+    catalog_.DropTable(name, if_exists);
+}
+
+void Database::CommitAppend(const std::shared_ptr<Table>& target, std::unique_ptr<Table> staging) {
+    if (storage_ != nullptr) {
+        storage_->Append(target, std::move(staging));
+        return;
+    }
+    if (catalog_.TryGetTable(target->name()) != target) {
+        throw Error(ErrorCode::Catalog, "table \"" + target->name() +
+                                            "\" was dropped or replaced while the statement was "
+                                            "running");
+    }
+    target->Merge(std::move(staging));
+}
+
+void Database::Checkpoint() {
+    if (storage_ != nullptr) {
+        storage_->Checkpoint();
+    }
+}
+
 size_t Database::threads() const {
     const std::lock_guard<std::mutex> lock(scheduler_mutex_);
     return threads_;

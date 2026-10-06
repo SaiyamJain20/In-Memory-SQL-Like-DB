@@ -256,6 +256,34 @@ void Table::AppendRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups)
     tail_cache_.reset();
 }
 
+void Table::LoadRowGroups(std::vector<std::shared_ptr<const RowGroup>> groups) {
+    CDB_CHECK(RowCount() == 0);
+    std::shared_ptr<const RowGroup> tail;
+    if (!groups.empty() && groups.back()->count() < row_group_size_) {
+        tail = std::move(groups.back());
+        groups.pop_back();
+    }
+    AppendRowGroups(std::move(groups));
+    if (tail == nullptr) {
+        return;
+    }
+    std::vector<LogicalType> types;
+    for (const ColumnDefinition& c : schema_) {
+        types.push_back(c.type);
+    }
+    DataChunk chunk;
+    chunk.Initialize(types, kVectorSize);
+    for (idx_t at = 0; at < tail->count(); at += kVectorSize) {
+        const idx_t n = std::min<idx_t>(kVectorSize, tail->count() - at);
+        chunk.Reset();
+        for (idx_t c = 0; c < schema_.size(); c++) {
+            tail->column(c).Scan(at, n, chunk.column(c));
+        }
+        chunk.SetCardinality(n);
+        Append(chunk);
+    }
+}
+
 void Table::Append(const DataChunk& chunk) {
     CheckChunkShape(chunk);
     if (chunk.size() == 0) {

@@ -4,6 +4,7 @@
 #include "planner/bound_expression.h"
 #include "storage/table.h"
 
+#include <functional>
 #include <mutex>
 #include <optional>
 
@@ -125,8 +126,13 @@ class PhysicalResultCollector final : public PhysicalOperator {
 // ends up with the rows in the order a single thread would have inserted them.
 class PhysicalInsert final : public PhysicalOperator {
   public:
-    explicit PhysicalInsert(std::shared_ptr<Table> target)
-        : PhysicalOperator({LogicalType::BigInt()}), target_(std::move(target)) {}
+    // `commit` receives the staging table (all rows validated, in table order) once the input is
+    // exhausted, and must make it part of the target - atomically; empty: Table::Merge. A
+    // persistent database logs the rows there first.
+    using Commit = std::function<void(std::unique_ptr<Table> staging)>;
+    explicit PhysicalInsert(std::shared_ptr<Table> target, Commit commit = {})
+        : PhysicalOperator({LogicalType::BigInt()}), target_(std::move(target)),
+          commit_(std::move(commit)) {}
     std::string Name() const override { return "INSERT"; }
     std::string Describe() const override { return "INSERT " + target_->name(); }
 
@@ -142,6 +148,7 @@ class PhysicalInsert final : public PhysicalOperator {
 
   private:
     std::shared_ptr<Table> target_;
+    Commit commit_;
 };
 
 } // namespace cdb

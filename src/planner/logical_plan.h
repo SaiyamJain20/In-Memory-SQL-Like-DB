@@ -29,6 +29,7 @@ enum class LogicalKind : uint8_t {
     Insert,
     Copy,
     Explain,
+    Checkpoint,
 };
 
 struct LogicalOperator;
@@ -146,6 +147,11 @@ struct LogicalCopy : LogicalOperator {
     std::string delimiter = ",";
     bool header = false;
     LogicalCopy() : LogicalOperator(LogicalKind::Copy) {}
+    std::string Describe() const override;
+};
+
+struct LogicalCheckpoint : LogicalOperator {
+    LogicalCheckpoint() : LogicalOperator(LogicalKind::Checkpoint) {}
     std::string Describe() const override;
 };
 

@@ -354,6 +354,10 @@ std::string CopyStatement::ToString() const {
            QuoteString(delimiter) + ", HEADER " + (header ? "TRUE" : "FALSE") + ")";
 }
 
+std::string CheckpointStatement::ToString() const {
+    return "CHECKPOINT";
+}
+
 std::string ExplainStatement::ToString() const {
     return std::string("EXPLAIN ") + (analyze ? "ANALYZE " : "") + inner->ToString();
 }

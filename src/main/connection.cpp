@@ -65,12 +65,12 @@ QueryResult Connection::Execute(LogicalPtr plan) {
     switch (plan->kind) {
     case LogicalKind::CreateTable: {
         const auto& op = static_cast<const LogicalCreateTable&>(*plan);
-        db_.catalog().CreateTable(op.table_name, op.schema, op.if_not_exists);
+        db_.CreateTable(op.table_name, op.schema, op.if_not_exists);
         return QueryResult::Empty();
     }
     case LogicalKind::DropTable: {
         const auto& op = static_cast<const LogicalDropTable&>(*plan);
-        db_.catalog().DropTable(op.table_name, op.if_exists);
+        db_.DropTable(op.table_name, op.if_exists);
         return QueryResult::Empty();
     }
     case LogicalKind::Insert:
@@ -80,9 +80,15 @@ QueryResult Connection::Execute(LogicalPtr plan) {
         CsvOptions options;
         options.delimiter = op.delimiter.empty() ? ',' : op.delimiter[0];
         options.header = op.header;
+        options.commit = [this, table = op.table](std::unique_ptr<Table> staging) {
+            db_.CommitAppend(table, std::move(staging));
+        };
         const std::shared_ptr<TaskScheduler> scheduler = db_.scheduler();
         return CountResult(LoadCsvFile(*op.table, op.path, options, scheduler.get()));
     }
+    case LogicalKind::Checkpoint:
+        db_.Checkpoint();
+        return QueryResult::Empty();
     case LogicalKind::Explain: {
         const auto& op = static_cast<const LogicalExplain&>(*plan);
         if (op.analyze) {
@@ -125,7 +131,10 @@ QueryResult Connection::ExecuteSelect(LogicalPtr plan) {
 QueryResult Connection::ExecuteInsert(LogicalPtr plan) {
     LogicalPtr optimized = optimize_ ? Optimize(std::move(plan)) : std::move(plan);
     const auto& insert = static_cast<const LogicalInsert&>(*optimized);
-    const std::unique_ptr<PhysicalPlan> physical = PlanInsert(insert);
+    const std::unique_ptr<PhysicalPlan> physical =
+        PlanInsert(insert, [this, table = insert.table](std::unique_ptr<Table> staging) {
+            db_.CommitAppend(table, std::move(staging));
+        });
     const std::shared_ptr<TaskScheduler> scheduler = db_.scheduler();
     Executor executor(*physical, scheduler.get());
     executor.Run();

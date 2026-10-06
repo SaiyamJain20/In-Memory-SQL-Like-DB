@@ -114,6 +114,10 @@ std::string LogicalCopy::Describe() const {
            "', header " + (header ? "true" : "false") + ")";
 }
 
+std::string LogicalCheckpoint::Describe() const {
+    return "CHECKPOINT";
+}
+
 std::string LogicalExplain::Describe() const {
     return analyze ? "EXPLAIN ANALYZE" : "EXPLAIN";
 }

@@ -257,7 +257,11 @@ idx_t LoadCsv(Table& target, std::istream& input, const CsvOptions& options) {
         RowError(record_line, "", "unterminated quoted field at end of input");
     }
     flush();
-    target.Merge(std::move(staging));
+    if (options.commit) {
+        options.commit(std::move(staging));
+    } else {
+        target.Merge(std::move(staging));
+    }
     return total;
 }
 
@@ -567,7 +571,11 @@ std::optional<idx_t> LoadCsvParallel(Table& target, const std::string& path,
     for (const DataChunk& chunk : tail_chunks) {
         staging->Append(chunk);
     }
-    target.Merge(std::move(staging));
+    if (options.commit) {
+        options.commit(std::move(staging));
+    } else {
+        target.Merge(std::move(staging));
+    }
     g_parallel_loads++;
     return rows;
 }

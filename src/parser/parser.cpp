@@ -141,9 +141,13 @@ class Parser {
             return ParseCopy();
         if (t.IsKeyword(Keyword::EXPLAIN))
             return ParseExplain();
+        if (IsWord("checkpoint")) { // a word, not a keyword: a table may still be called checkpoint
+            Advance();
+            return std::make_unique<CheckpointStatement>();
+        }
         if (t.IsKeyword(Keyword::WITH))
             NotImplemented("WITH (common table expressions)", t);
-        Fail("expected a statement (SELECT, CREATE, DROP, INSERT, COPY or EXPLAIN)");
+        Fail("expected a statement (SELECT, CREATE, DROP, INSERT, COPY, CHECKPOINT or EXPLAIN)");
     }
 
     StatementPtr ParseExplain() {
