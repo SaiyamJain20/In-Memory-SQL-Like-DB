@@ -64,15 +64,18 @@ cannot make a scan read out of bounds. Loading is parallel: one task per row gro
 copy of each open tail), `fsync` the current WAL, create and fsync `wal-<e+1>.log` and the directory, and make it the
 log that commits append to. Then, *without* the mutex (other statements keep committing into the new WAL): write
 `checkpoint-<e+1>.cdb.tmp`, `fsync`, rename to its final name, `fsync` the directory, and only then delete
-`checkpoint-<e>.cdb` and `wal-<e>.log`. Triggered by `CHECKPOINT`, when the WAL exceeds a size threshold, and on
-open when the replayed log is large. The last, short row group of each table is restored as the table's open tail so
-repeated restarts do not accumulate tiny row groups.
+`checkpoint-<e>.cdb` and `wal-<e>.log`. Triggered by `CHECKPOINT`, when the WAL exceeds a size threshold (an
+automatic checkpoint that fails is recorded, not raised: the statement that triggered it did commit), and when the
+database is closed if the log holds anything. A checkpoint with nothing committed since the last is a no-op. The
+last, short row group of each table is restored as the table's open tail so repeated restarts do not accumulate tiny
+row groups. A failure *before* the new log exists makes the database read-only (it is unknown what is on disk); a
+failure *after* it (writing or renaming the snapshot) leaves the chain of logs intact and the database usable.
 
 **Recovery** (`Database::Open`): lock the directory; delete `*.tmp`; take the newest `checkpoint-*.cdb` (**if it does
 not verify, that is an error** - it was renamed into place only after an fsync, so it cannot be a torn write, and
 guessing an older state could silently lose data); load it; replay each WAL with epoch >= it in order; truncate a torn
-tail; open the newest WAL for appending. Recovery never writes anything except that truncation, so a crash *during*
-recovery is just another crash.
+tail; open the newest WAL for appending; remove stale files (older epochs, `*.tmp`). Recovery writes nothing else
+and every step is idempotent, so a crash *during* recovery is just another crash.
 
 **The file system is an interface.** All I/O goes through `FileSystem` / `FileHandle` (open, positional read and write,
 append, truncate, fsync, rename, remove, directory fsync, list, lock). `PosixFileSystem` implements it with system
@@ -95,8 +98,11 @@ crash point) or fail with an I/O error.
 - *Corruption:* every single-byte flip and every truncation of a valid checkpoint is detected; every flip / truncation of
   a WAL yields a committed prefix and never garbage; a libFuzzer target reads arbitrary bytes as a checkpoint and as a
   WAL (no crash, no UB, only `Error`).
-- Concurrency (several sessions committing at once, then reopen) under ThreadSanitizer; the whole suite also runs against a
-  persistent database in a `-persistent` mode.
+- Real `kill -9`: a child process commits rows on a real disk, the parent kills it at random moments and checks that every
+  acknowledged row survived, in order.
+- The SQL logic suite (DuckDB-verified results) also runs on a persistent database that suffers a power cut and a recovery
+  after *every statement*; the TPC-H queries match DuckDB on databases reopened from a checkpoint and from a log alone.
+- Concurrency (several sessions committing while checkpoints happen, then reopen) under ThreadSanitizer.
 
 ## Consequences
 - Open time is proportional to the data (everything is loaded into memory; there is no lazy paging).

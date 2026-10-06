@@ -18,3 +18,8 @@ target_link_libraries(cdb_bench PRIVATE cdb benchmark::benchmark_main)
 add_executable(cdb_tpch tpch/tpch_runner.cpp)
 target_compile_definitions(cdb_tpch PRIVATE CDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(cdb_tpch PRIVATE cdb)
+
+# Durability costs (Phase 7): commit latency, checkpoint and recovery times on a real disk.
+add_executable(cdb_persist persist/persist_bench.cpp)
+target_compile_definitions(cdb_persist PRIVATE CDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(cdb_persist PRIVATE cdb)
