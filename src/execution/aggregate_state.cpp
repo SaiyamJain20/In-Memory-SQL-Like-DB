@@ -6,8 +6,13 @@
 #include "kernels/aggregate.h"
 
 #include <cmath>
+#include <limits>
 
 namespace cdb {
+
+void AggregateState::CombineSubset(const AggregateState&, const uint32_t*, const uint32_t*, idx_t) {
+    CDB_UNREACHABLE("this aggregate state cannot merge a subset of groups");
+}
 
 void AggregateState::UpdateUngrouped(const Vector* arg, idx_t count) {
     thread_local std::vector<uint32_t> zeros;
@@ -26,6 +31,8 @@ template <class T> const T* FlatAllValid(const Vector* v) {
                ? v->FlatData<T>()
                : nullptr;
 }
+
+__extension__ typedef __int128 Int128; // exact integer sums
 
 [[noreturn]] void SumOverflow() {
     throw Error(ErrorCode::Execution, "Out of Range: overflow in SUM");
@@ -54,6 +61,13 @@ class CountStarState final : public AggregateState {
         const auto& s = static_cast<const CountStarState&>(src);
         for (idx_t g = 0; g < n; g++) {
             counts_[dst[g]] += s.counts_[g];
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const CountStarState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            counts_[to[i]] += s.counts_[from[i]];
         }
     }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
@@ -91,6 +105,13 @@ class CountState final : public AggregateState {
             counts_[dst[g]] += s.counts_[g];
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const CountState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            counts_[to[i]] += s.counts_[from[i]];
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         int64_t* o = out.FlatData<int64_t>();
         for (idx_t i = 0; i < count; i++) {
@@ -104,7 +125,12 @@ class CountState final : public AggregateState {
 
 // ---------------------------------------------------------------------------------- SUM / AVG
 
-// SUM over integers: 64-bit accumulator, overflow is an error (never a wrapped result).
+// SUM over integers. The accumulator is exact (128 bits) and the BIGINT range is checked only when
+// the result is produced, so the answer - or the "overflow in SUM" error - depends on the values
+// alone: not on the order they were added in, the SIMD kernels, or how many threads each summed a
+// share. (A running 64-bit total could not promise that: {MAX, 1, -1} would fail or succeed
+// depending on which thread saw what.) A sum whose exact value does not fit is an error, never a
+// wrapped result.
 template <class In> class SumIntState final : public AggregateState {
   public:
     void Resize(idx_t groups) override {
@@ -120,9 +146,7 @@ template <class In> class SumIntState final : public AggregateState {
                 continue;
             }
             const uint32_t g = groups[i];
-            if (__builtin_add_overflow(sums_[g], static_cast<int64_t>(data[u.sel[i]]), &sums_[g])) {
-                SumOverflow();
-            }
+            sums_[g] += data[u.sel[i]];
             has_[g] = 1;
         }
     }
@@ -130,32 +154,23 @@ template <class In> class SumIntState final : public AggregateState {
         if constexpr (std::is_same_v<In, int32_t> || std::is_same_v<In, int64_t>) {
             const In* data = FlatAllValid<In>(arg);
             if (data != nullptr && count > 0) {
-                // Use the kernel only when a left-to-right checked sum could not overflow either,
-                // so overflow errors are identical with and without SIMD: |every prefix| <= max|x|
-                // * count.
-                In lo, hi;
+                Int128 total = 0;
                 if constexpr (std::is_same_v<In, int32_t>) {
-                    kernels::MinMaxInt32(data, count, &lo, &hi);
+                    total = kernels::SumInt32(data, count); // 2048 values of 32 bits: always exact
                 } else {
-                    kernels::MinMaxInt64(data, count, &lo, &hi);
-                }
-                const uint64_t bound = std::max<uint64_t>(
-                    lo < 0 ? 0 - static_cast<uint64_t>(lo) : static_cast<uint64_t>(lo),
-                    hi < 0 ? 0 - static_cast<uint64_t>(hi) : static_cast<uint64_t>(hi));
-                const uint64_t acc = sums_[0] < 0 ? 0 - static_cast<uint64_t>(sums_[0])
-                                                  : static_cast<uint64_t>(sums_[0]);
-                const uint64_t room = (uint64_t{1} << 63) - 1;
-                if (bound <= (room - std::min(acc, room)) / count) {
-                    int64_t total = sums_[0];
-                    if constexpr (std::is_same_v<In, int32_t>) {
-                        total += kernels::SumInt32(data, count);
-                    } else if (!kernels::AddSumInt64(data, count, &total)) {
-                        CDB_UNREACHABLE("a sum bounded by max|x| * n cannot overflow");
+                    int64_t part = 0;
+                    if (kernels::AddSumInt64(data, count, &part)) {
+                        total = part;
+                    } else { // the vector kernel could not rule out an overflow of its own: be
+                             // exact
+                        for (idx_t i = 0; i < count; i++) {
+                            total += data[i];
+                        }
                     }
-                    sums_[0] = total;
-                    has_[0] = 1;
-                    return;
                 }
+                sums_[0] += total;
+                has_[0] = 1;
+                return;
             }
         }
         AggregateState::UpdateUngrouped(arg, count);
@@ -163,28 +178,40 @@ template <class In> class SumIntState final : public AggregateState {
     void Combine(const AggregateState& src, const uint32_t* dst, idx_t n) override {
         const auto& s = static_cast<const SumIntState&>(src);
         for (idx_t g = 0; g < n; g++) {
-            if (!s.has_[g]) {
-                continue;
+            if (s.has_[g]) {
+                sums_[dst[g]] += s.sums_[g];
+                has_[dst[g]] = 1;
             }
-            if (__builtin_add_overflow(sums_[dst[g]], s.sums_[g], &sums_[dst[g]])) {
-                SumOverflow();
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const SumIntState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                sums_[to[i]] += s.sums_[from[i]];
+                has_[to[i]] = 1;
             }
-            has_[dst[g]] = 1;
         }
     }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         int64_t* o = out.FlatData<int64_t>();
         for (idx_t i = 0; i < count; i++) {
-            if (has_[first + i]) {
-                o[i] = sums_[first + i];
-            } else {
+            if (!has_[first + i]) {
                 out.Validity().SetInvalid(i);
+                continue;
             }
+            const Int128 sum = sums_[first + i];
+            if (sum < std::numeric_limits<int64_t>::min() ||
+                sum > std::numeric_limits<int64_t>::max()) {
+                SumOverflow();
+            }
+            o[i] = static_cast<int64_t>(sum);
         }
     }
 
   private:
-    std::vector<int64_t> sums_;
+    std::vector<Int128> sums_;
     std::vector<uint8_t> has_;
 };
 
@@ -222,6 +249,16 @@ class SumDoubleState final : public AggregateState {
             if (s.has_[g]) {
                 sums_[dst[g]] += s.sums_[g];
                 has_[dst[g]] = 1;
+            }
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const SumDoubleState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                sums_[to[i]] += s.sums_[from[i]];
+                has_[to[i]] = 1;
             }
         }
     }
@@ -263,6 +300,14 @@ template <class In> class AvgState final : public AggregateState {
         for (idx_t g = 0; g < n; g++) {
             sums_[dst[g]] += s.sums_[g];
             counts_[dst[g]] += s.counts_[g];
+        }
+    }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const AvgState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            sums_[to[i]] += s.sums_[from[i]];
+            counts_[to[i]] += s.counts_[from[i]];
         }
     }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
@@ -327,6 +372,15 @@ template <class T, bool kMax> class MinMaxState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const MinMaxState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                Offer(to[i], static_cast<T>(s.values_[from[i]]));
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         T* o = out.FlatData<T>();
         for (idx_t i = 0; i < count; i++) {
@@ -374,6 +428,15 @@ template <bool kMax> class MinMaxStringState final : public AggregateState {
             }
         }
     }
+    void CombineSubset(const AggregateState& src, const uint32_t* from, const uint32_t* to,
+                       idx_t n) override {
+        const auto& s = static_cast<const MinMaxStringState&>(src);
+        for (idx_t i = 0; i < n; i++) {
+            if (s.has_[from[i]]) {
+                Offer(to[i], s.values_[from[i]]);
+            }
+        }
+    }
     void Finalize(idx_t first, idx_t count, Vector& out) const override {
         string_t* o = out.FlatData<string_t>();
         for (idx_t i = 0; i < count; i++) {
@@ -409,6 +472,9 @@ class DistinctState final : public AggregateState {
     }
 
     void Resize(idx_t groups) override { inner_->Resize(groups); }
+    // The (group, value) pairs are keyed by group id, so merging a subset of groups would have to
+    // scan every pair for each subset.
+    bool SupportsCombineSubset() const override { return false; }
 
     void Update(const uint32_t* groups, const Vector* arg, idx_t count) override {
         for (idx_t done = 0; done < count; done += kVectorSize) {

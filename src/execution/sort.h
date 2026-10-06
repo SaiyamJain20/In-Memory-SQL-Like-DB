@@ -28,10 +28,24 @@ class SortBuffer {
     // column per sort key).
     void Append(const DataChunk& payload, const DataChunk& key_columns);
     void AppendBuffer(const SortBuffer& other);
+    // Moves every completely filled chunk of `other` in without copying a row (this buffer must
+    // hold a multiple of kVectorSize rows); `other` keeps its partial last chunk, which
+    // AppendBuffer() then copies. Merging many buffers copies at most one partial chunk each.
+    void AdoptFullChunks(SortBuffer& other);
 
     // Orders the rows. After this, Scan() reads rows in sorted order. Append() may be called
     // again afterwards; the next Sort() re-sorts everything.
     void Sort();
+    // The same order (a stable sort: equal keys keep their order in the buffer), computed on
+    // several threads: ranges are sorted independently and then merged pairwise, each merge cut
+    // into independent slices by binary search, so the last (largest) merges parallelise too.
+    void SortParallel(const ExecutionContext& context);
+
+    // The row count from which SortParallel() uses threads: 32768, or CDB_SORT_PARALLEL_MIN_ROWS
+    // from the environment, or what SetMinRowsToSortInParallel() last set (tests lower it; 0
+    // restores the default).
+    static idx_t MinRowsToSortInParallel() noexcept;
+    static void SetMinRowsToSortInParallel(idx_t rows) noexcept;
 
     // Sorts and drops all but the first `keep` rows.
     void SortAndKeep(idx_t keep);
@@ -50,7 +64,10 @@ class SortBuffer {
 };
 
 // ORDER BY: a sink that buffers every row, sorts in Finalize, and a source that emits them in
-// order.
+// order. Threads fill their own buffers; Finalize moves them into one (whole chunks, no copying)
+// and sorts it in parallel. Rows with equal keys keep their order in that combined buffer, which
+// depends on which thread handed its buffer over first, so their relative order is not defined
+// across runs when more than one thread feeds the sort.
 class PhysicalOrder : public PhysicalOperator {
   public:
     PhysicalOrder(std::vector<LogicalType> types, std::vector<SortKey> keys);
@@ -60,12 +77,16 @@ class PhysicalOrder : public PhysicalOperator {
     std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override;
     std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override;
     SinkResult Sink(GlobalSinkState&, LocalSinkState&, const DataChunk& input) override;
+    bool ParallelSink() const override { return true; }
     void Combine(GlobalSinkState&, LocalSinkState&) override;
     void Finalize(GlobalSinkState&) override;
+    void FinalizeParallel(GlobalSinkState&, ExecutionContext&) override;
 
     std::unique_ptr<GlobalSourceState> GetGlobalSourceState(GlobalSinkState*) override;
     std::unique_ptr<LocalSourceState> GetLocalSourceState(GlobalSourceState&) override;
     bool GetData(GlobalSourceState&, LocalSourceState&, DataChunk& out) override;
+    bool ParallelSource() const override { return true; }
+    idx_t MaxSourceThreads(GlobalSourceState&) const override;
 
   protected:
     // [first, last) of the sorted rows to emit.
@@ -75,8 +96,13 @@ class PhysicalOrder : public PhysicalOperator {
     }
     // Called after each Sink on the thread's local buffer (TopN prunes here).
     virtual void AfterSink(SortBuffer&) const {}
-    // Called when sorting for the final output (TopN keeps only what it needs).
-    virtual void SortFinal(SortBuffer& buffer) const { buffer.Sort(); }
+    // Called on a thread's buffer, on that thread, before it is handed over (TopN keeps only the
+    // rows that can matter, so the merged buffer stays small).
+    virtual void ReduceLocal(SortBuffer&) const {}
+    // Called when sorting the combined buffer for the final output (TopN keeps only what it needs).
+    virtual void SortFinal(SortBuffer& buffer, const ExecutionContext& context) const {
+        buffer.SortParallel(context);
+    }
 
     std::vector<SortKey> keys_;
     std::vector<SortSpec> specs_;
@@ -94,7 +120,8 @@ class PhysicalTopN final : public PhysicalOrder {
   protected:
     void OutputRange(idx_t total, idx_t& first, idx_t& last) const override;
     void AfterSink(SortBuffer& buffer) const override;
-    void SortFinal(SortBuffer& buffer) const override;
+    void ReduceLocal(SortBuffer& buffer) const override;
+    void SortFinal(SortBuffer& buffer, const ExecutionContext& context) const override;
 
   private:
     idx_t Keep() const;

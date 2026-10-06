@@ -38,5 +38,8 @@ void PhysicalOperator::Combine(GlobalSinkState&, LocalSinkState&) {
 void PhysicalOperator::Finalize(GlobalSinkState&) {
     NotSupported(*this, "sink");
 }
+void PhysicalOperator::FinalizeParallel(GlobalSinkState& global, ExecutionContext&) {
+    Finalize(global);
+}
 
 } // namespace cdb

@@ -31,7 +31,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ done (exit criteria ve
 | 3 | SQL front end: lexer, parser, binder, logical plan | ✅ | ~1 wk |
 | 4 | Vectorized execution: expressions, operators, pipelines (**v0.1**) | ✅ | ~1.5 wk |
 | 5 | Compression, zone maps, SIMD kernels | ✅ | ~1.5 wk |
-| 6 | Morsel-driven parallelism | ⬜ | ~1 wk |
+| 6 | Morsel-driven parallelism | ✅ | ~1 wk |
 | 7 | Persistence: on-disk format, WAL, checkpoints | ⬜ | ~1 wk |
 | 8 | Optimizer, statistics, subqueries, `EXPLAIN ANALYZE` | ⬜ | ~1.5 wk |
 | 9 | Stretch (pick by time): spill-to-disk, window functions, pg-wire server, Parquet reader | ⬜ | 2–3 wk |
@@ -118,6 +118,14 @@ pre-aggregation + partitioned merge, parallel hash-join build/probe, parallel so
 
 **Exit:** TSan clean; scaling curve (1–16 threads) for Q1/Q3/Q6 in `BENCHMARKS.md`; results are
 bit-identical (or tolerance-identical) to single-threaded.
+
+**Done** (verified): scheduler with caller-participates jobs, morsel scans sized by thread count, parallel
+pipelines with ordered results, partitioned aggregate merge, parallel join build, parallel stable merge sort,
+parallel CSV loading; integer `SUM` made exact so results do not depend on thread count; the whole suite also runs
+in a `-parallel` mode under debug / release / ASan / TSan (TSan clean). TPC-H SF1 speedup at 16 threads: geometric mean
+**5.5x** (Q1 6.4x, Q3 4.6x, Q6 5.8x), 1.7x DuckDB's time at the same thread count; see `BENCHMARKS.md`.
+The project-level target of >= 8x at 16 threads is **not met** (8 physical cores; best query 6.6x). Carried forward:
+partitioned merge for `DISTINCT` aggregates (they do not scale), profiling Q7 / Q10, a normalised-key sort.
 
 ### Phase 7 — Persistence
 On-disk columnar file format with checksums; WAL for appends; checkpointing; recovery. All I/O

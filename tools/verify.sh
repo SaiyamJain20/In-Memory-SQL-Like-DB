@@ -2,8 +2,11 @@
 # The local "definition of done" gate: formatting plus the full test suite under every build
 # configuration. Exits non-zero (and says which step failed) on the first problem.
 #
-#   tools/verify.sh            # format, debug, asan, tsan, release, clang-18
-#   tools/verify.sh quick      # format + debug only
+#   tools/verify.sh            # format, debug, asan, tsan, release, clang-18 (each also in -parallel mode)
+#   tools/verify.sh quick      # format + debug only (and debug-parallel)
+#
+# "-parallel" runs the whole suite again with 4 threads, one-vector morsels and every parallel
+# threshold at 1 (see the *-parallel test presets), so queries really interleave on small data.
 #
 # Deliberately written with explicit exit-code checks rather than relying on `set -e`, which is
 # suppressed when a script is invoked from inside an `&&` list or a harness wrapper.
@@ -24,6 +27,11 @@ fi
 tools/check_format.sh >/dev/null 2>&1 || { tools/check_format.sh 2>&1 | head -20; fail "format"; }
 echo "format        OK"
 
+# A YAML mistake in the workflow only shows up as a CI run that fails in 0 s: parse it here.
+.venv/bin/python -c "import sys, yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" \
+  >build/verify-workflow.log 2>&1 || { cat build/verify-workflow.log | tail -5; fail "workflow yaml (.github/workflows/ci.yml)"; }
+echo "workflow yaml OK"
+
 run_preset() {
   local p="$1"
   cmake --preset "$p" >/dev/null 2>&1 || fail "configure $p"
@@ -32,6 +40,10 @@ run_preset() {
   out=$(ctest --preset "$p" -j8 2>&1)
   if [[ $? -ne 0 ]]; then echo "$out" | grep -E "Failed|\*\*\*|Subprocess" | head -20; fail "tests under $p"; fi
   echo "$p $(echo "$out" | grep -E 'tests passed')" | sed 's/100% tests passed, 0 tests failed out of/OK:/'
+  # the same build, whole suite again with every parallel path forced on
+  out=$(ctest --preset "$p-parallel" -j8 2>&1)
+  if [[ $? -ne 0 ]]; then echo "$out" | grep -E "Failed|\*\*\*|Subprocess" | head -20; fail "tests under $p-parallel"; fi
+  echo "$p-parallel $(echo "$out" | grep -E 'tests passed')" | sed 's/100% tests passed, 0 tests failed out of/OK:/'
 }
 
 mkdir -p build

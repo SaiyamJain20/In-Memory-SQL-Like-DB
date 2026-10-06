@@ -63,6 +63,36 @@ void GroupTable::Combine(const GroupTable& other) {
     }
 }
 
+bool GroupTable::CanCombineGroups() const {
+    for (const auto& s : states_) {
+        if (!s->SupportsCombineSubset()) {
+            return false;
+        }
+    }
+    return !group_types_.empty();
+}
+
+void GroupTable::CombineGroups(const GroupTable& other, const uint32_t* groups, idx_t n) {
+    CDB_CHECK(CanCombineGroups() && other.group_types_ == group_types_ &&
+              other.specs_.size() == specs_.size());
+    DataChunk keys;
+    keys.Initialize(group_types_);
+    std::vector<uint32_t> dst(kVectorSize);
+    for (idx_t at = 0; at < n; at += kVectorSize) {
+        const idx_t m = std::min<idx_t>(kVectorSize, n - at);
+        keys.Reset();
+        for (idx_t c = 0; c < group_types_.size(); c++) {
+            other.index_.keys().Gather(c, groups + at, m, keys.column(c));
+        }
+        keys.SetCardinality(m);
+        index_.FindOrInsert(keys, m, dst.data());
+        for (size_t a = 0; a < states_.size(); a++) {
+            states_[a]->Resize(index_.Count());
+            states_[a]->CombineSubset(*other.states_[a], groups + at, dst.data(), m);
+        }
+    }
+}
+
 void GroupTable::Scan(idx_t first, idx_t count, DataChunk& out) const {
     CDB_CHECK(first + count <= GroupCount() && count <= kVectorSize);
     out.Reset();

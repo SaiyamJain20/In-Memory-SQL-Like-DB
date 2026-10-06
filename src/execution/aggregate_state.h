@@ -41,6 +41,14 @@ class AggregateState {
     virtual void Combine(const AggregateState& src, const uint32_t* dst_groups,
                          idx_t src_groups) = 0;
 
+    // Merges group src_groups[i] of `src` into group dst_groups[i], for every i < n: a subset of
+    // src's groups, in any order, which is what merging one hash partition of a table needs. The
+    // destination must already be Resize()d. DISTINCT states do not support it (see
+    // SupportsCombineSubset()).
+    virtual void CombineSubset(const AggregateState& src, const uint32_t* src_groups,
+                               const uint32_t* dst_groups, idx_t n);
+    virtual bool SupportsCombineSubset() const { return true; }
+
     // Writes the results of groups [first, first + count) to rows 0.. of the Flat vector `out`
     // (of AggregateResultType). Groups that saw no non-NULL input give NULL (except COUNT: 0).
     virtual void Finalize(idx_t first, idx_t count, Vector& out) const = 0;

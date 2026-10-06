@@ -427,3 +427,94 @@ each kernel in `BENCHMARKS.md`; memory footprint measured on TPC-H lineitem (2.9
 **CI (GitHub Actions, run 37421340867, the last commit that changed code)** - all 8 jobs green: format,
 gcc-13 and clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job; every test
 job generated the TPC-H data and required the 12 differential tests (CDB_REQUIRE_TPCH=1).
+
+
+## 2026-10-06 — Phase 6: Morsel-driven parallelism
+
+**What changed** ([ADR 0008](adr/0008-morsel-driven-parallelism.md))
+- `TaskScheduler`: a fixed pool where a job is `body(participant)`; the caller is participant 0, so nested
+  and concurrent jobs cannot deadlock; the first exception is rethrown after every participant returned.
+  `Database` owns it (`CDB_THREADS`, `SetThreads`; library default **1 thread**, the shell and `cdb_tpch`
+  default to every hardware thread).
+- Pipelines run on several threads when the source, every operator and the sink say so; `LIMIT` and any
+  operator not audited stay serial. A table scan is a `MorselScan`: morsels of up to 8 vectors (never across a row
+  group, zone-map pruning unchanged) claimed from an atomic cursor, and sized by the thread count for small tables.
+- Result order: chunks carry a batch index (morsel number), so `SELECT ... WHERE` and `INSERT ... SELECT` keep table
+  order on any thread count.
+- Aggregate: per-thread tables, merged by hash partition from 32,768 groups (each partition by one task, no locks),
+  result served as a parallel source. **Integer `SUM` is now exact (128-bit accumulator, range-checked when the result
+  is produced)**, so the value or the overflow error depends on the data only, not on thread count or SIMD lanes - a
+  behaviour change for the serial engine too (ADR 0003), forced by parallelism and the one DuckDB has.
+- Join build: stores handed over, chunks adopted whole, hashed in parallel, linked into chains by bucket partition
+  without atomics. Sort: parallel stable merge sort with co-rank slices, identical to the serial stable order; top-N
+  prunes per thread. `COPY`: mmap, parallel record index, whole row groups parsed / sealed / compressed per task, same
+  tables and same errors (line numbers included) as the serial loader.
+- Tooling: `-parallel` test presets (4 threads, one-vector morsels, every threshold at 1) so the *whole* suite also runs
+  in the interleaving-heavy configuration under debug, release, ASan and TSan; `verify.sh` and both CI test jobs run
+  both modes. `cdb_tpch --threads N --sql "..."`, shell `.threads N|auto`.
+
+**Verified**
+| Check | Result |
+|---|---|
+| `tools/verify.sh`: debug / asan (+UBSan) / tsan / release / clang-18, each configuration run in default **and** `-parallel` mode | 671 / 671 / 671 / 669 / 671 passing (Phase 5: 597 / 597 / 597 / 595 / 597); both modes green under all four primary presets |
+| ThreadSanitizer, both modes (incl. 4 sessions sharing one pool, 8-thread joins/sorts/aggregates, parallel CSV, nested jobs) | clean |
+| Results vs one thread: 12 SQL queries (grouped and ungrouped aggregates, DISTINCT, joins of every type, sorts, top-N) on 102,400 rows with 1 vs 4 threads, a 12,800-row table with 1 vs 8, operator-level tests on 1/2/4/8 threads against naive references | identical (floating-point sums over exactly representable values; ties only where the order is defined) |
+| Parallel merge sort vs serial `stable_sort` over 7 key shapes (3 with no unique key, so stability is observable), 0-40,000 rows, 2-16 threads | identical order |
+| Parallel CSV vs serial loader: tables, row groups, every error message and line number, quoted multi-line records, CRLF, blank lines, headers, stray quotes; offline differential fuzz of 300,000 random inputs | 0 mismatches |
+| TPC-H vs DuckDB, 12 queries, SF0.01 in the gate (both modes) and SF0.1 / SF1 by hand | identical |
+| `tools/mutation_smoke.py`: 52 new Phase 6 mutants (scheduler, morsels, executor, ordering, aggregate / join / sort merges, CSV, adaptive morsels) and the 9 older ones whose code changed | all killed (first run of the first 55: 51 killed, one real test gap and three that did not compile, below; the 6 adaptive-morsel mutants and a repaired anchor: 11 / 11) |
+
+**Performance** (full tables, commands and caveats in [BENCHMARKS](BENCHMARKS.md); Ryzen 7 6800H 8C/16T, GCC 13.3 `-O3`,
+min of 5)
+- TPC-H SF1 speedup over one thread at **16 threads: geometric mean 5.5x** (Q1 6.4x, Q3 4.6x, Q6 5.8x, Q12 6.5x, Q13 6.6x,
+  Q19 6.6x; worst Q10 4.0x, Q7 4.2x); at 8 threads Q1 5.3x. DuckDB on the same machine: 3.7x geometric mean (Q1 6.6x, Q6 4.9x).
+  At 16 threads the SF1 geometric mean against DuckDB is **1.7x**, against 2.6x on one thread. SF0.1: 3.9x.
+- **The roadmap target of >= 8x at 16 threads is not met.** The machine has 8 physical cores; 8 -> 16 threads helps some
+  queries and hurts others (Q7, Q10).
+- Operators: parallel `ORDER BY` of 6 M rows 7.5x, 1.5 M-group aggregation 5.1x, a 6 M-row join 6.1x, `COPY` of lineitem
+  5.5x at 8 threads (6.9 s -> 1.25 s). `count(DISTINCT)` does **not** scale (1.3x).
+
+**Found by the process**
+1. **Measuring found a scaling bug:** Q13 at SF0.1 did not scale at all (46 ms on 1 thread, 28-44 ms on 2-16). `customer`'s
+   15,000 rows were a single 16,384-row morsel, so the probe and the group-by after it ran on one thread. Scans now size
+   their morsels by the thread count (50.2 -> 9.8 ms at 16 threads); tests pin the rule, the executor's hint and the
+   pruned-rows arithmetic. DuckDB has the same plateau at this size.
+2. **Mutants found a real test gap:** `std::stable_sort` -> `std::sort` for the parallel sort's runs survived because every
+   key shape of the test ended in the unique `id` column, so no two rows ever tied and stability could not be observed. Three
+   shapes without a total order now run in the same test. Three more mutants did not build under `-Werror` (unused
+   variable / parameter) and were rewritten as `(void)x, false` equivalents.
+3. **Fuzzing found a silent-data-loss bug** in the parallel CSV loader (an unterminated header record was dropped without
+   an error); the header record is now checked with `SplitRecord` first. A related find: the *serial* loader re-split a
+   multi-line record from its start on every line, which made a stray quote quadratic (a 541-second test); an incremental
+   `QuoteScanner` replaced it, with a debug assertion that it agrees with `SplitRecord`.
+4. **Parallelism changed a specification.** An integer `SUM` as a running 64-bit total fails or succeeds depending on which
+   thread saw which values (`{MAX, 1, -1}`). The old tests had encoded the order-dependent rule; they were rewritten in a
+   separate commit with the reason, and strengthened (exact in 128 bits, error only when the final total leaves BIGINT).
+5. A **death test** caught that the parallel-loading change had dropped the column-shape check in `Table::Append` for empty
+   chunks; restored. `-Woverloaded-virtual` rejected a `Finalize` overload (renamed `FinalizeParallel`).
+6. **Process:** the mutation script rewrites `src/` in place, and building anything while it runs compiles the mutant. The
+   Phase 5 rule (build nothing meanwhile) is why the full mutation regression now runs in its own `git worktree`, so work
+   and measurement can go on in the main tree.
+
+**Known gaps / deliberate limits**
+- Speedup at 16 threads is 4.0-6.6x on SF1 (target was >= 8x, not met); the causes for Q7 / Q10 / SF0.1 are not profiled yet.
+- **`DISTINCT` aggregates do not use the partitioned merge** and do not scale (`count(DISTINCT x)` 1.3x, slower at 16 threads
+  than at 8): per-thread (group, value) tables are merged whole on one thread.
+- Not defined with more than one thread: the order of groups, of matches within one probe row, and of ties in a sort
+  without a total key (the library default of one thread keeps the old deterministic behaviour). Floating-point `SUM` /
+  `AVG` re-associate across threads and SIMD lanes (equal up to rounding, not reproducible run to run).
+- Parallel `COPY` needs a regular file under 4 GiB with records under 4 GB; anything else takes the serial path. Peak RSS
+  while loading grows with the thread count (720 MB at 1 thread, 1266 MB at 16, SF1).
+- Morsel sizing adapts only table scans; sorted-buffer and aggregate-result sources use fixed ranges. No work stealing, no
+  NUMA awareness, one pool per `Database`.
+- The single-thread sort (5.5 s for 6 M rows with three keys) is slow in absolute terms (index array + row comparator);
+  a normalised-key sort is future work.
+
+**Phase 6 exit criteria met**: TSan clean (both modes, locally and in CI); scaling curve for 1-16 threads for Q1 / Q3 / Q6
+(and the other nine queries) in `BENCHMARKS.md`; results identical to single-threaded (tolerance only for floating-point
+sums). The target of >= 8x at 16 threads was not met (above).
+
+**CI (GitHub Actions, run 37443156698)** - all 8 jobs green, now including the `-parallel` test steps: format, gcc-13 and
+clang-18 x debug and release, asan, tsan and the libFuzzer parser smoke job. The run before it (37442929725) ran 0 jobs
+because a step name containing `: ` made the workflow invalid YAML; `verify.sh` now parses the workflow. The regression
+run of the *older* mutants after the Phase 6 changes runs in a separate worktree and is recorded with the Phase 7 entry.

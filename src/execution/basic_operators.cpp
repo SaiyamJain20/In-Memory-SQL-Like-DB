@@ -51,19 +51,46 @@ std::string PhysicalTableScan::Describe() const {
 
 namespace {
 struct ScanGlobalState final : GlobalSourceState {
-    explicit ScanGlobalState(TableScan s) : scan(std::move(s)) {}
-    TableScan scan;
+    ScanGlobalState(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> columns,
+                    std::vector<TableFilter> filters, size_t threads)
+        : scan(std::move(snapshot), std::move(columns), std::move(filters), 0, threads) {}
+    MorselScan scan; // the cursor over morsels is shared by every thread
+};
+// The morsel a thread is working through (it reads one vector per GetData call).
+struct ScanLocalState final : LocalSourceState {
+    ScanMorsel morsel;
+    bool has_morsel = false;
+    idx_t next_vector = 0;
+    idx_t vectors = 0;
 };
 } // namespace
 
 std::unique_ptr<GlobalSourceState> PhysicalTableScan::GetGlobalSourceState(GlobalSinkState*) {
-    return std::make_unique<ScanGlobalState>(TableScan(snapshot_, column_ids_, filters_));
+    return std::make_unique<ScanGlobalState>(snapshot_, column_ids_, filters_, threads_);
 }
 std::unique_ptr<LocalSourceState> PhysicalTableScan::GetLocalSourceState(GlobalSourceState&) {
-    return std::make_unique<EmptyLocalSource>();
+    return std::make_unique<ScanLocalState>();
 }
-bool PhysicalTableScan::GetData(GlobalSourceState& global, LocalSourceState&, DataChunk& out) {
-    return static_cast<ScanGlobalState&>(global).scan.Next(out);
+idx_t PhysicalTableScan::MaxSourceThreads(GlobalSourceState& global) const {
+    return static_cast<ScanGlobalState&>(global).scan.MorselCount();
+}
+bool PhysicalTableScan::GetData(GlobalSourceState& global, LocalSourceState& local,
+                                DataChunk& out) {
+    const MorselScan& scan = static_cast<ScanGlobalState&>(global).scan;
+    auto& l = static_cast<ScanLocalState&>(local);
+    if (!l.has_morsel) {
+        if (!static_cast<ScanGlobalState&>(global).scan.Next(l.morsel)) {
+            out.SetCardinality(0);
+            return false;
+        }
+        l.has_morsel = true;
+        l.next_vector = 0;
+        l.vectors = MorselScan::VectorCount(l.morsel);
+    }
+    scan.ReadVector(l.morsel, l.next_vector++, out);
+    l.batch_index = l.morsel.index;
+    l.has_morsel = l.next_vector < l.vectors;
+    return true;
 }
 
 // ---------------------------------------------------------------------------------- values
@@ -227,12 +254,40 @@ OperatorResult PhysicalLimit::Execute(OperatorState& state, const DataChunk& inp
 // ---------------------------------------------------------------------------------- result
 
 namespace {
+// A chunk and the batch it came from; sinks that must reproduce the single-threaded order sort by
+// it.
+using TaggedChunks = std::vector<std::pair<idx_t, DataChunk>>;
+
+void MoveInto(TaggedChunks& from, TaggedChunks& to) {
+    for (auto& c : from) {
+        to.push_back(std::move(c));
+    }
+    from.clear();
+}
+
+// Stable: chunks of one batch come from one thread in order, and stay in that order.
+void SortByBatch(TaggedChunks& chunks) {
+    std::stable_sort(chunks.begin(), chunks.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+}
+
+// A flat, owned copy of `input` (the pipeline reuses its buffers).
+DataChunk CopyChunk(const std::vector<LogicalType>& types, const DataChunk& input) {
+    DataChunk copy;
+    copy.Initialize(types, input.size());
+    for (idx_t c = 0; c < input.ColumnCount(); c++) {
+        VectorOps::Copy(input.column(c), copy.column(c), nullptr, input.size());
+    }
+    copy.SetCardinality(input.size());
+    return copy;
+}
+
 struct CollectGlobalState final : GlobalSinkState {
     std::mutex mutex;
-    std::vector<DataChunk> chunks;
+    TaggedChunks chunks;
 };
 struct CollectLocalState final : LocalSinkState {
-    std::vector<DataChunk> chunks;
+    TaggedChunks chunks;
 };
 } // namespace
 
@@ -245,26 +300,25 @@ std::unique_ptr<LocalSinkState> PhysicalResultCollector::GetLocalSinkState(Globa
 SinkResult PhysicalResultCollector::Sink(GlobalSinkState&, LocalSinkState& local,
                                          const DataChunk& input) {
     auto& l = static_cast<CollectLocalState&>(local);
-    DataChunk copy;
-    copy.Initialize(types(), input.size());
-    for (idx_t c = 0; c < input.ColumnCount(); c++) {
-        VectorOps::Copy(input.column(c), copy.column(c), nullptr, input.size());
-    }
-    copy.SetCardinality(input.size());
-    l.chunks.push_back(std::move(copy));
+    l.chunks.emplace_back(l.batch_index, CopyChunk(types(), input));
     return SinkResult::NeedMoreInput;
 }
 void PhysicalResultCollector::Combine(GlobalSinkState& global, LocalSinkState& local) {
     auto& g = static_cast<CollectGlobalState&>(global);
     auto& l = static_cast<CollectLocalState&>(local);
     const std::lock_guard<std::mutex> lock(g.mutex);
-    for (DataChunk& c : l.chunks) {
-        g.chunks.push_back(std::move(c));
-    }
-    l.chunks.clear();
+    MoveInto(l.chunks, g.chunks);
 }
 std::vector<DataChunk> PhysicalResultCollector::TakeChunks(GlobalSinkState& global) {
-    return std::move(static_cast<CollectGlobalState&>(global).chunks);
+    TaggedChunks& tagged = static_cast<CollectGlobalState&>(global).chunks;
+    SortByBatch(tagged);
+    std::vector<DataChunk> out;
+    out.reserve(tagged.size());
+    for (auto& c : tagged) {
+        out.push_back(std::move(c.second));
+    }
+    tagged.clear();
+    return out;
 }
 
 // ---------------------------------------------------------------------------------- insert
@@ -272,7 +326,12 @@ std::vector<DataChunk> PhysicalResultCollector::TakeChunks(GlobalSinkState& glob
 namespace {
 struct InsertGlobalState final : GlobalSinkState {
     std::unique_ptr<Table> staging;
+    std::mutex mutex;
+    TaggedChunks chunks; // every thread's rows, appended to `staging` in batch order by Finalize
     std::atomic<idx_t> rows{0};
+};
+struct InsertLocalState final : LocalSinkState {
+    TaggedChunks chunks;
 };
 } // namespace
 
@@ -283,16 +342,30 @@ std::unique_ptr<GlobalSinkState> PhysicalInsert::GetGlobalSinkState() {
     return g;
 }
 std::unique_ptr<LocalSinkState> PhysicalInsert::GetLocalSinkState(GlobalSinkState&) {
-    return std::make_unique<EmptyLocalSink>();
+    return std::make_unique<InsertLocalState>();
 }
-SinkResult PhysicalInsert::Sink(GlobalSinkState& global, LocalSinkState&, const DataChunk& input) {
+SinkResult PhysicalInsert::Sink(GlobalSinkState& global, LocalSinkState& local,
+                                const DataChunk& input) {
     auto& g = static_cast<InsertGlobalState&>(global);
-    g.staging->Append(input); // Table::Append is thread-safe and enforces NOT NULL
+    auto& l = static_cast<InsertLocalState&>(local);
+    l.chunks.emplace_back(l.batch_index, CopyChunk(input.types(), input));
     g.rows += input.size();
     return SinkResult::NeedMoreInput;
 }
+void PhysicalInsert::Combine(GlobalSinkState& global, LocalSinkState& local) {
+    auto& g = static_cast<InsertGlobalState&>(global);
+    auto& l = static_cast<InsertLocalState&>(local);
+    const std::lock_guard<std::mutex> lock(g.mutex);
+    MoveInto(l.chunks, g.chunks);
+}
 void PhysicalInsert::Finalize(GlobalSinkState& global) {
     auto& g = static_cast<InsertGlobalState&>(global);
+    SortByBatch(g.chunks);
+    for (auto& c : g.chunks) {
+        g.staging->Append(c.second); // enforces NOT NULL
+        c.second = DataChunk();      // free the copy as soon as it is staged
+    }
+    g.chunks.clear();
     target_->Merge(std::move(g.staging));
 }
 idx_t PhysicalInsert::InsertedRows(GlobalSinkState& global) {

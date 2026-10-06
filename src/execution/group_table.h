@@ -27,6 +27,15 @@ class GroupTable {
     // Merges every group of `other` (same shape) into this table.
     void Combine(const GroupTable& other);
 
+    // Merges only the groups groups[0..n) of `other` (same shape; unchanged) into this table, so
+    // that the groups of one hash partition of several tables can be merged independently of the
+    // other partitions. Only if CanCombineGroups().
+    void CombineGroups(const GroupTable& other, const uint32_t* groups, idx_t n);
+    // False when an aggregate is DISTINCT: those states merge whole tables only.
+    bool CanCombineGroups() const;
+    // The hash of the key of group `id` (grouped tables only).
+    uint64_t GroupHash(idx_t id) const noexcept { return index_.Hash(id); }
+
     // Groups [first, first + count) as rows of `out` (Initialize()d with output_types(); count
     // <= kVectorSize): the key columns, then one column per aggregate.
     void Scan(idx_t first, idx_t count, DataChunk& out) const;

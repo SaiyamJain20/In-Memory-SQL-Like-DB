@@ -4,8 +4,11 @@
 #include "execution/type_dispatch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
+#include <numeric>
 
 namespace cdb {
 
@@ -56,6 +59,10 @@ void SortBuffer::AppendBuffer(const SortBuffer& other) {
     store_.AppendStore(other.store_);
 }
 
+void SortBuffer::AdoptFullChunks(SortBuffer& other) {
+    store_.AdoptFullChunks(other.store_);
+}
+
 int SortBuffer::CompareRows(uint32_t a, uint32_t b) const {
     for (size_t k = 0; k < keys_.size(); k++) {
         const idx_t col = payload_types_.size() + k;
@@ -90,6 +97,115 @@ void SortBuffer::Sort() {
     }
     std::stable_sort(order_.begin(), order_.end(),
                      [this](uint32_t a, uint32_t b) { return CompareRows(a, b) < 0; });
+}
+
+namespace {
+constexpr idx_t kDefaultMinRowsToSortInParallel = 32768;
+
+std::atomic<idx_t>& SortMinRowsSetting() {
+    static std::atomic<idx_t> rows{[] {
+        const char* env = std::getenv("CDB_SORT_PARALLEL_MIN_ROWS");
+        const long long v = env != nullptr ? std::atoll(env) : 0;
+        return v > 0 ? static_cast<idx_t>(v) : idx_t{0};
+    }()};
+    return rows;
+}
+} // namespace
+
+idx_t SortBuffer::MinRowsToSortInParallel() noexcept {
+    const idx_t set = SortMinRowsSetting().load(std::memory_order_relaxed);
+    return set != 0 ? set : kDefaultMinRowsToSortInParallel;
+}
+
+void SortBuffer::SetMinRowsToSortInParallel(idx_t rows) noexcept {
+    SortMinRowsSetting().store(rows, std::memory_order_relaxed);
+}
+
+void SortBuffer::SortParallel(const ExecutionContext& context) {
+    const idx_t n = store_.Count();
+    order_.resize(n);
+    std::iota(order_.begin(), order_.end(), uint32_t{0});
+    const auto less = [this](uint32_t a, uint32_t b) { return CompareRows(a, b) < 0; };
+    const size_t threads = context.threads();
+    if (threads <= 1 || n < MinRowsToSortInParallel()) {
+        std::stable_sort(order_.begin(), order_.end(), less);
+        return;
+    }
+
+    // 1. Cut the rows into runs (a few per thread, to even out the work) and sort each run.
+    size_t runs = threads * 2;
+    runs = std::min<size_t>(runs, std::max<idx_t>(1, n / 1024));
+    std::vector<idx_t> bounds(runs + 1);
+    for (size_t r = 0; r <= runs; r++) {
+        bounds[r] = static_cast<idx_t>(r * n / runs);
+    }
+    context.ParallelFor(runs, [&](size_t r) {
+        std::stable_sort(order_.begin() + static_cast<long>(bounds[r]),
+                         order_.begin() + static_cast<long>(bounds[r + 1]), less);
+    });
+
+    // 2. Merge neighbouring runs, round by round. A merge of A and B is cut into slices of the
+    //    output: slice [k0, k1) takes the first i0..i1 elements of A and j0..j1 of B, where i is
+    //    found by a binary search (the "co-rank" of k: how many of the first k outputs come from A,
+    //    with ties going to A so the merge stays stable). Slices are independent tasks.
+    std::vector<uint32_t> merged(n);
+    struct Slice {
+        idx_t a, a_len, b, b_len; // the two input ranges (b == a + a_len)
+        idx_t k0, k1;             // the output slice, relative to a
+    };
+    while (bounds.size() > 2) {
+        const size_t run_count = bounds.size() - 1;
+        const size_t pairs = run_count / 2;
+        const size_t slices_per_pair = std::max<size_t>(1, (threads * 4 + pairs - 1) / pairs);
+        std::vector<Slice> slices;
+        std::vector<idx_t> next_bounds = {0};
+        for (size_t r = 0; r + 1 < run_count; r += 2) {
+            const idx_t a = bounds[r], a_len = bounds[r + 1] - bounds[r];
+            const idx_t b = bounds[r + 1], b_len = bounds[r + 2] - bounds[r + 1];
+            const idx_t total = a_len + b_len;
+            const size_t parts =
+                std::max<size_t>(1, std::min<size_t>(slices_per_pair, total / 2048));
+            for (size_t t = 0; t < parts; t++) {
+                slices.push_back({a, a_len, b, b_len, static_cast<idx_t>(t * total / parts),
+                                  static_cast<idx_t>((t + 1) * total / parts)});
+            }
+            next_bounds.push_back(bounds[r + 2]);
+        }
+        if (run_count % 2 == 1) { // an odd run out is carried over unchanged
+            const idx_t a = bounds[run_count - 1];
+            slices.push_back(
+                {a, bounds[run_count] - a, bounds[run_count], 0, 0, bounds[run_count] - a});
+            next_bounds.push_back(bounds[run_count]);
+        }
+        const auto corank = [&](const Slice& s, idx_t k) {
+            idx_t lo = k > s.b_len ? k - s.b_len : 0;
+            idx_t hi = std::min(k, s.a_len);
+            while (lo < hi) {
+                const idx_t i = lo + (hi - lo) / 2;
+                const idx_t j = k - i;
+                // B[j-1] < A[i]: A[i] must wait for it, so A gives at most i elements; otherwise
+                // (A[i] <= B[j-1], ties go to A) A gives more
+                if (j > 0 && i < s.a_len && !less(order_[s.b + j - 1], order_[s.a + i])) {
+                    lo = i + 1;
+                } else {
+                    hi = i;
+                }
+            }
+            return lo;
+        };
+        context.ParallelFor(slices.size(), [&](size_t t) {
+            const Slice& s = slices[t];
+            const idx_t i0 = corank(s, s.k0), i1 = corank(s, s.k1);
+            const idx_t j0 = s.k0 - i0, j1 = s.k1 - i1;
+            std::merge(order_.begin() + static_cast<long>(s.a + i0),
+                       order_.begin() + static_cast<long>(s.a + i1),
+                       order_.begin() + static_cast<long>(s.b + j0),
+                       order_.begin() + static_cast<long>(s.b + j1),
+                       merged.begin() + static_cast<long>(s.a + s.k0), less);
+        });
+        order_.swap(merged);
+        bounds.swap(next_bounds);
+    }
 }
 
 void SortBuffer::SortAndKeep(idx_t keep) {
@@ -134,7 +250,8 @@ namespace {
 struct OrderGlobalState final : GlobalSinkState {
     explicit OrderGlobalState(SortBuffer b) : buffer(std::move(b)) {}
     std::mutex mutex;
-    SortBuffer buffer;
+    std::vector<SortBuffer> locals; // each thread's rows, until Finalize
+    SortBuffer buffer;              // all the rows, sorted
 };
 
 struct OrderLocalState final : LocalSinkState {
@@ -151,9 +268,12 @@ struct OrderLocalState final : LocalSinkState {
     DataChunk key_chunk;
 };
 
+// The sorted rows [first, last) cut into chunk-sized pieces claimed from an atomic cursor.
 struct OrderSourceState final : GlobalSourceState {
     SortBuffer* buffer = nullptr;
-    idx_t next = 0, last = 0;
+    idx_t first = 0, last = 0;
+    std::atomic<idx_t> next_chunk{0};
+    idx_t ChunkCount() const { return (last - first + kVectorSize - 1) / kVectorSize; }
 };
 struct OrderLocalSource final : LocalSourceState {};
 
@@ -196,18 +316,34 @@ SinkResult PhysicalOrder::Sink(GlobalSinkState&, LocalSinkState& state, const Da
 void PhysicalOrder::Combine(GlobalSinkState& global, LocalSinkState& local) {
     auto& g = static_cast<OrderGlobalState&>(global);
     auto& l = static_cast<OrderLocalState&>(local);
+    ReduceLocal(l.buffer); // on this thread, outside the lock
     const std::lock_guard<std::mutex> lock(g.mutex);
-    g.buffer.AppendBuffer(l.buffer);
+    g.locals.push_back(std::move(l.buffer));
 }
 
 void PhysicalOrder::Finalize(GlobalSinkState& global) {
-    SortFinal(static_cast<OrderGlobalState&>(global).buffer);
+    ExecutionContext serial;
+    FinalizeParallel(global, serial);
+}
+
+void PhysicalOrder::FinalizeParallel(GlobalSinkState& global, ExecutionContext& context) {
+    auto& g = static_cast<OrderGlobalState&>(global);
+    // One buffer from the threads' buffers: whole chunks are moved, only each partial last chunk
+    // is copied.
+    for (SortBuffer& local : g.locals) {
+        g.buffer.AdoptFullChunks(local);
+    }
+    for (const SortBuffer& local : g.locals) {
+        g.buffer.AppendBuffer(local);
+    }
+    g.locals.clear();
+    SortFinal(g.buffer, context);
 }
 
 std::unique_ptr<GlobalSourceState> PhysicalOrder::GetGlobalSourceState(GlobalSinkState* sink) {
     auto s = std::make_unique<OrderSourceState>();
     s->buffer = &static_cast<OrderGlobalState*>(sink)->buffer;
-    OutputRange(s->buffer->Count(), s->next, s->last);
+    OutputRange(s->buffer->Count(), s->first, s->last);
     return s;
 }
 
@@ -215,14 +351,19 @@ std::unique_ptr<LocalSourceState> PhysicalOrder::GetLocalSourceState(GlobalSourc
     return std::make_unique<OrderLocalSource>();
 }
 
-bool PhysicalOrder::GetData(GlobalSourceState& global, LocalSourceState&, DataChunk& out) {
+idx_t PhysicalOrder::MaxSourceThreads(GlobalSourceState& global) const {
+    return static_cast<OrderSourceState&>(global).ChunkCount();
+}
+
+bool PhysicalOrder::GetData(GlobalSourceState& global, LocalSourceState& local, DataChunk& out) {
     auto& s = static_cast<OrderSourceState&>(global);
-    if (s.next >= s.last) {
+    const idx_t chunk = s.next_chunk.fetch_add(1, std::memory_order_relaxed);
+    if (chunk >= s.ChunkCount()) {
         return false;
     }
-    const idx_t n = std::min<idx_t>(kVectorSize, s.last - s.next);
-    s.buffer->Scan(s.next, n, out);
-    s.next += n;
+    const idx_t first = s.first + chunk * kVectorSize;
+    s.buffer->Scan(first, std::min<idx_t>(kVectorSize, s.last - first), out);
+    local.batch_index = chunk;
     return true;
 }
 
@@ -253,8 +394,14 @@ void PhysicalTopN::AfterSink(SortBuffer& buffer) const {
     }
 }
 
-void PhysicalTopN::SortFinal(SortBuffer& buffer) const {
-    buffer.SortAndKeep(Keep());
+void PhysicalTopN::ReduceLocal(SortBuffer& buffer) const {
+    if (buffer.Count() > Keep()) {
+        buffer.SortAndKeep(Keep());
+    }
+}
+
+void PhysicalTopN::SortFinal(SortBuffer& buffer, const ExecutionContext&) const {
+    buffer.SortAndKeep(Keep()); // at most threads x Keep() rows by now
 }
 
 void PhysicalTopN::OutputRange(idx_t total, idx_t& first, idx_t& last) const {

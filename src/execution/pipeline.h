@@ -38,11 +38,19 @@ class PhysicalPlan {
 };
 
 // Runs a PhysicalPlan: pipelines in order, each by pulling chunks from its source and pushing them
-// through the streaming operators into the sink. Single-threaded in Phase 4; the unit a scheduler
-// will parallelise is RunPipeline().
+// through the streaming operators into the sink.
+//
+// With a scheduler, a pipeline whose source, operators and sink all allow it runs on several
+// threads at once (morsel-driven parallelism): every thread executes the whole chain with its own
+// local states, pulling the next morsel from the shared source whenever it is ready for more, and
+// merges its local sink state into the global one when the source is exhausted. Pipelines still
+// run one after another (each is parallel inside); a pipeline with an operator that cannot be
+// parallelised, such as LIMIT, runs on the calling thread alone.
 class Executor {
   public:
-    explicit Executor(PhysicalPlan& plan) : plan_(plan) {}
+    // `scheduler` may be null (or have one thread): everything then runs on the calling thread.
+    explicit Executor(PhysicalPlan& plan, TaskScheduler* scheduler = nullptr)
+        : plan_(plan), scheduler_(scheduler) {}
 
     // Throws cdb::Error on a run-time failure; the plan's sink states are then discarded.
     void Run();
@@ -54,6 +62,7 @@ class Executor {
     void RunPipeline(const Pipeline& pipeline);
 
     PhysicalPlan& plan_;
+    TaskScheduler* scheduler_;
     std::unordered_map<const PhysicalOperator*, std::unique_ptr<GlobalSinkState>> sinks_;
 };
 

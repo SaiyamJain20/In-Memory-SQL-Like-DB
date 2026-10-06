@@ -11,7 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
+#include <numeric>
 #include <set>
 
 namespace cdb {
@@ -655,6 +657,176 @@ TEST(GroupTable, MergingPartialTablesEqualsOneTable) {
     }
 }
 
+// What a parallel aggregate does: the groups of several tables are split by hash partition and each
+// partition is merged on its own. Merged partition by partition, in any order and in pieces, the
+// result must be the one that merging the whole tables gives.
+TEST(GroupTable, MergingByHashPartitionEqualsMergingWholeTables) {
+    Rng rng(61);
+    const test::ValueGen exact = [](Rng& rng_, LogicalType t) {
+        if (t.id() == TypeId::Double) {
+            return Chance(rng_, 0.15) ? Value::Null(t)
+                                      : Value::Double(static_cast<double>(RandBelow(rng_, 9)) - 4);
+        }
+        return SmallDomainValue(rng_, t);
+    };
+    for (int round = 0; round < 40; round++) {
+        const LogicalType arg = kAllTypes[RandBelow(rng, kAllTypes.size())];
+        std::vector<AggregateSpec> specs;
+        for (const AggregateSpec& s : AllSpecsFor(arg)) {
+            if (!s.distinct) { // DISTINCT states merge whole tables only (checked below)
+                specs.push_back(s);
+            }
+        }
+        specs.push_back({AggregateKind::CountStar, LogicalType::Integer(), false});
+        std::vector<LogicalType> groups = {kAllTypes[RandBelow(rng, kAllTypes.size())]};
+        if (Chance(rng, 0.5)) {
+            groups.push_back(kAllTypes[RandBelow(rng, kAllTypes.size())]);
+        }
+        AggInput in = MakeInput(rng, groups, specs, 8, 0.15, exact);
+
+        const size_t ntables = 1 + RandBelow(rng, 4);
+        std::vector<std::unique_ptr<GroupTable>> tables;
+        for (size_t t = 0; t < ntables; t++) {
+            tables.push_back(std::make_unique<GroupTable>(in.group_types, in.specs));
+        }
+        for (const DataChunk& c : in.chunks) {
+            SinkChunk(*tables[RandBelow(rng, ntables)], in, c);
+        }
+        ASSERT_TRUE(tables[0]->CanCombineGroups());
+
+        GroupTable whole(in.group_types, in.specs);
+        for (const auto& t : tables) {
+            whole.Combine(*t);
+        }
+        const auto want = ReadAll(whole);
+
+        const uint64_t partitions = 1 + RandBelow(rng, 16);
+        std::map<std::vector<Value>, std::vector<Value>, TupleLess> got;
+        for (uint64_t p = 0; p < partitions; p++) {
+            GroupTable merged(in.group_types, in.specs);
+            for (const auto& t : tables) {
+                std::vector<uint32_t> ids;
+                for (idx_t id = 0; id < t->GroupCount(); id++) {
+                    if (t->GroupHash(id) % partitions == p) {
+                        ids.push_back(static_cast<uint32_t>(id));
+                    }
+                }
+                std::shuffle(ids.begin(), ids.end(), rng);
+                // in pieces of random size: CombineGroups can be called repeatedly
+                for (size_t at = 0; at < ids.size();) {
+                    const size_t n = std::min<size_t>(ids.size() - at, 1 + RandBelow(rng, 50));
+                    merged.CombineGroups(*t, ids.data() + at, n);
+                    at += n;
+                }
+            }
+            for (auto& [key, values] : ReadAll(merged)) {
+                ASSERT_TRUE(got.emplace(key, std::move(values)).second)
+                    << "a group landed in two partitions";
+            }
+        }
+        ASSERT_EQ(got.size(), want.size()) << "round " << round;
+        for (const auto& [key, values] : want) {
+            const auto it = got.find(key);
+            ASSERT_NE(it, got.end()) << "round " << round << ": group missing";
+            for (size_t a = 0; a < values.size(); a++) {
+                ASSERT_TRUE(SameValue(it->second[a], values[a]))
+                    << "round " << round << " aggregate " << a << ": got "
+                    << it->second[a].ToString() << " want " << values[a].ToString();
+            }
+        }
+    }
+}
+
+TEST(GroupTable, OnlyGroupedTablesWithoutDistinctCanMergeByGroup) {
+    EXPECT_TRUE(
+        GroupTable({LogicalType::Integer()}, {{AggregateKind::Sum, LogicalType::BigInt(), false},
+                                              {AggregateKind::Min, LogicalType::Varchar(), false}})
+            .CanCombineGroups());
+    EXPECT_FALSE(
+        GroupTable({LogicalType::Integer()}, {{AggregateKind::Count, LogicalType::Integer(), true}})
+            .CanCombineGroups())
+        << "DISTINCT keeps (group, value) pairs";
+    EXPECT_FALSE(GroupTable({}, {{AggregateKind::CountStar, LogicalType::Integer(), false}})
+                     .CanCombineGroups())
+        << "an ungrouped table has a single group";
+    // grouping with no aggregates at all (SELECT DISTINCT) merges by group too
+    GroupTable distinct_rows({LogicalType::Integer(), LogicalType::Varchar()}, {});
+    EXPECT_TRUE(distinct_rows.CanCombineGroups());
+}
+
+// CombineGroups works in vectors of 2048 groups: a call with several vectors' worth must walk its
+// list of groups, not start over each time.
+TEST(GroupTable, CombineGroupsHandlesMoreGroupsThanOneVectorInASingleCall) {
+    const std::vector<AggregateSpec> specs = {
+        {AggregateKind::CountStar, LogicalType::Integer(), false},
+        {AggregateKind::Sum, LogicalType::BigInt(), false},
+        {AggregateKind::Min, LogicalType::Varchar(), false}};
+    constexpr idx_t kGroups = 3 * kVectorSize + 123;
+    GroupTable src({LogicalType::Integer()}, specs);
+    DataChunk in;
+    in.Initialize({LogicalType::Integer(), LogicalType::BigInt(), LogicalType::Varchar()});
+    std::map<int32_t, std::pair<int64_t, std::string>> expected;
+    for (idx_t base = 0; base < kGroups; base += kVectorSize) {
+        const idx_t n = std::min<idx_t>(kVectorSize, kGroups - base);
+        in.Reset();
+        for (idx_t r = 0; r < n; r++) {
+            const auto key = static_cast<int32_t>(base + r);
+            in.SetValue(0, r, Value::Integer(key));
+            in.SetValue(1, r, Value::BigInt(static_cast<int64_t>(key) * 10));
+            in.SetValue(2, r, Value::Varchar("group-" + std::to_string(key)));
+            expected[key] = {static_cast<int64_t>(key) * 10, "group-" + std::to_string(key)};
+        }
+        in.SetCardinality(n);
+        DataChunk keys;
+        keys.Initialize({LogicalType::Integer()});
+        keys.column(0).Reference(in.column(0));
+        keys.SetCardinality(n);
+        src.Sink(keys, {nullptr, &in.column(1), &in.column(2)}, n);
+    }
+    ASSERT_EQ(src.GroupCount(), kGroups);
+    // all groups in a shuffled order, in one call
+    std::vector<uint32_t> ids(kGroups);
+    std::iota(ids.begin(), ids.end(), 0U);
+    Rng rng(63);
+    std::shuffle(ids.begin(), ids.end(), rng);
+    GroupTable dst({LogicalType::Integer()}, specs);
+    dst.CombineGroups(src, ids.data(), ids.size());
+    const auto got = ReadAll(dst);
+    ASSERT_EQ(got.size(), expected.size());
+    for (const auto& [key, want] : expected) {
+        const auto it = got.find({Value::Integer(key)});
+        ASSERT_NE(it, got.end()) << key;
+        ASSERT_EQ(it->second[0], Value::BigInt(1)) << key;
+        ASSERT_EQ(it->second[1], Value::BigInt(want.first)) << key;
+        ASSERT_EQ(it->second[2], Value::Varchar(want.second)) << key;
+    }
+}
+
+TEST(GroupTable, CombineGroupsOfNothingAndIntoAnEmptyTable) {
+    const std::vector<AggregateSpec> specs = {
+        {AggregateKind::CountStar, LogicalType::Integer(), false},
+        {AggregateKind::Sum, LogicalType::BigInt(), false}};
+    Rng rng(62);
+    AggInput in = MakeInput(rng, {LogicalType::Integer()}, specs, 3);
+    GroupTable src(in.group_types, in.specs);
+    for (const DataChunk& c : in.chunks) {
+        SinkChunk(src, in, c);
+    }
+    GroupTable dst(in.group_types, in.specs);
+    dst.CombineGroups(src, nullptr, 0);
+    EXPECT_EQ(dst.GroupCount(), 0U);
+    std::vector<uint32_t> all(src.GroupCount());
+    std::iota(all.begin(), all.end(), 0U);
+    dst.CombineGroups(src, all.data(), all.size());
+    ExpectMatchesReference(in, dst, "all groups into an empty table");
+    dst.CombineGroups(src, all.data(), all.size()); // a second time doubles every group
+    EXPECT_EQ(dst.GroupCount(), src.GroupCount());
+    const auto once = ReadAll(src);
+    for (const auto& [key, values] : ReadAll(dst)) {
+        EXPECT_EQ(values[0].GetBigInt(), 2 * once.at(key)[0].GetBigInt());
+    }
+}
+
 TEST(GroupTable, CombineOfEmptyTablesAndIntoEmpty) {
     GroupTable a({LogicalType::Integer()},
                  {{AggregateKind::CountStar, LogicalType::Integer(), false}});
@@ -675,7 +847,12 @@ TEST(GroupTable, CombineOfEmptyTablesAndIntoEmpty) {
     ExpectMatchesReference(in, a, "combined with empty");
 }
 
+// An integer SUM is exact and is range-checked when the result is produced: a total that does not
+// fit BIGINT is an error (never a wrapped value), and one that does fit is returned however large
+// the running total got on the way - so the answer cannot depend on the order rows arrive in.
 TEST(GroupTable, SumOverflowIsAnErrorNotAWrap) {
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
     const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
     auto chunk_of = [](std::vector<int64_t> values) {
         DataChunk c;
@@ -688,31 +865,60 @@ TEST(GroupTable, SumOverflowIsAnErrorNotAWrap) {
     };
     DataChunk none;
     none.Initialize({});
-    {
+    const auto sums_to = [&](std::vector<int64_t> values) {
         GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::max(), 1});
-        EXPECT_THROW(t.Sink(none, {&c.column(0)}, 2), Error);
+        const DataChunk c = chunk_of(std::move(values));
+        t.Sink(none, {&c.column(0)}, c.size());
+        return ReadAll(t).begin()->second[0];
+    };
+    // totals outside the range raise when the result is read
+    EXPECT_THROW(sums_to({kMax, 1}), Error);
+    EXPECT_THROW(sums_to({kMin, -1}), Error);
+    EXPECT_THROW(sums_to({kMax, kMax}), Error);
+    try {
+        sums_to({kMax, 1});
+        FAIL() << "expected an error";
+    } catch (const Error& e) {
+        EXPECT_NE(std::string(e.what()).find("overflow in SUM"), std::string::npos) << e.what();
     }
+    // totals inside it are returned, whatever the running total did in between
+    EXPECT_EQ(sums_to({kMax, -5, 5}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMax, 1, -1}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({1, kMax, -1}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMax, kMax, -kMax}), Value::BigInt(kMax));
+    EXPECT_EQ(sums_to({kMin, kMin, kMax, kMax}), Value::BigInt(-2));
+    EXPECT_EQ(sums_to({kMax - 1, 1}), Value::BigInt(kMax)) << "exactly at the limit";
+    EXPECT_EQ(sums_to({kMin + 1, -1}), Value::BigInt(kMin)) << "exactly at the lower limit";
     {
-        GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::min(), -1});
-        EXPECT_THROW(t.Sink(none, {&c.column(0)}, 2), Error);
-    }
-    {
-        // exactly at the limit is fine, one more is not (here via Combine)
+        // merging two tables: the total of the pair decides, not either table's own total
         GroupTable a({}, {sum}), b({}, {sum});
-        const DataChunk big = chunk_of({std::numeric_limits<int64_t>::max()});
+        const DataChunk big = chunk_of({kMax});
         const DataChunk one = chunk_of({1});
+        const DataChunk minus = chunk_of({-1});
         a.Sink(none, {&big.column(0)}, 1);
         b.Sink(none, {&one.column(0)}, 1);
-        EXPECT_THROW(a.Combine(b), Error);
+        a.Combine(b);
+        EXPECT_THROW(ReadAll(a), Error) << "MAX + 1 does not fit";
+        GroupTable c({}, {sum}), d({}, {sum}), e({}, {sum});
+        c.Sink(none, {&big.column(0)}, 1);
+        d.Sink(none, {&one.column(0)}, 1);
+        e.Sink(none, {&minus.column(0)}, 1);
+        c.Combine(d); // transiently MAX + 1
+        c.Combine(e); // back to MAX
+        EXPECT_EQ(ReadAll(c).begin()->second[0], Value::BigInt(kMax));
     }
     {
-        GroupTable t({}, {sum});
-        const DataChunk c = chunk_of({std::numeric_limits<int64_t>::max(), -5, 5});
-        EXPECT_NO_THROW(t.Sink(none, {&c.column(0)}, 3));
-        EXPECT_EQ(ReadAll(t).begin()->second[0],
-                  Value::BigInt(std::numeric_limits<int64_t>::max()));
+        // one overflowing group fails the result even if the others are fine
+        GroupTable t({LogicalType::Integer()}, {sum});
+        DataChunk keys;
+        keys.Initialize({LogicalType::Integer()});
+        const DataChunk values = chunk_of({1, kMax, 1, 2});
+        for (idx_t i = 0; i < 4; i++) {
+            keys.SetValue(0, i, Value::Integer(i == 1 || i == 2 ? 7 : 8));
+        }
+        keys.SetCardinality(4);
+        t.Sink(keys, {&values.column(0)}, 4);
+        EXPECT_THROW(ReadAll(t), Error) << "group 7 sums to MAX + 1";
     }
 }
 
@@ -795,7 +1001,7 @@ TEST(GroupTable, UngroupedAggregatesOverFlatAllValidInputMatchSequentialSemantic
     }
 }
 
-TEST(GroupTable, UngroupedSumOverflowFollowsTheSequentialRuleWithAndWithoutSimd) {
+TEST(GroupTable, UngroupedSumIsExactWithAndWithoutSimdWhateverTheOrderAndChunking) {
     constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
     const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
     for (const bool simd : {true, false}) {
@@ -807,18 +1013,87 @@ TEST(GroupTable, UngroupedSumOverflowFollowsTheSequentialRuleWithAndWithoutSimd)
             }
             return RunUngrouped({sum}, LogicalType::BigInt(), {v});
         };
-        // the running sum overflows at the second value even though the total would fit again
-        EXPECT_THROW(run({kMax, 1, -1}), Error) << (simd ? "simd" : "scalar");
-        EXPECT_THROW(run({kMax, kMax}), Error);
-        EXPECT_THROW(run({std::numeric_limits<int64_t>::min(), -1}), Error);
-        // exactly at the limit is fine
-        EXPECT_EQ(run({kMax - 1, 1})[0], Value::BigInt(kMax));
-        EXPECT_EQ(run({kMax, -kMax, kMax / 2})[0], Value::BigInt(kMax / 2));
-        // across chunks: the second chunk starts from the first one's total
+        const char* where = simd ? "simd" : "scalar";
+        // the running total passes MAX at the second value, but the total fits: no error
+        EXPECT_EQ(run({kMax, 1, -1})[0], Value::BigInt(kMax)) << where;
+        EXPECT_THROW(run({kMax, kMax}), Error) << where;
+        EXPECT_THROW(run({std::numeric_limits<int64_t>::min(), -1}), Error) << where;
+        EXPECT_EQ(run({kMax - 1, 1})[0], Value::BigInt(kMax)) << where;
+        EXPECT_EQ(run({kMax, -kMax, kMax / 2})[0], Value::BigInt(kMax / 2)) << where;
+        // across chunks the second one continues from the first one's exact total
         std::vector<Value> first = {Value::BigInt(kMax - 5)},
                            second = {Value::BigInt(10), Value::BigInt(-10)};
-        EXPECT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), {first, second}), Error);
+        EXPECT_EQ(RunUngrouped({sum}, LogicalType::BigInt(), {first, second})[0],
+                  Value::BigInt(kMax - 5))
+            << where;
+        std::vector<Value> over = {Value::BigInt(kMax - 5)}, more = {Value::BigInt(10)};
+        EXPECT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), {over, more}), Error) << where;
     }
+}
+
+// Reference: the exact sum of the multiset. Any order, any chunking, grouped or not, SIMD or not,
+// must give that value, or the overflow error when it does not fit.
+TEST(GroupTable, IntegerSumMatchesTheExactReferenceForRandomOrdersAndSplits) {
+    __extension__ typedef __int128 Int128;
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+    Rng rng(33);
+    const AggregateSpec sum{AggregateKind::Sum, LogicalType::BigInt(), false};
+    int fits = 0, overflows = 0;
+    for (int round = 0; round < 300; round++) {
+        // values near the limits, in cancelling groups, so totals sit on both sides of the range
+        std::vector<int64_t> values;
+        const idx_t n = 1 + RandBelow(rng, 40);
+        for (idx_t i = 0; i < n; i++) {
+            switch (RandBelow(rng, 5)) {
+            case 0:
+                values.push_back(kMax - static_cast<int64_t>(RandBelow(rng, 4)));
+                break;
+            case 1:
+                values.push_back(kMin + static_cast<int64_t>(RandBelow(rng, 4)));
+                break;
+            case 2:
+                values.push_back(static_cast<int64_t>(RandBelow(rng, 100)) - 50);
+                break;
+            case 3:
+                values.push_back(kMax / 2 + static_cast<int64_t>(RandBelow(rng, 3)));
+                break;
+            default:
+                values.push_back(kMin / 2 - static_cast<int64_t>(RandBelow(rng, 3)));
+                break;
+            }
+        }
+        Int128 exact = 0;
+        for (const int64_t x : values) {
+            exact += x;
+        }
+        const bool fit = exact >= kMin && exact <= kMax;
+        (fit ? fits : overflows)++;
+        for (const bool simd : {true, false}) {
+            const test::ScopedSimd mode(simd);
+            for (int shuffle = 0; shuffle < 4; shuffle++) {
+                std::shuffle(values.begin(), values.end(), rng);
+                // cut into 1-4 chunks at random places
+                std::vector<std::vector<Value>> chunks(1);
+                for (const int64_t x : values) {
+                    if (RandBelow(rng, 8) == 0 && !chunks.back().empty()) {
+                        chunks.emplace_back();
+                    }
+                    chunks.back().push_back(Value::BigInt(x));
+                }
+                if (fit) {
+                    ASSERT_EQ(RunUngrouped({sum}, LogicalType::BigInt(), chunks)[0],
+                              Value::BigInt(static_cast<int64_t>(exact)))
+                        << "round " << round << (simd ? " simd" : " scalar");
+                } else {
+                    ASSERT_THROW(RunUngrouped({sum}, LogicalType::BigInt(), chunks), Error)
+                        << "round " << round << (simd ? " simd" : " scalar");
+                }
+            }
+        }
+    }
+    EXPECT_GT(fits, 20) << "the generator must produce both outcomes";
+    EXPECT_GT(overflows, 20) << "the generator must produce both outcomes";
 }
 
 namespace {

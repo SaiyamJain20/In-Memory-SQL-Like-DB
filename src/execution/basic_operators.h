@@ -11,7 +11,8 @@ namespace cdb {
 
 // Scans a table snapshot (taken when the plan was built, so every scan of one table in a query
 // sees the same rows). Zone maps prune whole row groups using `filters`; rows of the groups that
-// are read are not filtered here.
+// are read are not filtered here. The snapshot is cut into morsels that any number of threads claim
+// from a shared cursor, so the scan is the source of a parallel pipeline.
 class PhysicalTableScan final : public PhysicalOperator {
   public:
     PhysicalTableScan(std::string table_name, std::shared_ptr<const TableSnapshot> snapshot,
@@ -23,9 +24,13 @@ class PhysicalTableScan final : public PhysicalOperator {
     std::unique_ptr<GlobalSourceState> GetGlobalSourceState(GlobalSinkState*) override;
     std::unique_ptr<LocalSourceState> GetLocalSourceState(GlobalSourceState&) override;
     bool GetData(GlobalSourceState&, LocalSourceState&, DataChunk& out) override;
+    bool ParallelSource() const override { return true; }
+    idx_t MaxSourceThreads(GlobalSourceState&) const override;
+    void SetThreadHint(size_t threads) override { threads_ = threads; }
 
   private:
     std::string table_name_;
+    size_t threads_ = 1;
     std::shared_ptr<const TableSnapshot> snapshot_;
     std::vector<idx_t> column_ids_;
     std::vector<TableFilter> filters_;
@@ -56,6 +61,7 @@ class PhysicalFilter final : public PhysicalOperator {
 
     std::unique_ptr<OperatorState> GetOperatorState(GlobalSinkState*) override;
     OperatorResult Execute(OperatorState&, const DataChunk& input, DataChunk& output) override;
+    bool ParallelOperator() const override { return true; }
 
   private:
     BoundExprPtr predicate_;
@@ -69,13 +75,15 @@ class PhysicalProjection final : public PhysicalOperator {
 
     std::unique_ptr<OperatorState> GetOperatorState(GlobalSinkState*) override;
     OperatorResult Execute(OperatorState&, const DataChunk& input, DataChunk& output) override;
+    bool ParallelOperator() const override { return true; }
 
   private:
     std::vector<BoundExprPtr> exprs_;
 };
 
 // LIMIT / OFFSET without ordering. Reports Finished as soon as the limit is met so the pipeline
-// stops reading.
+// stops reading. It counts rows across chunks, so a pipeline containing it runs on one thread
+// (which also keeps "the first N rows" well defined and the early exit cheap).
 class PhysicalLimit final : public PhysicalOperator {
   public:
     PhysicalLimit(std::vector<LogicalType> types, std::optional<int64_t> limit, int64_t offset)
@@ -92,6 +100,8 @@ class PhysicalLimit final : public PhysicalOperator {
 };
 
 // The root of a SELECT: materialises every chunk it is given as flat chunks of exactly their size.
+// Chunks are returned in batch order (the order a single thread would have produced them), so a
+// pipeline that is just scan / filter / projection yields rows in table order on any thread count.
 class PhysicalResultCollector final : public PhysicalOperator {
   public:
     explicit PhysicalResultCollector(std::vector<LogicalType> types)
@@ -101,16 +111,18 @@ class PhysicalResultCollector final : public PhysicalOperator {
     std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override;
     std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override;
     SinkResult Sink(GlobalSinkState&, LocalSinkState&, const DataChunk& input) override;
+    bool ParallelSink() const override { return true; }
     void Combine(GlobalSinkState&, LocalSinkState&) override;
     void Finalize(GlobalSinkState&) override {}
 
-    // Moves the collected chunks out of the (finished) global state.
+    // Moves the collected chunks out of the (finished) global state, in batch order.
     static std::vector<DataChunk> TakeChunks(GlobalSinkState& global);
 };
 
 // The root of INSERT ... SELECT: collects rows in a private staging table and publishes them to
 // the target with one atomic Table::Merge in Finalize, so a failure part-way leaves the target
-// untouched and readers never see a partial insert.
+// untouched and readers never see a partial insert. Rows are staged in batch order, so the target
+// ends up with the rows in the order a single thread would have inserted them.
 class PhysicalInsert final : public PhysicalOperator {
   public:
     explicit PhysicalInsert(std::shared_ptr<Table> target)
@@ -121,7 +133,8 @@ class PhysicalInsert final : public PhysicalOperator {
     std::unique_ptr<GlobalSinkState> GetGlobalSinkState() override;
     std::unique_ptr<LocalSinkState> GetLocalSinkState(GlobalSinkState&) override;
     SinkResult Sink(GlobalSinkState&, LocalSinkState&, const DataChunk& input) override;
-    void Combine(GlobalSinkState&, LocalSinkState&) override {}
+    bool ParallelSink() const override { return true; }
+    void Combine(GlobalSinkState&, LocalSinkState&) override;
     void Finalize(GlobalSinkState&) override;
 
     // Rows inserted (valid after Finalize).
