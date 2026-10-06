@@ -63,21 +63,26 @@ class Vector {
     // Raw element array. Requires format() == Flat and sizeof(T)/physical type to match.
     template <class T> T* FlatData() {
         CDB_ASSERT(format_ == VectorFormat::Flat && PhysicalTypeOf<T>::value == type_.physical());
+        EnsureData();
         CDB_ASSERT(!data_->read_only());
         return data_->As<T>();
     }
     template <class T> const T* FlatData() const {
         CDB_ASSERT(format_ == VectorFormat::Flat && PhysicalTypeOf<T>::value == type_.physical());
+        EnsureData();
         return data_->As<T>();
     }
 
     // The Flat vector's storage as raw bytes (capacity() * type().width() of them).
     uint8_t* FlatBytes() {
-        CDB_ASSERT(format_ == VectorFormat::Flat && !data_->read_only());
+        CDB_ASSERT(format_ == VectorFormat::Flat);
+        EnsureData();
+        CDB_ASSERT(!data_->read_only());
         return data_->data();
     }
     const uint8_t* FlatBytes() const {
         CDB_ASSERT(format_ == VectorFormat::Flat);
+        EnsureData();
         return data_->data();
     }
 
@@ -147,11 +152,20 @@ class Vector {
         : type_(type), capacity_(capacity), validity_(capacity) {}
 
     void AllocateFlat();
+    // A Flat vector that was Reset() after sharing its buffers holds none until the first access
+    // (so an operator that only ever Reference()s inputs into it never pays for the allocation);
+    // this allocates (zeroed) storage on that first access.
+    void EnsureData() const {
+        if (!data_) {
+            data_ = Buffer::Allocate(capacity_ * type_.width());
+        }
+    }
 
     LogicalType type_;
     VectorFormat format_ = VectorFormat::Flat;
     idx_t capacity_;
-    std::shared_ptr<Buffer> data_; // Flat: capacity*width bytes. Constant: >= width bytes.
+    // Flat: capacity*width bytes (allocated lazily, see EnsureData). Constant: >= width bytes.
+    mutable std::shared_ptr<Buffer> data_;
     ValidityMask validity_;
     std::shared_ptr<StringHeap> heap_;
     std::shared_ptr<Vector> child_; // Dictionary only; always Flat
