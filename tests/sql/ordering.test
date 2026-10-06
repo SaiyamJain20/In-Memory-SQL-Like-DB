@@ -1,0 +1,390 @@
+# ORDER BY edge cases: bytewise string order, empty strings, duplicates, mixed directions, NULL
+# placement, expressions and ordinals in the sort key, ORDER BY with LIMIT and OFFSET.
+
+statement ok
+CREATE TABLE w (id INTEGER, s VARCHAR, n INTEGER, d DOUBLE);
+
+statement ok
+INSERT INTO w VALUES
+ (1, 'b', 3, 1.5), (2, 'B', 3, NULL), (3, '', 1, -0.5), (4, 'a', NULL, 2.0), (5, 'ab', 2, 2.0),
+ (6, 'a', 2, 0.0), (7, NULL, 2, 1.5), (8, 'Z', NULL, -3.25), (9, 'z', 1, 100.0), (10, 'b', 3, 1.5),
+ (11, 'abc', 5, NULL), (12, '~', 0, 0.25);
+
+query IT
+SELECT id, s FROM w ORDER BY s, id;
+----
+3	(empty)
+2	B
+8	Z
+4	a
+6	a
+5	ab
+11	abc
+1	b
+10	b
+9	z
+12	~
+7	NULL
+
+query IT
+SELECT id, s FROM w ORDER BY s DESC, id;
+----
+12	~
+9	z
+1	b
+10	b
+11	abc
+5	ab
+4	a
+6	a
+8	Z
+2	B
+3	(empty)
+7	NULL
+
+query IT
+SELECT id, s FROM w ORDER BY s DESC NULLS FIRST, id;
+----
+7	NULL
+12	~
+9	z
+1	b
+10	b
+11	abc
+5	ab
+4	a
+6	a
+8	Z
+2	B
+3	(empty)
+
+query IT
+SELECT id, s FROM w ORDER BY s NULLS FIRST, id DESC;
+----
+7	NULL
+3	(empty)
+2	B
+8	Z
+6	a
+4	a
+5	ab
+11	abc
+10	b
+1	b
+9	z
+12	~
+
+query II
+SELECT id, n FROM w ORDER BY n, id;
+----
+12	0
+3	1
+9	1
+5	2
+6	2
+7	2
+1	3
+2	3
+10	3
+11	5
+4	NULL
+8	NULL
+
+query II
+SELECT id, n FROM w ORDER BY n DESC, id DESC;
+----
+11	5
+10	3
+2	3
+1	3
+7	2
+6	2
+5	2
+9	1
+3	1
+12	0
+8	NULL
+4	NULL
+
+query II
+SELECT id, n FROM w ORDER BY n NULLS FIRST, id;
+----
+4	NULL
+8	NULL
+12	0
+3	1
+9	1
+5	2
+6	2
+7	2
+1	3
+2	3
+10	3
+11	5
+
+query IR
+SELECT id, d FROM w ORDER BY d, id;
+----
+8	-3.25
+3	-0.5
+6	0.0
+12	0.25
+1	1.5
+7	1.5
+10	1.5
+4	2.0
+5	2.0
+9	100.0
+2	NULL
+11	NULL
+
+query IR
+SELECT id, d FROM w ORDER BY d DESC NULLS LAST, id;
+----
+9	100.0
+4	2.0
+5	2.0
+1	1.5
+7	1.5
+10	1.5
+12	0.25
+6	0.0
+3	-0.5
+8	-3.25
+2	NULL
+11	NULL
+
+query ITI
+SELECT id, s, n FROM w ORDER BY n, s, id;
+----
+12	~	0
+3	(empty)	1
+9	z	1
+6	a	2
+5	ab	2
+7	NULL	2
+2	B	3
+1	b	3
+10	b	3
+11	abc	5
+8	Z	NULL
+4	a	NULL
+
+query ITI
+SELECT id, s, n FROM w ORDER BY n DESC, s DESC, id;
+----
+11	abc	5
+1	b	3
+10	b	3
+2	B	3
+5	ab	2
+6	a	2
+7	NULL	2
+9	z	1
+3	(empty)	1
+12	~	0
+4	a	NULL
+8	Z	NULL
+
+query ITI
+SELECT id, s, n FROM w ORDER BY s, n DESC, id;
+----
+3	(empty)	1
+2	B	3
+8	Z	NULL
+6	a	2
+4	a	NULL
+5	ab	2
+11	abc	5
+1	b	3
+10	b	3
+9	z	1
+12	~	0
+7	NULL	2
+
+query II
+SELECT id, n * 2 - id FROM w ORDER BY n * 2 - id, id;
+----
+12	-12
+9	-7
+10	-4
+7	-3
+6	-2
+3	-1
+5	-1
+11	-1
+2	4
+1	5
+4	NULL
+8	NULL
+
+query IT
+SELECT id, length(s) FROM w ORDER BY length(s) DESC, id;
+----
+11	3
+5	2
+1	1
+2	1
+4	1
+6	1
+8	1
+9	1
+10	1
+12	1
+3	0
+7	NULL
+
+query IT
+SELECT id, s || '!' AS t FROM w ORDER BY t, id;
+----
+3	!
+2	B!
+8	Z!
+4	a!
+6	a!
+5	ab!
+11	abc!
+1	b!
+10	b!
+9	z!
+12	~!
+7	NULL
+
+query II
+SELECT id, n FROM w ORDER BY 2 DESC, 1;
+----
+11	5
+1	3
+2	3
+10	3
+5	2
+6	2
+7	2
+3	1
+9	1
+12	0
+4	NULL
+8	NULL
+
+query I
+SELECT id FROM w ORDER BY id LIMIT 4 OFFSET 3;
+----
+4
+5
+6
+7
+
+query IT
+SELECT id, s FROM w ORDER BY s, id LIMIT 5;
+----
+3	(empty)
+2	B
+8	Z
+4	a
+6	a
+
+query IT
+SELECT id, s FROM w ORDER BY s DESC, id LIMIT 3 OFFSET 2;
+----
+1	b
+10	b
+11	abc
+
+query IR
+SELECT id, d FROM w ORDER BY d DESC NULLS FIRST, id LIMIT 4;
+----
+2	NULL
+11	NULL
+9	100.0
+4	2.0
+
+query I
+SELECT id FROM w ORDER BY n, id LIMIT 100;
+----
+12
+3
+9
+5
+6
+7
+1
+2
+10
+11
+4
+8
+
+query I
+SELECT id FROM w ORDER BY n, id LIMIT 3 OFFSET 100;
+----
+
+query IT
+SELECT DISTINCT s, n FROM w ORDER BY s, n;
+----
+(empty)	1
+B	3
+Z	NULL
+a	2
+a	NULL
+ab	2
+abc	5
+b	3
+z	1
+~	0
+NULL	2
+
+query T
+SELECT DISTINCT s FROM w ORDER BY s DESC;
+----
+~
+z
+b
+abc
+ab
+a
+Z
+B
+(empty)
+NULL
+
+query IIT
+SELECT n, count(*), min(s) FROM w GROUP BY n ORDER BY n NULLS LAST;
+----
+0	1	~
+1	2	(empty)
+2	3	a
+3	3	B
+5	1	abc
+NULL	2	Z
+
+query IT
+SELECT n, max(s) FROM w GROUP BY n ORDER BY max(s) DESC, n;
+----
+0	~
+1	z
+3	b
+5	abc
+2	ab
+NULL	a
+
+query T
+SELECT s FROM w WHERE n >= 2 ORDER BY s, id;
+----
+B
+a
+ab
+abc
+b
+b
+NULL
+
+query II
+SELECT a.id, b.id FROM w a JOIN w b ON a.n = b.n AND a.id < b.id ORDER BY a.n, a.id, b.id;
+----
+3	9
+5	6
+5	7
+6	7
+1	2
+1	10
+2	10

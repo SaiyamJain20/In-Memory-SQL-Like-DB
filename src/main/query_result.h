@@ -3,6 +3,7 @@
 #include "common/error.h"
 #include "vector/data_chunk.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,8 +32,9 @@ class QueryResult {
     // Row-major copy of all values (convenient for tests and small results).
     std::vector<std::vector<Value>> Rows() const;
 
-    // psql-style rendering (or the error message for a failed result).
-    std::string ToString() const;
+    // psql-style rendering (or the error message for a failed result). With `max_rows` set, only
+    // that many rows are shown and the footer says how many were left out.
+    std::string ToString(std::optional<idx_t> max_rows = std::nullopt) const;
 
   private:
     bool ok_ = true;

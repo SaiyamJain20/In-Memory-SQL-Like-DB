@@ -771,4 +771,84 @@ TEST(VectorCopyRows, ThroughDictionaryAndConstantSourcesWithOffset) {
     }
 }
 
+// A Flat vector that was Reset() while its buffers were shared allocates storage lazily, on first
+// access. Operators that only ever Reference() inputs into an output chunk then never allocate.
+TEST(VectorLazyStorage, ResetAfterSharingDetachesAndStaysUsable) {
+    Vector source(LogicalType::Integer());
+    for (idx_t i = 0; i < 10; i++) {
+        source.SetValue(i, Value::Integer(static_cast<int32_t>(i) + 100));
+    }
+    Vector v(LogicalType::Integer());
+    v.Reference(source);
+    v.Reset(); // shared: detaches without touching the source
+    EXPECT_EQ(v.format(), VectorFormat::Flat);
+    v.SetValue(3, Value::Integer(-1)); // first write allocates private storage
+    EXPECT_EQ(v.GetValue(3), Value::Integer(-1));
+    EXPECT_EQ(source.GetValue(3), Value::Integer(103))
+        << "writing after Reset must not touch the source";
+    // Never-written rows of a fresh buffer read as zero, like any new vector
+    EXPECT_EQ(v.GetValue(4), Value::Integer(0));
+}
+
+TEST(VectorLazyStorage, EveryAccessPathWorksOnAResetVectorThatWasNeverWritten) {
+    for (const LogicalType type :
+         {LogicalType::Boolean(), LogicalType::Integer(), LogicalType::BigInt(),
+          LogicalType::Double(), LogicalType::Date(), LogicalType::Varchar()}) {
+        Vector source(type);
+        Vector v(type);
+        v.Reference(source);
+        v.Reset();
+        v.Verify(0); // nothing allocated yet: still well formed
+        UnifiedFormat u;
+        v.ToUnified(u);
+        EXPECT_NE(u.data, nullptr) << type.ToString();
+        v.Validity().SetAllInvalid(8); // an all-NULL result needs no data
+        EXPECT_TRUE(v.GetValue(5).IsNull()) << type.ToString();
+
+        Vector w(type);
+        w.Reference(source);
+        w.Reset();
+        SelectionVector sel(3);
+        for (idx_t i = 0; i < 3; i++) {
+            sel.Set(i, static_cast<sel_t>(2 - i));
+        }
+        w.Slice(sel, 3); // slicing a never-written vector yields a valid dictionary
+        EXPECT_EQ(w.format(), VectorFormat::Dictionary);
+        w.Verify(3);
+
+        Vector f(type);
+        f.Reference(source);
+        f.Reset();
+        f.Flatten(0);                           // no-op on flat
+        VectorOps::Copy(source, f, nullptr, 4); // bulk write into a lazily allocated vector
+        f.Verify(4);
+    }
+}
+
+TEST(VectorLazyStorage, ToUnifiedOnAFreshlyResetVectorHandsOutRealStorage) {
+    // The first thing done to a reset vector is a read-only view of it (no Verify, no write
+    // before).
+    for (const LogicalType type :
+         {LogicalType::Boolean(), LogicalType::Integer(), LogicalType::BigInt(),
+          LogicalType::Double(), LogicalType::Date(), LogicalType::Varchar()}) {
+        Vector source(type);
+        Vector v(type);
+        v.Reference(source);
+        v.Reset();
+        UnifiedFormat u;
+        v.ToUnified(u);
+        ASSERT_NE(u.data, nullptr) << type.ToString();
+        EXPECT_TRUE(u.IsValid(0)) << type.ToString();
+        EXPECT_EQ(v.GetValue(0).IsNull(), false);
+    }
+}
+
+TEST(VectorLazyStorage, ReusedUnsharedVectorKeepsItsBufferAcrossResets) {
+    Vector v(LogicalType::BigInt());
+    v.SetValue(0, Value::BigInt(7));
+    const int64_t* before = v.FlatData<int64_t>();
+    v.Reset(); // unshared and large enough: the buffer is reused, not reallocated
+    EXPECT_EQ(v.FlatData<int64_t>(), before);
+}
+
 } // namespace cdb

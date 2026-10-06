@@ -4,18 +4,28 @@
 //   cdb_shell -c "SELECT 1"      run the given SQL and exit
 //   cdb_shell -f script.sql      run a script
 //
-// Dot commands (interactive or in scripts):  .tables   .schema [table]   .read FILE   .quit
+// Dot commands (interactive or in scripts):
+//   .tables   .schema [table]   .read FILE   .timer on|off   .maxrows N|off   .help   .quit
 // The database lives in memory for the lifetime of the process.
 
 #include "common/version.h"
 #include "main/connection.h"
 #include "main/database.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 
 namespace {
+
+struct Settings {
+    bool timer = false;
+    std::optional<cdb::idx_t> max_rows =
+        40; // rows printed per result (the footer says how many exist)
+};
 
 std::string ReadFile(const std::string& path, bool& ok) {
     std::ifstream in(path);
@@ -26,18 +36,24 @@ std::string ReadFile(const std::string& path, bool& ok) {
 }
 
 // Runs a script, printing every statement's result. Returns false if one failed.
-bool RunSql(cdb::Connection& conn, const std::string& sql) {
+bool RunSql(cdb::Connection& conn, const std::string& sql, const Settings& settings) {
     bool ok = true;
-    for (const cdb::QueryResult& r : conn.QueryAll(sql)) {
+    const auto start = std::chrono::steady_clock::now();
+    const std::vector<cdb::QueryResult> results = conn.QueryAll(sql);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    for (const cdb::QueryResult& r : results) {
         if (!r.ok()) {
             std::cerr << r.error_message() << "\n";
             ok = false;
             continue;
         }
-        const std::string text = r.ToString();
+        const std::string text = r.ToString(settings.max_rows);
         if (!text.empty())
             std::cout << text << "\n";
     }
+    if (settings.timer)
+        std::cout << "Run Time: " << seconds * 1000 << " ms\n";
     return ok;
 }
 
@@ -46,6 +62,7 @@ bool RunSql(cdb::Connection& conn, const std::string& sql) {
 int main(int argc, char** argv) {
     cdb::Database db;
     cdb::Connection conn(db);
+    Settings settings;
 
     std::string command_sql, script;
     for (int i = 1; i < argc; i++) {
@@ -66,10 +83,11 @@ int main(int argc, char** argv) {
     }
     int exit_code = 0;
     if (!command_sql.empty()) {
-        return RunSql(conn, command_sql) ? 0 : 1;
+        return RunSql(conn, command_sql, settings) ? 0 : 1;
     }
     if (!script.empty()) {
-        return RunSql(conn, script) ? 0 : 1;
+        settings.max_rows = std::nullopt; // scripts print everything
+        return RunSql(conn, script, settings) ? 0 : 1;
     }
 
     std::cout << "cdb " << cdb::kVersion
@@ -110,7 +128,19 @@ int main(int argc, char** argv) {
                 if (!ok)
                     std::cerr << "cannot read " << arg << "\n";
                 else
-                    RunSql(conn, text);
+                    RunSql(conn, text, settings);
+            } else if (cmd == ".timer") {
+                settings.timer = arg == "on";
+            } else if (cmd == ".maxrows") {
+                if (arg == "off") {
+                    settings.max_rows = std::nullopt;
+                } else {
+                    settings.max_rows =
+                        static_cast<cdb::idx_t>(std::max(0, std::atoi(arg.c_str())));
+                }
+            } else if (cmd == ".help") {
+                std::cout << ".tables  .schema [table]  .read FILE  .timer on|off  .maxrows N|off  "
+                             ".quit\nEXPLAIN <query> shows the optimized plan.\n";
             } else {
                 std::cerr << "unknown command " << cmd << "\n";
             }
@@ -120,7 +150,7 @@ int main(int argc, char** argv) {
         // execute once the buffer ends with a semicolon (ignoring trailing whitespace)
         const auto last = buffer.find_last_not_of(" \t\r\n");
         if (last != std::string::npos && buffer[last] == ';') {
-            RunSql(conn, buffer);
+            RunSql(conn, buffer, settings);
             buffer.clear();
         }
     }

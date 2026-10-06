@@ -14,6 +14,13 @@ export CLANG_FORMAT
 
 fail() { echo "VERIFY FAILED: $1"; exit 1; }
 
+# The TPC-H differential tests need generated data; the gate must not skip them silently.
+export CDB_REQUIRE_TPCH=1
+if [[ ! -f data/tpch-sf0.01/manifest.json ]]; then
+  echo "generating TPC-H SF0.01 data and DuckDB reference answers..."
+  .venv/bin/python tools/tpch_data.py --sf 0.01 >/dev/null 2>&1 || fail "TPC-H data missing (needs .venv with duckdb: see CLAUDE.md)"
+fi
+
 tools/check_format.sh >/dev/null 2>&1 || { tools/check_format.sh 2>&1 | head -20; fail "format"; }
 echo "format        OK"
 

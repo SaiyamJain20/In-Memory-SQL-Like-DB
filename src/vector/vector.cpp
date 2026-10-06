@@ -87,6 +87,7 @@ Value Vector::GetValue(idx_t row) const {
 void Vector::SetValue(idx_t row, const Value& value) {
     CDB_CHECK(format_ == VectorFormat::Flat && row < capacity_);
     CDB_CHECK(value.type() == type_);
+    EnsureData();
     CDB_CHECK(!data_->read_only());
     if (value.IsNull()) {
         validity_.SetInvalid(row);
@@ -122,7 +123,7 @@ void Vector::Reset() {
     validity_.Reset(capacity_);
     const size_t needed = capacity_ * type_.width();
     if (!data_ || data_.use_count() > 1 || data_->read_only() || data_->size() < needed) {
-        AllocateFlat();
+        data_.reset(); // allocated on first write access (EnsureData): often there is none
     }
     if (heap_) {
         if (heap_.use_count() == 1 && !heap_->sealed()) {
@@ -241,6 +242,7 @@ void Vector::Slice(const SelectionVector& sel, idx_t count) {
     }
     SelectionVector new_sel(count);
     if (format_ == VectorFormat::Flat) {
+        EnsureData();
         for (idx_t i = 0; i < count; i++) {
             new_sel.Set(i, sel[i]);
         }
@@ -265,6 +267,7 @@ void Vector::Slice(const SelectionVector& sel, idx_t count) {
 void Vector::ToUnified(UnifiedFormat& out) const {
     switch (format_) {
     case VectorFormat::Flat:
+        EnsureData();
         out.sel = SelectionVector::Identity().data();
         out.data = data_->data();
         out.validity = &validity_;
@@ -290,6 +293,7 @@ void Vector::Verify(idx_t count) const {
     idx_t rows = count;
     switch (format_) {
     case VectorFormat::Flat:
+        EnsureData();
         CDB_CHECK(data_ != nullptr && data_->size() >= capacity_ * type_.width());
         CDB_CHECK(child_ == nullptr);
         break;

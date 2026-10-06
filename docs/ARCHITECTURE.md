@@ -16,7 +16,7 @@
  └─────────┘   └────────┘   │  names) │   └───────────┘   │ pushdown, │
   Phase 3                    └─────────┘     Phase 3       │ join ord.)│
                                                            └─────┬─────┘
-                                                            Phase 8
+                                                      Phase 4 (rules), 8 (stats)
                                                                  ▼
                                                         ┌─────────────────┐
                                                         │ Physical plan   │
@@ -60,7 +60,7 @@ Formats:
 Kernels never branch on format in the inner loop. They convert any vector to a **unified view**
 `(data*, sel*, validity*)` once per call and index `data[sel[i]]`; flat vectors get an identity
 selection and take a specialised fast path. *The unified view (`UnifiedFormat`) is
-[implemented: Phase 1]; the expression kernels that consume it are [planned: Phase 4].*
+[implemented: Phase 1]; the expression kernels that consume it are [implemented: Phase 4].*
 
 ### Nulls
 Validity is a bitmask (1 bit/value). A vector with no nulls carries *no* mask, so the common case
@@ -126,32 +126,61 @@ are referenced by ordinal into the operator's input. Semantics follow DuckDB; th
 divergences are in [ADR 0003](adr/0003-semantics-and-divergences-from-duckdb.md).
 
 `EvaluateScalar` is the single reference implementation of expression semantics
-([ADR 0004](adr/0004-scalar-interpreter-as-reference-semantics.md)): it runs `INSERT … VALUES` and
-table-free `SELECT`s today and is the oracle for Phase 4's vectorized kernels. It is checked
-against DuckDB on ~4,300 generated expressions (`tests/planner/golden_expression_test.cpp`).
+([ADR 0004](adr/0004-scalar-interpreter-as-reference-semantics.md)): it constant-folds during
+binding and is the oracle the vectorized kernels are tested against. It is checked against DuckDB
+on ~4,300 generated expressions (`tests/planner/golden_expression_test.cpp`).
 
-`Connection::Query` parses, binds and executes. DDL, `INSERT … VALUES` (atomic, via a staging
-table merged in one step), `COPY … FROM` (CSV, atomic the same way), `EXPLAIN` and table-free
-`SELECT` run now; queries over tables bind to a plan but need the Phase 4 executor. **12 of the 22
-TPC-H queries bind completely**; the other 10 stop precisely at a subquery or `WITH`
-(Phase 8).
+`Connection::Query` parses, binds, optimizes, plans and executes: DDL, `INSERT … VALUES` and
+`INSERT … SELECT` (atomic, via a staging table merged in one step), `COPY … FROM` (CSV, atomic the
+same way), `EXPLAIN` (the optimized logical plan) and `SELECT` run. **12 of the 22 TPC-H queries
+run** (and match DuckDB); the other 10 stop precisely at a subquery or `WITH` (Phase 8).
 
-## Execution — [planned: Phase 4, 6]
-**Push-based pipelines.** A query compiles to pipelines. Each is a `Source`, a chain of
-streaming `Operator`s (filter, project, hash-probe) and a `Sink`. Pipeline breakers (hash
-aggregate, join build, sort) are sinks that finalise before their dependent pipeline starts.
+## Execution — [implemented: Phase 4, single-threaded; parallel scheduling planned: Phase 6]
+**Push-based pipelines** ([ADR 0005](adr/0005-push-pipelines-with-global-and-local-state.md)).
+A query compiles to pipelines `source → streaming operators → sink`, run in dependency order.
+Pipeline breakers (hash aggregate, join build, sort, top-N) are a sink in one pipeline and the
+source of the next. Operators implement the full global/local state protocol - per-thread
+accumulation in local state, merged in `Combine`, built in `Finalize` - and the tests drive it with
+several local states; Phase 6 adds the scheduler and morsel dispatch, not a rewrite. Streaming
+operators can report `Finished` (a satisfied `LIMIT`), which stops the source being read.
 
-**Sink state is split** into a *global* state and a per-thread *local* state with a `Combine`
-step. This is designed in from the first operator so Phase 6 (parallelism) adds a scheduler
-rather than rewriting operators.
+**Operators.** Table scan (snapshot per query, zone-map pruning), `VALUES`, filter (selection
+vectors; zero-copy dictionary output), projection, limit/offset, hash aggregate (also `DISTINCT`;
+`COUNT/SUM/AVG/MIN/MAX` and their `DISTINCT` forms, integer `SUM` overflow is an error), `ORDER BY`
+(stable) and top-N (prunes while consuming), hash join (inner / left / semi / anti, multi-key,
+residual predicates, NULL keys never match; nested loop when there is no equality; output resumes
+mid-chain so a probe row with many matches never overflows a chunk), result collector and INSERT.
+`RIGHT` joins run as swapped `LEFT` joins; `FULL` is not supported yet; semi/anti exist in the
+operator but nothing produces them until subquery unnesting (Phase 8).
 
-**Morsel-driven parallelism.** Sources hand out morsels (a row group, or a range of chunks) from
-a shared atomic cursor; a fixed pool of workers each run the *whole* pipeline on their morsel
-with thread-local state. Work stays cache-hot and there is no per-tuple synchronisation.
+**Data structures.** `ChunkStore` (append-only rows as flat chunks, gather by row id), `KeyIndex`
+(open-addressing hash index assigning dense ids to distinct keys, NULLs equal), `GroupTable` (key
+index + one struct-of-arrays state per aggregate, mergeable), and a chained join table (bucket
+heads, `next` array, stored hashes, key store). Hashing follows the engine's equality (`0.0 = -0.0`,
+all NaNs equal).
 
-**Expressions.** Bound expression trees are evaluated by an `ExpressionExecutor` into vectors.
-Predicates take a separate `Select` path that produces a selection vector directly, avoiding a
-boolean vector and short-circuiting `AND` by narrowing the selection between conjuncts.
+**Expressions.** `ExpressionExecutor` evaluates a bound expression a vector at a time with typed,
+NULL-aware kernels that read through `UnifiedFormat`, so flat, constant and dictionary inputs all
+work without flattening. `AND`/`OR`/`CASE`/`COALESCE` are lazy per row. Predicates take a separate
+`Select` path that writes a selection vector directly, narrowing it between conjuncts. One
+documented difference from the row-at-a-time interpreter: in selection position `a AND b` never
+evaluates `b` for rows where `a` is NULL or FALSE (they cannot be TRUE), so a run-time error in `b`
+on such a row is raised by the interpreter but not the executor; the differential test tolerates
+exactly that case.
+
+**Optimizer** ([ADR 0006](adr/0006-rule-based-optimizer.md)): filter pushdown (outer-join aware),
+zone-map hints, greedy join ordering sized by distinct-value estimates from zone maps, OR
+factoring, `LIMIT` below projections (top-N), column pruning. Statistics-based costing is Phase 8.
+
+**Verification.** All 12 runnable TPC-H queries match DuckDB at SF0.01 / 0.1 / 1; ~240 queries in
+`tests/sql/*.test` (expected results generated by DuckDB); random expressions executor vs
+interpreter; random queries optimizer on vs off; every operator against a naive reference;
+`tools/mutation_smoke.py`. Numbers vs DuckDB are in [BENCHMARKS](BENCHMARKS.md).
+
+**Morsel-driven parallelism — [planned: Phase 6].** Sources hand out morsels (a row group, or a
+range of chunks) from a shared atomic cursor; a fixed pool of workers each run the *whole* pipeline
+on their morsel with thread-local state. Work stays cache-hot and there is no per-tuple
+synchronisation.
 
 ## Error handling
 See [ADR 0002](adr/0002-error-handling.md): exceptions for query-level errors at module
@@ -162,8 +191,8 @@ result with an error state.
 | Layer | Tool |
 |---|---|
 | Unit | GoogleTest, every format × type × null combination for data structures |
-| SQL | `sqllogictest`-style files in `tests/sql/` |
-| Differential | random + TPC-H queries run on this engine and DuckDB; results diffed |
+| SQL | `sqllogictest`-style files in `tests/sql/` (DuckDB-generated expected results) **[implemented]** |
+| Differential | 12 TPC-H queries vs DuckDB (SF0.01 in the gate, SF0.1/SF1 by hand) **[implemented]**; random expressions vs the interpreter and random queries optimizer-on vs off **[implemented]**; random SQL fuzzing vs DuckDB [planned: Phase 8] |
 | Fuzz | libFuzzer on parser, later on file-format readers |
 | Concurrency | ThreadSanitizer in CI |
 | Crash safety | deterministic fault injection through the `FileSystem` interface (Phase 7) |

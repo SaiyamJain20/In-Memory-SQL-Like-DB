@@ -159,12 +159,30 @@ TEST(Connection, LargeMultiRowInsertSpansChunks) {
     }
 }
 
-TEST(Connection, InsertSelectNeedsTheExecutor) {
+TEST(Connection, InsertSelectCopiesRowsAndReadsItsOwnSnapshot) {
     Session s;
-    s.Ok("CREATE TABLE t (a INT)");
-    QueryResult r = s.Q("INSERT INTO t SELECT a FROM t");
-    EXPECT_FALSE(r.ok());
-    EXPECT_EQ(r.error_code(), ErrorCode::NotImplemented);
+    s.Ok("CREATE TABLE t (a INT, b VARCHAR)");
+    s.Ok("INSERT INTO t VALUES (1, 'x'), (2, NULL), (3, 'z')");
+    QueryResult r = s.Ok("INSERT INTO t SELECT a + 10, b FROM t WHERE a > 1");
+    EXPECT_EQ(r.GetValue(0, 0).GetBigInt(), 2);
+    // INSERT INTO t SELECT ... FROM t reads the rows that existed when it started: no runaway loop
+    r = s.Ok("INSERT INTO t SELECT a, b FROM t");
+    EXPECT_EQ(r.GetValue(0, 0).GetBigInt(), 5);
+    EXPECT_EQ(s.Ok("SELECT count(*) FROM t").GetValue(0, 0).GetBigInt(), 10);
+}
+
+TEST(Connection, FailedInsertSelectLeavesTheTargetUntouched) {
+    Session s;
+    s.Ok("CREATE TABLE t (a INT NOT NULL)");
+    s.Ok("INSERT INTO t VALUES (1), (2)");
+    s.Ok("CREATE TABLE src (a INT)");
+    s.Ok("INSERT INTO src VALUES (5), (NULL)");
+    QueryResult r = s.Q("INSERT INTO t SELECT a FROM src");
+    EXPECT_FALSE(r.ok()) << "the NULL violates NOT NULL";
+    r = s.Q("INSERT INTO t SELECT a + 2147483647 FROM t");
+    EXPECT_FALSE(r.ok()) << "integer overflow while evaluating the SELECT";
+    EXPECT_EQ(r.error_code(), ErrorCode::Execution);
+    EXPECT_EQ(s.Ok("SELECT count(*) FROM t").GetValue(0, 0).GetBigInt(), 2);
 }
 
 // ------------------------------------------------------------------ COPY
@@ -212,7 +230,10 @@ TEST(Connection, ExplainReturnsThePlanAsRows) {
     ASSERT_EQ(r.RowCount(), 5u);
     EXPECT_EQ(r.GetValue(0, 0).GetVarchar(), "LIMIT 3");
     EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "  ORDER BY a ASC NULLS LAST");
-    EXPECT_EQ(r.GetValue(0, 4).GetVarchar(), "        SCAN t [a, b]");
+    // EXPLAIN shows the optimized plan: the filter sits on the scan, which also gets a zone-map
+    // pruning hint, and LIMIT is directly above ORDER BY (so it executes as a top-N).
+    EXPECT_EQ(r.GetValue(0, 3).GetVarchar(), "      FILTER (b > 1)");
+    EXPECT_EQ(r.GetValue(0, 4).GetVarchar(), "        SCAN t [a, b] prune(b > 1)");
     QueryResult a = s.Q("EXPLAIN ANALYZE SELECT 1");
     EXPECT_FALSE(a.ok());
     EXPECT_EQ(a.error_code(), ErrorCode::NotImplemented);
@@ -245,13 +266,18 @@ TEST(Connection, ConstantSelectsRunThroughTheScalarEvaluator) {
     EXPECT_FALSE(s.Q("SELECT CAST('x' AS INTEGER)").ok());
 }
 
-TEST(Connection, QueriesOverTablesAreBoundButNotYetExecutable) {
+TEST(Connection, QueriesOverTablesExecute) {
     Session s;
-    s.Ok("CREATE TABLE t (a INT)");
-    QueryResult r = s.Q("SELECT a FROM t");
-    EXPECT_FALSE(r.ok());
-    EXPECT_EQ(r.error_code(), ErrorCode::NotImplemented);
-    EXPECT_NE(r.error_message().find("Phase 4"), std::string::npos);
+    s.Ok("CREATE TABLE t (a INT, b VARCHAR)");
+    EXPECT_EQ(s.Ok("SELECT a FROM t").RowCount(), 0u);
+    s.Ok("INSERT INTO t VALUES (2, 'two'), (1, 'one'), (3, NULL)");
+    QueryResult r = s.Ok("SELECT b, a * 10 AS tens FROM t WHERE a >= 2 ORDER BY a DESC");
+    ASSERT_EQ(r.RowCount(), 2u);
+    EXPECT_EQ(r.names(), (std::vector<std::string>{"b", "tens"}));
+    EXPECT_TRUE(r.GetValue(0, 0).IsNull());
+    EXPECT_EQ(r.GetValue(1, 0).GetInteger(), 30);
+    EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "two");
+    EXPECT_EQ(r.GetValue(1, 1).GetInteger(), 20);
 }
 
 // ------------------------------------------------------------------ errors and scripts
@@ -300,6 +326,18 @@ TEST(Connection, LaterStatementsSeeEarlierDdl) {
     QueryResult r = s.Q("CREATE TABLE t (a INT); EXPLAIN SELECT a FROM t");
     EXPECT_TRUE(r.ok()) << r.error_message();
     EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "  SCAN t [a]");
+}
+
+TEST(Connection, ResultRenderingCanTruncateLongResults) {
+    Session s;
+    s.Ok("CREATE TABLE t (a INT)");
+    s.Ok("INSERT INTO t VALUES (1), (2), (3), (4), (5)");
+    const QueryResult r = s.Ok("SELECT a FROM t ORDER BY a");
+    EXPECT_EQ(r.ToString(2), " a\n--\n 1\n 2\n(5 rows, showing the first 2)");
+    EXPECT_EQ(r.ToString(0), " a\n--\n(5 rows, showing the first 0)");
+    EXPECT_EQ(r.ToString(5), r.ToString()) << "a limit that is not exceeded changes nothing";
+    EXPECT_EQ(r.ToString(100), r.ToString());
+    EXPECT_NE(r.ToString().find(" 5\n(5 rows)"), std::string::npos);
 }
 
 TEST(Connection, TwoConnectionsShareOneDatabase) {

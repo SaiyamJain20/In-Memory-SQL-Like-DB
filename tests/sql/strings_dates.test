@@ -1,0 +1,391 @@
+# String and date functions and operators, comparisons, casts.
+# (DuckDB's DATE + INTERVAL is a TIMESTAMP and its literal 2.5 a DECIMAL; this engine has DATE and DOUBLE.
+#  Queries cast explicitly so both engines agree: ADR 0003.)
+
+statement ok
+CREATE TABLE emp (id INTEGER NOT NULL, name VARCHAR, dept INTEGER, salary DOUBLE, hired DATE, boss INTEGER);
+
+statement ok
+INSERT INTO emp VALUES
+ (1, 'alice', 10, 5000.5, DATE '2015-03-01', NULL),
+ (2, 'bob', 10, 4200.0, DATE '2016-07-15', 1),
+ (3, 'carol', 20, 6100.25, DATE '2014-01-20', 1),
+ (4, 'dave', 20, 3900.0, DATE '2018-11-30', 3),
+ (5, 'erin', 30, 4800.75, DATE '2017-05-05', 3),
+ (6, 'frank', NULL, 3500.0, DATE '2019-02-14', 2),
+ (7, 'grace', 10, 5000.5, DATE '2020-09-09', 1),
+ (8, 'heidi', 40, NULL, DATE '2021-12-31', NULL),
+ (9, 'ivan', 20, 4200.0, DATE '2016-07-15', 3),
+ (10, 'judy', 30, NULL, DATE '2022-01-01', 5),
+ (11, 'Mallory', 50, 7000.0, DATE '2013-06-06', NULL);
+
+statement ok
+CREATE TABLE dept (id INTEGER, dname VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES (10, 'eng', 'berlin'), (20, 'ops', 'paris'), (30, 'sales', 'berlin'), (40, 'hr', NULL), (60, 'legal', 'rome');
+
+query TTT
+SELECT upper(name), lower(name), name || '!' FROM emp WHERE id <= 3 ORDER BY id;
+----
+ALICE	alice	alice!
+BOB	bob	bob!
+CAROL	carol	carol!
+
+query II
+SELECT id, length(name) FROM emp ORDER BY id;
+----
+1	5
+2	3
+3	5
+4	4
+5	4
+6	5
+7	5
+8	5
+9	4
+10	4
+11	7
+
+query IT
+SELECT id, substring(name, 2, 3) FROM emp ORDER BY id;
+----
+1	lic
+2	ob
+3	aro
+4	ave
+5	rin
+6	ran
+7	rac
+8	eid
+9	van
+10	udy
+11	all
+
+query IT
+SELECT id, substring(name, 3) FROM emp ORDER BY id;
+----
+1	ice
+2	b
+3	rol
+4	ve
+5	in
+6	ank
+7	ace
+8	idi
+9	an
+10	dy
+11	llory
+
+query IT
+SELECT id, substring(name, -2, 2) FROM emp ORDER BY id;
+----
+1	ce
+2	ob
+3	ol
+4	ve
+5	in
+6	nk
+7	ce
+8	di
+9	an
+10	dy
+11	ry
+
+query IT
+SELECT id, substring(name, 0, 3) FROM emp ORDER BY id;
+----
+1	al
+2	bo
+3	ca
+4	da
+5	er
+6	fr
+7	gr
+8	he
+9	iv
+10	ju
+11	Ma
+
+query IT
+SELECT id, substring(name, 2, 0) FROM emp ORDER BY id;
+----
+1	(empty)
+2	(empty)
+3	(empty)
+4	(empty)
+5	(empty)
+6	(empty)
+7	(empty)
+8	(empty)
+9	(empty)
+10	(empty)
+11	(empty)
+
+query T
+SELECT name FROM emp WHERE name < 'dave' ORDER BY name;
+----
+Mallory
+alice
+bob
+carol
+
+query T
+SELECT name FROM emp WHERE name >= 'g' ORDER BY name;
+----
+grace
+heidi
+ivan
+judy
+
+query T
+SELECT name FROM emp ORDER BY name;
+----
+Mallory
+alice
+bob
+carol
+dave
+erin
+frank
+grace
+heidi
+ivan
+judy
+
+query T
+SELECT name FROM emp WHERE name = 'bob' OR name = 'Mallory' ORDER BY name;
+----
+Mallory
+bob
+
+query T
+SELECT name FROM emp WHERE name LIKE '%a%a%' ORDER BY name;
+----
+
+query T
+SELECT name FROM emp WHERE name LIKE '%' ORDER BY name LIMIT 2;
+----
+Mallory
+alice
+
+query T
+SELECT name FROM emp WHERE name LIKE '' ORDER BY name;
+----
+
+query T
+SELECT city FROM dept WHERE city LIKE 'b%' ORDER BY id;
+----
+berlin
+berlin
+
+query TT
+SELECT name, 'x' || name || 'y' FROM emp WHERE id < 3 ORDER BY id;
+----
+alice	xalicey
+bob	xboby
+
+query IT
+SELECT id, hired FROM emp ORDER BY hired, id;
+----
+11	2013-06-06
+3	2014-01-20
+1	2015-03-01
+2	2016-07-15
+9	2016-07-15
+5	2017-05-05
+4	2018-11-30
+6	2019-02-14
+7	2020-09-09
+8	2021-12-31
+10	2022-01-01
+
+query IT
+SELECT id, hired FROM emp WHERE hired > DATE '2018-01-01' ORDER BY id;
+----
+4	2018-11-30
+6	2019-02-14
+7	2020-09-09
+8	2021-12-31
+10	2022-01-01
+
+query IT
+SELECT id, hired FROM emp WHERE hired BETWEEN DATE '2016-01-01' AND DATE '2017-12-31' ORDER BY id;
+----
+2	2016-07-15
+5	2017-05-05
+9	2016-07-15
+
+query IIII
+SELECT id, year(hired), month(hired), day(hired) FROM emp ORDER BY id;
+----
+1	2015	3	1
+2	2016	7	15
+3	2014	1	20
+4	2018	11	30
+5	2017	5	5
+6	2019	2	14
+7	2020	9	9
+8	2021	12	31
+9	2016	7	15
+10	2022	1	1
+11	2013	6	6
+
+query IIII
+SELECT id, extract(year FROM hired), extract(month FROM hired), extract(day FROM hired) FROM emp ORDER BY id;
+----
+1	2015	3	1
+2	2016	7	15
+3	2014	1	20
+4	2018	11	30
+5	2017	5	5
+6	2019	2	14
+7	2020	9	9
+8	2021	12	31
+9	2016	7	15
+10	2022	1	1
+11	2013	6	6
+
+query III
+SELECT id, dayofweek(hired), dayofyear(hired) FROM emp ORDER BY id;
+----
+1	0	60
+2	5	197
+3	1	20
+4	5	334
+5	5	125
+6	4	45
+7	3	253
+8	5	365
+9	5	197
+10	6	1
+11	4	157
+
+query II
+SELECT year(hired), count(*) FROM emp GROUP BY year(hired) ORDER BY 1;
+----
+2013	1
+2014	1
+2015	1
+2016	2
+2017	1
+2018	1
+2019	1
+2020	1
+2021	1
+2022	1
+
+query IT
+SELECT id, hired - DATE '2015-01-01' FROM emp ORDER BY id;
+----
+1	59
+2	561
+3	-346
+4	1429
+5	855
+6	1505
+7	2078
+8	2556
+9	561
+10	2557
+11	-574
+
+query IT
+SELECT id, hired + 30 FROM emp ORDER BY id;
+----
+1	2015-03-31
+2	2016-08-14
+3	2014-02-19
+4	2018-12-30
+5	2017-06-04
+6	2019-03-16
+7	2020-10-09
+8	2022-01-30
+9	2016-08-14
+10	2022-01-31
+11	2013-07-06
+
+query IT
+SELECT id, hired - 365 FROM emp ORDER BY id;
+----
+1	2014-03-01
+2	2015-07-16
+3	2013-01-20
+4	2017-11-30
+5	2016-05-05
+6	2018-02-14
+7	2019-09-10
+8	2020-12-31
+9	2015-07-16
+10	2021-01-01
+11	2012-06-06
+
+query TTT
+SELECT DATE '2024-02-29', DATE '2024-02-29' + 365, DATE '1999-12-31' + 1;
+----
+2024-02-29	2025-02-28	2000-01-01
+
+query TT
+SELECT CAST(DATE '2000-01-31' + INTERVAL '1' MONTH AS DATE), CAST(DATE '2000-03-31' - INTERVAL '1' MONTH AS DATE);
+----
+2000-02-29	2000-02-29
+
+query TT
+SELECT CAST(DATE '1998-12-01' - INTERVAL '90' DAY AS DATE), CAST(DATE '1994-01-01' + INTERVAL '1' YEAR AS DATE);
+----
+1998-09-02	1995-01-01
+
+query T
+SELECT max(hired) FROM emp;
+----
+2022-01-01
+
+query T
+SELECT min(hired) FROM emp WHERE dept = 20;
+----
+2014-01-20
+
+query IT
+SELECT id, CAST(hired AS VARCHAR) FROM emp WHERE id < 4 ORDER BY id;
+----
+1	2015-03-01
+2	2016-07-15
+3	2014-01-20
+
+query TTI
+SELECT CAST('2020-03-04' AS DATE), CAST(12 AS VARCHAR), CAST('42' AS INTEGER);
+----
+2020-03-04	12	42
+
+query IRT
+SELECT CAST(7 AS DOUBLE), CAST(CAST(2.5 AS DOUBLE) AS INTEGER) + 0, CAST(CAST(3.5 AS DOUBLE) AS INTEGER) + 0;
+----
+7.0	2	4
+
+query II
+SELECT CAST(CAST(-2.5 AS DOUBLE) AS INTEGER), CAST(CAST(2.4 AS DOUBLE) AS BIGINT);
+----
+-2	2
+
+query T
+SELECT CASE WHEN CAST('abc' AS VARCHAR) = 'abc' THEN 'same' END;
+----
+same
+
+statement error
+SELECT CAST('abc' AS INTEGER);
+
+statement error
+SELECT 1 / 0 + CAST('x' AS INTEGER);
+
+statement error
+SELECT 2147483647 + 1;
+
+statement error
+SELECT nosuchcolumn FROM emp;
+
+statement error
+SELECT name FROM nosuchtable;
+
+statement error
+SELECT id, count(*) FROM emp;

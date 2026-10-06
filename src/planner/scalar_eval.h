@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/string_ops.h" // LikeMatch lives there (shared with the vectorized kernels)
 #include "planner/bound_expression.h"
 
 #include <span>
@@ -21,9 +22,5 @@ Value EvaluateScalar(const BoundExpr& expr, std::span<const Value> row);
 inline Value EvaluateConstant(const BoundExpr& expr) {
     return EvaluateScalar(expr, {});
 }
-
-// SQL LIKE: '%' matches any sequence, '_' any single (UTF-8) character; there is no escape
-// character. Case-sensitive.
-bool LikeMatch(std::string_view text, std::string_view pattern);
 
 } // namespace cdb

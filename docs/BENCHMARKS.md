@@ -90,3 +90,78 @@ does not (the views are precomputed). The numbers that matter for later phases w
 the operators *on top of* the scan (Phase 4) and of compressed scans (Phase 5); this table is the
 baseline they will be judged against. Zone-map pruning scales as expected with the fraction of
 groups skipped, with a ~1 µs floor from the scan setup.
+
+
+---
+
+## Phase 4 — TPC-H, single thread, vs DuckDB
+
+The first end-to-end numbers: the 12 TPC-H queries this engine can run (the other 10 need subqueries,
+Phase 8), **all verified to return DuckDB's answers** at SF0.01, SF0.1 and SF1
+(`CDB_TPCH_SF=1 CDB_REQUIRE_TPCH=1 build/release/tests/cdb_tests --gtest_filter='*TpchDifferential*'`).
+Both engines run **one thread** (this engine is single-threaded until Phase 6; DuckDB is pinned with
+`PRAGMA threads=1`), on the same machine, one after the other.
+
+| | |
+|---|---|
+| This engine | commit of the Phase 4 branch, GCC 13.3 `-O3 -DNDEBUG`, `build/release/bench/cdb_tpch --sf N --runs 5`; loaded from DuckDB-generated CSV (`tools/tpch_data.py`); DECIMAL columns are DOUBLE (ADR 0003) |
+| DuckDB | 1.5.6 (pinned in `tools/requirements-dev.txt`), `tools/tpch_duckdb_time.py --sf N --threads 1 --runs 5`; data from its own `dbgen`, in its own columnar storage |
+| What is timed | `Connection::Query` end to end (parse, bind, optimize, plan, execute, materialise the result) vs `con.execute(sql).fetchall()`. "min" and "median" are over runs 2-5; the first (cold) run is excluded. Load time is not included. |
+| Memory | SF1 peak RSS after load 1.47 GB, after all queries 1.69 GB (DuckDB's footprint was not measured) |
+
+### SF0.1 (600,572 lineitem rows)
+| Query | rows | cdb min ms | cdb median ms | DuckDB 1-thread min ms | cdb / DuckDB |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 4 | 41.5 | 41.7 | 21.7 | 1.9x |
+| Q3 | 10 | 7.2 | 7.5 | 6.7 | 1.1x |
+| Q5 | 5 | 16.6 | 17.4 | 6.8 | 2.4x |
+| Q6 | 1 | 4.3 | 4.5 | 2.8 | 1.5x |
+| Q7 | 4 | 43.7 | 44.5 | 9.0 | 4.9x |
+| Q8 | 2 | 19.0 | 19.2 | 7.1 | 2.7x |
+| Q9 | 175 | 61.5 | 65.3 | 19.9 | 3.1x |
+| Q10 | 20 | 18.0 | 20.8 | 22.1 | 0.8x |
+| Q12 | 2 | 11.4 | 11.4 | 11.9 | 1.0x |
+| Q13 | 37 | 51.7 | 56.3 | 14.3 | 3.6x |
+| Q14 | 1 | 3.4 | 3.5 | 4.2 | 0.8x |
+| Q19 | 1 | 11.9 | 12.1 | 18.1 | 0.7x |
+| **geometric mean** | | | | | **1.7x** |
+
+### SF1 (6,001,215 lineitem rows)
+| Query | rows | cdb min ms | cdb median ms | DuckDB 1-thread min ms | cdb / DuckDB |
+|---|---:|---:|---:|---:|---:|
+| Q1 | 4 | 401.0 | 410.5 | 207.8 | 1.9x |
+| Q3 | 10 | 149.8 | 158.0 | 51.7 | 2.9x |
+| Q5 | 5 | 290.0 | 301.9 | 60.3 | 4.8x |
+| Q6 | 1 | 43.3 | 43.9 | 22.9 | 1.9x |
+| Q7 | 4 | 618.7 | 623.5 | 60.0 | 10.3x |
+| Q8 | 2 | 286.6 | 289.0 | 35.4 | 8.1x |
+| Q9 | 175 | 2488.0 | 2580.9 | 226.9 | 11.0x |
+| Q10 | 20 | 247.4 | 249.4 | 139.3 | 1.8x |
+| Q12 | 2 | 117.4 | 119.3 | 99.3 | 1.2x |
+| Q13 | 42 | 810.4 | 824.8 | 188.2 | 4.3x |
+| Q14 | 1 | 50.7 | 55.3 | 36.9 | 1.4x |
+| Q19 | 1 | 203.5 | 207.0 | 170.9 | 1.2x |
+| **geometric mean** | | | | | **3.1x** |
+
+SF1 load: lineitem 5.1 s, orders 1.0 s, partsupp 0.5 s (CSV parse, single-threaded).
+
+**Reading these numbers honestly.** The geometric mean over the 12 queries is 1.7x at SF0.1 and
+3.1x at SF1 - DuckDB is faster, as it should be at this stage. Scan/aggregate queries (Q1, Q6, Q12,
+Q14, Q19) are within 1.2-1.9x. The gap opens with the multi-way joins at SF1 (Q7 10x, Q8 8x, Q9 11x), while at SF0.1 the same
+queries are 2.7-4.9x. *Hypothesis, not yet measured:* the join build side is a chained table (bucket
+heads, a `next` array, a `hashes` array and a separate key store), so a probe touches several cache lines
+at random, which costs little while the tables fit in cache (SF0.1) and a lot when they do not (SF1);
+a layout that keeps hash and key together in the bucket should help. Q9 is also hurt by a crude row estimate for `LIKE '%green%'` (fixed
+selectivity 0.2; measured: 10,664 of 200,000 parts, 5.3%), which puts `part` too late in the join order. Both are targets for
+Phase 5 (join hash table layout, hashing) and Phase 8 (statistics). The target for the project is
+single-thread TPC-H within ~3x of DuckDB; the SF1 geometric mean is at that line, but individual
+queries are not. These numbers are one run on a desktop with frequency scaling and other load (see
+Environment); differences under ~15% are noise.
+
+### Optimizations found by profiling (callgrind, Q9 at SF0.1)
+| Change | Effect |
+|---|---|
+| `Vector::Reset()` no longer allocates (and zero-fills) a new buffer when it detaches from a shared one; storage is allocated on first access | `memset` fell from 35% to 12% of all instructions (8.9 G -> 2.2 G); SF0.1 min ms: Q3 9.4 -> 7.4, Q5 21 -> 17, Q8 27.8 -> 19, Q10 25.7 -> 19.6, Q14 4.4 -> 3.2 |
+| Join ordering sized by distinct-value estimates (zone-map ranges) instead of relation size alone | Q5 at SF0.1: 2693 ms -> 21 ms (a 72 M-row intermediate result avoided) |
+| Factoring conjuncts common to all branches of an `OR` (Q19's `p_partkey = l_partkey`) | Q19 at SF0.01: 46 s (nested loop over a cross product) -> 9 ms |
+| *Tried, not kept:* leaving `SelectionVector` storage uninitialised | no measurable change, so the zero-initialised contract stays |

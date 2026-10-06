@@ -29,7 +29,7 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ done (exit criteria ve
 | 1 | Core data model: types, vectors, chunks | ✅ | ~1 wk |
 | 2 | Columnar storage and catalog | ✅ | ~1 wk |
 | 3 | SQL front end: lexer, parser, binder, logical plan | ✅ | ~1 wk |
-| 4 | Vectorized execution: expressions, operators, pipelines (**v0.1**) | ⬜ | ~1.5 wk |
+| 4 | Vectorized execution: expressions, operators, pipelines (**v0.1**) | ✅ | ~1.5 wk |
 | 5 | Compression, zone maps, SIMD kernels | ⬜ | ~1.5 wk |
 | 6 | Morsel-driven parallelism | ⬜ | ~1 wk |
 | 7 | Persistence: on-disk format, WAL, checkpoints | ⬜ | ~1 wk |
@@ -85,6 +85,14 @@ DuckDB's generator.
 
 **Exit:** TPC-H Q1 and Q6 (plus the join-heavy Q3/Q5/Q10/Q12/Q14 as they become expressible) match
 DuckDB at SF0.1 and SF1; first honest numbers in `BENCHMARKS.md`.
+
+**Done** (verified): all 12 TPC-H queries that need no subqueries match DuckDB at SF0.01, SF0.1 and
+SF1; single-thread geometric mean vs DuckDB 1.7x (SF0.1) / 3.1x (SF1), see `BENCHMARKS.md`. Semi/anti
+joins exist in the operator but are only reachable once subqueries are unnested (Phase 8); `FULL`
+joins and `EXPLAIN ANALYZE` are not implemented. Carried into later phases from what Phase 4
+measured: the join hash table layout and hashing (Phase 5: SIMD/cache behaviour, the SF1 gap on
+Q7/Q8/Q9), parallel CSV loading (Phase 6: lineitem SF1 takes 5 s to load on one thread), column
+statistics and a real selectivity model for `LIKE` (Phase 8).
 
 ### Phase 5 — Compression, zone maps, SIMD
 Lightweight encodings chosen per segment (constant, RLE, dictionary, frame-of-reference +

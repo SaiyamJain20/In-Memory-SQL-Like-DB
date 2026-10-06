@@ -1,0 +1,368 @@
+# Three-valued logic and NULL handling in filters, aggregates, ordering, grouping and joins.
+
+statement ok
+CREATE TABLE emp (id INTEGER NOT NULL, name VARCHAR, dept INTEGER, salary DOUBLE, hired DATE, boss INTEGER);
+
+statement ok
+INSERT INTO emp VALUES
+ (1, 'alice', 10, 5000.5, DATE '2015-03-01', NULL),
+ (2, 'bob', 10, 4200.0, DATE '2016-07-15', 1),
+ (3, 'carol', 20, 6100.25, DATE '2014-01-20', 1),
+ (4, 'dave', 20, 3900.0, DATE '2018-11-30', 3),
+ (5, 'erin', 30, 4800.75, DATE '2017-05-05', 3),
+ (6, 'frank', NULL, 3500.0, DATE '2019-02-14', 2),
+ (7, 'grace', 10, 5000.5, DATE '2020-09-09', 1),
+ (8, 'heidi', 40, NULL, DATE '2021-12-31', NULL),
+ (9, 'ivan', 20, 4200.0, DATE '2016-07-15', 3),
+ (10, 'judy', 30, NULL, DATE '2022-01-01', 5),
+ (11, 'Mallory', 50, 7000.0, DATE '2013-06-06', NULL);
+
+statement ok
+CREATE TABLE dept (id INTEGER, dname VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES (10, 'eng', 'berlin'), (20, 'ops', 'paris'), (30, 'sales', 'berlin'), (40, 'hr', NULL), (60, 'legal', 'rome');
+
+query I
+SELECT count(*) FROM emp WHERE dept = NULL;
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE dept <> 10;
+----
+7
+
+query I
+SELECT count(*) FROM emp WHERE NOT (dept <> 10);
+----
+3
+
+query I
+SELECT count(*) FROM emp WHERE dept = 10 OR dept IS NULL;
+----
+4
+
+query III
+SELECT count(*), count(dept), count(salary) FROM emp;
+----
+11	10	9
+
+query RRR
+SELECT sum(salary), avg(salary), min(salary) FROM emp;
+----
+43702.0	4855.777777777777	3500.0
+
+query IIIII
+SELECT count(*), count(boss), sum(boss), min(boss), max(boss) FROM emp;
+----
+11	8	19	1	5
+
+query II
+SELECT dept, count(*) FROM emp GROUP BY dept ORDER BY dept NULLS LAST;
+----
+10	3
+20	3
+30	2
+40	1
+50	1
+NULL	1
+
+query IR
+SELECT dept, sum(salary) FROM emp GROUP BY dept ORDER BY dept NULLS FIRST;
+----
+NULL	3500.0
+10	14201.0
+20	14200.25
+30	4800.75
+40	NULL
+50	7000.0
+
+query IT
+SELECT boss, count(*) FROM emp GROUP BY boss ORDER BY boss NULLS LAST;
+----
+1	3
+2	1
+3	3
+5	1
+NULL	3
+
+query T
+SELECT DISTINCT boss IS NULL FROM emp ORDER BY 1;
+----
+false
+true
+
+query IT
+SELECT id, CASE WHEN dept = 10 THEN 'ten' WHEN dept <> 10 THEN 'other' ELSE 'null' END FROM emp ORDER BY id;
+----
+1	ten
+2	ten
+3	other
+4	other
+5	other
+6	null
+7	ten
+8	other
+9	other
+10	other
+11	other
+
+query IT
+SELECT id, dept = 10 AND salary > 4000 FROM emp ORDER BY id;
+----
+1	true
+2	true
+3	false
+4	false
+5	false
+6	false
+7	true
+8	false
+9	false
+10	false
+11	false
+
+query IT
+SELECT id, dept = 10 OR salary > 4000 FROM emp ORDER BY id;
+----
+1	true
+2	true
+3	true
+4	false
+5	true
+6	NULL
+7	true
+8	NULL
+9	true
+10	NULL
+11	true
+
+query IT
+SELECT id, NOT (salary > 4000) FROM emp ORDER BY id;
+----
+1	false
+2	false
+3	false
+4	true
+5	false
+6	true
+7	false
+8	NULL
+9	false
+10	NULL
+11	false
+
+query IT
+SELECT id, dept IN (10, 20) FROM emp ORDER BY id;
+----
+1	true
+2	true
+3	true
+4	true
+5	false
+6	NULL
+7	true
+8	false
+9	true
+10	false
+11	false
+
+query IT
+SELECT id, dept IN (10, NULL) FROM emp ORDER BY id;
+----
+1	true
+2	true
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	true
+8	NULL
+9	NULL
+10	NULL
+11	NULL
+
+query IT
+SELECT id, dept NOT IN (10, NULL) FROM emp ORDER BY id;
+----
+1	false
+2	false
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	false
+8	NULL
+9	NULL
+10	NULL
+11	NULL
+
+query IT
+SELECT id, salary BETWEEN 4000 AND 5000 FROM emp ORDER BY id;
+----
+1	false
+2	true
+3	false
+4	false
+5	true
+6	false
+7	false
+8	NULL
+9	true
+10	NULL
+11	false
+
+query IR
+SELECT id, salary + boss FROM emp ORDER BY id;
+----
+1	NULL
+2	4201.0
+3	6101.25
+4	3903.0
+5	4803.75
+6	3502.0
+7	5001.5
+8	NULL
+9	4203.0
+10	NULL
+11	NULL
+
+query IT
+SELECT id, name || '-' || dept FROM emp ORDER BY id;
+----
+1	alice-10
+2	bob-10
+3	carol-20
+4	dave-20
+5	erin-30
+6	NULL
+7	grace-10
+8	heidi-40
+9	ivan-20
+10	judy-30
+11	Mallory-50
+
+query IT
+SELECT id, coalesce(dept, boss, -1) FROM emp ORDER BY id;
+----
+1	10
+2	10
+3	20
+4	20
+5	30
+6	2
+7	10
+8	40
+9	20
+10	30
+11	50
+
+query IT
+SELECT e.id, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id ORDER BY e.id;
+----
+1	eng
+2	eng
+3	ops
+4	ops
+5	sales
+6	NULL
+7	eng
+8	hr
+9	ops
+10	sales
+11	NULL
+
+query IT
+SELECT e.id, d.dname FROM emp e JOIN dept d ON e.dept = d.id ORDER BY e.id;
+----
+1	eng
+2	eng
+3	ops
+4	ops
+5	sales
+7	eng
+8	hr
+9	ops
+10	sales
+
+query IT
+SELECT d.id, e.name FROM dept d LEFT JOIN emp e ON e.dept = d.id ORDER BY d.id, e.name;
+----
+10	alice
+10	bob
+10	grace
+20	carol
+20	dave
+20	ivan
+30	erin
+30	judy
+40	heidi
+60	NULL
+
+query IT
+SELECT d.id, e.name FROM dept d RIGHT JOIN emp e ON e.dept = d.id ORDER BY e.id;
+----
+10	alice
+10	bob
+20	carol
+20	dave
+30	erin
+NULL	frank
+10	grace
+40	heidi
+20	ivan
+30	judy
+NULL	Mallory
+
+query II
+SELECT count(*), count(d.id) FROM emp e LEFT JOIN dept d ON e.dept = d.id;
+----
+11	9
+
+query T
+SELECT name FROM emp ORDER BY dept NULLS FIRST, id;
+----
+frank
+alice
+bob
+grace
+carol
+dave
+ivan
+erin
+judy
+heidi
+Mallory
+
+query IR
+SELECT salary, count(*) FROM emp GROUP BY salary ORDER BY salary NULLS LAST;
+----
+3500.0	1
+3900.0	1
+4200.0	2
+4800.75	1
+5000.5	2
+6100.25	1
+7000.0	1
+NULL	2
+
+query IIRR
+SELECT sum(boss), sum(dept), avg(boss), avg(dept) FROM emp WHERE id > 100;
+----
+NULL	NULL	NULL	NULL
+
+query T
+SELECT min(name) FROM emp WHERE id > 100;
+----
+NULL
+
+query II
+SELECT count(DISTINCT dept), count(DISTINCT boss) FROM emp;
+----
+5	4
+
+query RR
+SELECT sum(DISTINCT salary), avg(DISTINCT salary) FROM emp;
+----
+34501.5	4928.785714285715

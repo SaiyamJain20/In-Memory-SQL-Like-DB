@@ -1,0 +1,19 @@
+name: Generate TPC-H test data
+description: >
+  Generates TPC-H SF0.01 data and DuckDB's reference answers (tools/tpch_data.py) for the
+  differential tests, and makes a missing data set a test failure instead of a skip.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install DuckDB (pinned)
+      shell: bash
+      run: pip install "$(grep '^duckdb==' tools/requirements-dev.txt)"
+    - name: Generate data and reference answers
+      shell: bash
+      run: python tools/tpch_data.py --sf 0.01
+    - name: Require the data in tests
+      shell: bash
+      run: echo "CDB_REQUIRE_TPCH=1" >> "$GITHUB_ENV"

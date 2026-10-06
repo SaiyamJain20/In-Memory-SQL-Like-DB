@@ -1,0 +1,229 @@
+# Larger tables: queries cross the 2048-row vector size and the 122,880-row row-group boundary
+# (the table is grown to 131,072 rows by repeated INSERT ... SELECT doubling).
+
+statement ok
+CREATE TABLE nums (n INTEGER NOT NULL, g INTEGER, v DOUBLE, s VARCHAR);
+
+statement ok
+INSERT INTO nums VALUES (0, 0, 0.0, 'k0');
+
+statement ok
+INSERT INTO nums SELECT n + 1, (n + 1) % 97, CAST((n + 1) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 1) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 2, (n + 2) % 97, CAST((n + 2) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 2) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 4, (n + 4) % 97, CAST((n + 4) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 4) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 8, (n + 8) % 97, CAST((n + 8) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 8) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 16, (n + 16) % 97, CAST((n + 16) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 16) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 32, (n + 32) % 97, CAST((n + 32) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 32) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 64, (n + 64) % 97, CAST((n + 64) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 64) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 128, (n + 128) % 97, CAST((n + 128) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 128) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 256, (n + 256) % 97, CAST((n + 256) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 256) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 512, (n + 512) % 97, CAST((n + 512) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 512) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 1024, (n + 1024) % 97, CAST((n + 1024) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 1024) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 2048, (n + 2048) % 97, CAST((n + 2048) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 2048) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 4096, (n + 4096) % 97, CAST((n + 4096) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 4096) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 8192, (n + 8192) % 97, CAST((n + 8192) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 8192) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 16384, (n + 16384) % 97, CAST((n + 16384) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 16384) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 32768, (n + 32768) % 97, CAST((n + 32768) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 32768) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+INSERT INTO nums SELECT n + 65536, (n + 65536) % 97, CAST((n + 65536) % 13 AS DOUBLE) * 0.25, 'k' || CAST((n + 65536) % 10 AS VARCHAR) FROM nums;
+
+statement ok
+CREATE TABLE labels (g INTEGER, label VARCHAR);
+
+statement ok
+INSERT INTO labels SELECT g, 'label-' || CAST(g AS VARCHAR) FROM nums WHERE n < 97;
+
+query IIRI
+SELECT count(*), sum(n), sum(v), max(n) FROM nums;
+----
+131072	8589869056	196602.75	131071
+
+query RRI
+SELECT min(v), max(v), count(DISTINCT g) FROM nums;
+----
+0.0	3.0	97
+
+query II
+SELECT g, count(*) FROM nums GROUP BY g ORDER BY g LIMIT 5;
+----
+0	1352
+1	1352
+2	1352
+3	1352
+4	1352
+
+query IR
+SELECT g, sum(v) FROM nums GROUP BY g ORDER BY sum(v) DESC, g LIMIT 7;
+----
+0	2028.0
+1	2028.0
+2	2028.0
+3	2028.0
+4	2028.0
+5	2028.0
+6	2028.0
+
+query TI
+SELECT s, count(*) FROM nums GROUP BY s ORDER BY s;
+----
+k0	13108
+k1	13108
+k2	13107
+k3	13107
+k4	13107
+k5	13107
+k6	13107
+k7	13107
+k8	13107
+k9	13107
+
+query II
+SELECT count(*), count(DISTINCT s) FROM nums WHERE n >= 100000;
+----
+31072	10
+
+query I
+SELECT count(*) FROM nums WHERE n >= 125000;
+----
+6072
+
+query I
+SELECT count(*) FROM nums WHERE n BETWEEN 122870 AND 122890;
+----
+21
+
+query I
+SELECT count(*) FROM nums WHERE n = 122879 OR n = 122880 OR n = 2047 OR n = 2048;
+----
+4
+
+query II
+SELECT n, g FROM nums WHERE n % 40000 = 7 ORDER BY n;
+----
+7	7
+40007	43
+80007	79
+120007	18
+
+query IT
+SELECT n, s FROM nums ORDER BY n DESC LIMIT 5;
+----
+131071	k1
+131070	k0
+131069	k9
+131068	k8
+131067	k7
+
+query IR
+SELECT n, v FROM nums ORDER BY v DESC, n LIMIT 5 OFFSET 20;
+----
+272	3.0
+285	3.0
+298	3.0
+311	3.0
+324	3.0
+
+query IR
+SELECT n, v FROM nums WHERE g = 5 ORDER BY n LIMIT 3 OFFSET 1000;
+----
+97005	3.0
+97102	1.25
+97199	2.75
+
+query I
+SELECT count(*) FROM nums WHERE v > 2.0 AND s = 'k3';
+----
+4033
+
+query I
+SELECT count(*) FROM nums WHERE s LIKE 'k1%' OR s LIKE '%7';
+----
+26215
+
+query TII
+SELECT l.label, count(*), sum(n.n) FROM nums n JOIN labels l ON n.g = l.g WHERE l.g < 4 GROUP BY l.label ORDER BY l.label;
+----
+label-0	1352	88587772
+label-1	1352	88589124
+label-2	1352	88590476
+label-3	1352	88591828
+
+query II
+SELECT count(*), count(l.label) FROM nums n LEFT JOIN labels l ON n.g = l.g AND l.g < 50;
+----
+131072	67575
+
+query T
+SELECT l.label FROM labels l JOIN nums n ON n.n = l.g + 100000 ORDER BY l.g LIMIT 4;
+----
+label-0
+label-1
+label-2
+label-3
+
+query I
+SELECT count(*) FROM (SELECT DISTINCT g, s FROM nums) t;
+----
+970
+
+query II
+SELECT count(*), sum(c) FROM (SELECT g, count(*) AS c FROM nums GROUP BY g HAVING count(*) > 1352) t;
+----
+0	NULL
+
+query IIR
+SELECT a.g, count(*), sum(a.v) FROM nums a WHERE a.n < 5000 GROUP BY a.g ORDER BY a.g LIMIT 3;
+----
+0	52	78.0
+1	52	78.0
+2	52	78.0
+
+statement ok
+CREATE TABLE copy_of_nums (n INTEGER NOT NULL, g INTEGER, v DOUBLE, s VARCHAR);
+
+statement ok
+INSERT INTO copy_of_nums SELECT n, g, v, s FROM nums WHERE n % 3 = 0;
+
+query IIR
+SELECT count(*), sum(n), sum(v) FROM copy_of_nums;
+----
+43691	2863289685	65535.25
+
+statement ok
+INSERT INTO copy_of_nums SELECT n + 1000000, g, v, s FROM copy_of_nums WHERE g = 1;
+
+query II
+SELECT count(*), max(n) FROM copy_of_nums;
+----
+44141	1130854
