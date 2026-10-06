@@ -52,8 +52,8 @@ std::string PhysicalTableScan::Describe() const {
 namespace {
 struct ScanGlobalState final : GlobalSourceState {
     ScanGlobalState(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> columns,
-                    std::vector<TableFilter> filters)
-        : scan(std::move(snapshot), std::move(columns), std::move(filters)) {}
+                    std::vector<TableFilter> filters, size_t threads)
+        : scan(std::move(snapshot), std::move(columns), std::move(filters), 0, threads) {}
     MorselScan scan; // the cursor over morsels is shared by every thread
 };
 // The morsel a thread is working through (it reads one vector per GetData call).
@@ -66,7 +66,7 @@ struct ScanLocalState final : LocalSourceState {
 } // namespace
 
 std::unique_ptr<GlobalSourceState> PhysicalTableScan::GetGlobalSourceState(GlobalSinkState*) {
-    return std::make_unique<ScanGlobalState>(snapshot_, column_ids_, filters_);
+    return std::make_unique<ScanGlobalState>(snapshot_, column_ids_, filters_, threads_);
 }
 std::unique_ptr<LocalSourceState> PhysicalTableScan::GetLocalSourceState(GlobalSourceState&) {
     return std::make_unique<ScanLocalState>();

@@ -98,9 +98,17 @@ class MorselScan {
     static idx_t DefaultMorselRows() noexcept;
     static void SetDefaultMorselRows(idx_t rows) noexcept; // 0 restores the built-in default
 
-    // `morsel_rows` must be a positive multiple of kVectorSize; 0 means DefaultMorselRows().
+    // Morsels per thread a scan aims for when it picks the morsel size itself, so that a small
+    // table still keeps every thread busy and the last morsels even out the finish.
+    static constexpr idx_t kMorselsPerThread = 4;
+
+    // `morsel_rows` must be a positive multiple of kVectorSize; 0 means DefaultMorselRows(). When
+    // it is 0, nothing set the default explicitly (SetDefaultMorselRows, CDB_MORSEL_ROWS) and more
+    // than one `threads` will read the scan, the morsel size shrinks (never below one vector) so
+    // that there are about kMorselsPerThread morsels per thread: a 15,000-row table is then eight
+    // morsels, not one that a single thread must read while the rest of the pool idles.
     MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> column_ids,
-               std::vector<TableFilter> filters = {}, idx_t morsel_rows = 0);
+               std::vector<TableFilter> filters = {}, idx_t morsel_rows = 0, size_t threads = 1);
 
     const std::vector<LogicalType>& types() const noexcept { return types_; }
     idx_t MorselCount() const noexcept { return morsels_.size(); }

@@ -104,6 +104,9 @@ class PhysicalOperator {
     virtual bool ParallelSource() const { return false; }
     // How many threads can usefully share this source (e.g. its number of morsels).
     virtual idx_t MaxSourceThreads(GlobalSourceState&) const { return 1; }
+    // Told by the executor, before GetGlobalSourceState(), how many threads will read the source,
+    // so that it can cut its work into enough pieces (a table scan sizes its morsels by it).
+    virtual void SetThreadHint(size_t) {}
 
     // ---- streaming role -----------------------------------------------------------------
     // `sink_state` is this operator's global sink state if it is also a sink in another pipeline

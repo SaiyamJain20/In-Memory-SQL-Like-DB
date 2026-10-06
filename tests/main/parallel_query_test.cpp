@@ -20,10 +20,12 @@ namespace {
 
 // One-vector morsels and every parallel threshold at 1 for the life of the object, so even this
 // modest table is cut into many morsels, merged by partition, joined and sorted in parallel.
+// `one_vector_morsels` false leaves the morsel size to the scan (built-in default, sized by
+// threads).
 class ForceParallelPaths {
   public:
-    ForceParallelPaths() {
-        MorselScan::SetDefaultMorselRows(kVectorSize);
+    explicit ForceParallelPaths(bool one_vector_morsels = true) {
+        MorselScan::SetDefaultMorselRows(one_vector_morsels ? kVectorSize : 0);
         PhysicalHashAggregate::SetMinGroupsToPartition(1);
         PhysicalHashJoin::SetMinRowsToParallelize(1);
         SortBuffer::SetMinRowsToSortInParallel(1);
@@ -43,9 +45,9 @@ void MustSucceed(Connection& conn, const std::string& sql) {
     ASSERT_TRUE(r.ok()) << sql << ": " << r.error_message();
 }
 
-// 100 rows doubled ten times by INSERT ... SELECT = 102,400 rows with unique, ascending ids.
-// d holds multiples of 0.25 so floating-point sums are exact in any order.
-void Populate(Connection& conn) {
+// 100 rows doubled `rounds` times by INSERT ... SELECT (ten: 102,400 rows) with unique, ascending
+// ids. d holds multiples of 0.25 so floating-point sums are exact in any order.
+void Populate(Connection& conn, int rounds = 10) {
     MustSucceed(conn, "CREATE TABLE t (id BIGINT, g INTEGER, a INTEGER, s VARCHAR, d DOUBLE)");
     std::string insert = "INSERT INTO t VALUES ";
     for (int i = 0; i < 100; i++) {
@@ -57,7 +59,7 @@ void Populate(Connection& conn) {
     }
     MustSucceed(conn, insert);
     int64_t rows = 100;
-    for (int round = 0; round < 10; round++) {
+    for (int round = 0; round < rounds; round++) {
         MustSucceed(conn,
                     "INSERT INTO t SELECT id + " + std::to_string(rows) + ", g, a, s, d FROM t");
         rows *= 2;
@@ -105,6 +107,28 @@ TEST(ParallelQuery, TheSameQueriesGiveTheSameAnswersOnOneAndFourThreads) {
         ASSERT_TRUE(a.ok()) << sql << ": " << a.error_message();
         ASSERT_TRUE(b.ok()) << sql << ": " << b.error_message();
         EXPECT_EQ(b.ToString(), a.ToString()) << sql;
+    }
+}
+
+TEST(ParallelQuery, ASmallTableIsSplitAcrossThreadsAndGivesTheSameAnswers) {
+    // The built-in morsel size, not the forced one: a 12,800-row table is a single 16,384-row
+    // morsel unless the scan sizes its morsels by the thread count.
+    const ForceParallelPaths force(false);
+    Database one(1), eight(8);
+    Connection c1(one), c8(eight);
+    Populate(c1, 7);
+    Populate(c8, 7);
+    ASSERT_EQ(c8.Query("SELECT count(*) FROM t").GetValue(0, 0), Value::BigInt(12800));
+    for (const char* sql : kQueries) {
+        const QueryResult a = c1.Query(sql), b = c8.Query(sql);
+        ASSERT_TRUE(a.ok()) << sql << ": " << a.error_message();
+        ASSERT_TRUE(b.ok()) << sql << ": " << b.error_message();
+        EXPECT_EQ(b.ToString(), a.ToString()) << sql;
+    }
+    const std::vector<int64_t> ids = Ids(c8, "SELECT id FROM t WHERE a > 5 AND g < 50");
+    ASSERT_GT(ids.size(), 1000U);
+    for (size_t i = 1; i < ids.size(); i++) {
+        ASSERT_LT(ids[i - 1], ids[i]) << "table order across the adaptive morsels, row " << i;
     }
 }
 

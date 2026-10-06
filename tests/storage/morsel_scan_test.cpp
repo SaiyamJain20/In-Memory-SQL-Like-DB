@@ -270,4 +270,151 @@ TEST(MorselScan, ASnapshotIsUnaffectedByLaterAppends) {
     ExpectColumnsEqual(Concatenate(ReadWithThreads(scan, 4), scan.types().size()), b.model.cols);
 }
 
+// ---------------------------------------------------------------- adaptive morsel size
+
+namespace {
+
+// Runs with the built-in morsel size even when the test run set one (CDB_MORSEL_ROWS in the
+// -parallel presets), restoring that setting afterwards.
+class BuiltInMorselSize {
+  public:
+    BuiltInMorselSize() : saved_(MorselScan::DefaultMorselRows()) {
+        MorselScan::SetDefaultMorselRows(0);
+    }
+    ~BuiltInMorselSize() {
+        MorselScan::SetDefaultMorselRows(saved_ == MorselScan::kDefaultMorselRows ? 0 : saved_);
+    }
+    BuiltInMorselSize(const BuiltInMorselSize&) = delete;
+    BuiltInMorselSize& operator=(const BuiltInMorselSize&) = delete;
+
+  private:
+    idx_t saved_;
+};
+
+// The rule, written out independently of the implementation.
+idx_t ExpectedMorselRows(idx_t rows, size_t threads) {
+    if (threads <= 1) {
+        return MorselScan::kDefaultMorselRows;
+    }
+    const idx_t even = AlignUp(rows / (threads * MorselScan::kMorselsPerThread), kVectorSize);
+    return std::clamp<idx_t>(even, kVectorSize, MorselScan::kDefaultMorselRows);
+}
+
+idx_t ExpectedMorselCount(const TableSnapshot& snap, idx_t morsel_rows) {
+    idx_t n = 0;
+    for (idx_t g = 0; g < snap.row_group_count(); g++) {
+        n += (snap.row_group(g).count() + morsel_rows - 1) / morsel_rows;
+    }
+    return n;
+}
+
+} // namespace
+
+TEST(MorselScan, ASmallTableIsCutIntoMorselsForEveryThread) {
+    const BuiltInMorselSize built_in;
+    const Built b = BuildTable(15000, kRowGroupSize, 31);
+    const auto snap = b.table->Snapshot();
+    {
+        MorselScan one(snap, {0});
+        EXPECT_EQ(one.MorselCount(), 1U) << "one thread: the built-in size, a single morsel";
+        MorselScan one_explicit(snap, {0}, {}, 0, 1);
+        EXPECT_EQ(one_explicit.MorselCount(), 1U);
+    }
+    for (const size_t threads : {size_t{2}, size_t{4}, size_t{8}, size_t{16}}) {
+        MorselScan scan(snap, test::AllColumns(*snap), {}, 0, threads);
+        EXPECT_EQ(scan.MorselCount(), 8U) << threads << " threads: 15,000 rows in 2048-row morsels";
+        EXPECT_EQ(scan.RowCount(), 15000U);
+        ExpectColumnsEqual(Concatenate(ReadWithThreads(scan, threads), scan.types().size()),
+                           b.model.cols);
+    }
+}
+
+TEST(MorselScan, TheMorselSizeFollowsTheRowsAndTheThreads) {
+    const BuiltInMorselSize built_in;
+    for (const idx_t total : {idx_t{1}, idx_t{2048}, idx_t{5000}, idx_t{100000}, idx_t{300000}}) {
+        const Built b = BuildTable(total, kRowGroupSize, total + 3);
+        const auto snap = b.table->Snapshot();
+        for (const size_t threads :
+             {size_t{1}, size_t{2}, size_t{3}, size_t{4}, size_t{8}, size_t{16}, size_t{64}}) {
+            const idx_t rows = ExpectedMorselRows(total, threads);
+            MorselScan scan(snap, {0}, {}, 0, threads);
+            ScanMorsel m;
+            idx_t covered = 0, widest = 0, count = 0;
+            while (scan.Next(m)) {
+                covered += m.count;
+                widest = std::max(widest, m.count);
+                count++;
+            }
+            EXPECT_EQ(covered, total) << total << " rows " << threads << " threads";
+            EXPECT_LE(widest, rows);
+            EXPECT_EQ(count, ExpectedMorselCount(*snap, rows)) << total << " rows, " << threads;
+            // rounding up to whole vectors costs at most a factor of two: at least two morsels per
+            // thread unless the table has fewer vectors than that
+            const idx_t vectors = (total + kVectorSize - 1) / kVectorSize;
+            if (threads > 1) {
+                EXPECT_GE(count, std::min<idx_t>(vectors, 2 * threads))
+                    << total << " rows, " << threads << " threads";
+            }
+        }
+    }
+}
+
+TEST(MorselScan, AnExplicitMorselSizeIsNeverAdapted) {
+    const BuiltInMorselSize built_in;
+    const Built b = BuildTable(15000, kRowGroupSize, 33);
+    const auto snap = b.table->Snapshot();
+    MorselScan explicit_size(snap, {0}, {}, 8 * kVectorSize, 16);
+    EXPECT_EQ(explicit_size.MorselCount(), 1U) << "the caller asked for 8-vector morsels";
+    MorselScan two(snap, {0}, {}, 2 * kVectorSize, 16);
+    EXPECT_EQ(two.MorselCount(), 4U);
+
+    // a default somebody set (a test, or CDB_MORSEL_ROWS) is also respected
+    MorselScan::SetDefaultMorselRows(4 * kVectorSize);
+    MorselScan from_default(snap, {0}, {}, 0, 16);
+    EXPECT_EQ(from_default.MorselCount(), 2U);
+    MorselScan::SetDefaultMorselRows(0);
+}
+
+TEST(MorselScan, TheSizeIsChosenFromTheRowsThatSurvivePruning) {
+    const BuiltInMorselSize built_in;
+    // Four full row groups with ascending ids; a filter keeps only the last one.
+    Table table("t", {{"id", LogicalType::BigInt()}});
+    for (idx_t at = 0; at < 4 * kRowGroupSize; at += kVectorSize) {
+        DataChunk chunk;
+        chunk.Initialize({LogicalType::BigInt()}, kVectorSize);
+        for (idx_t i = 0; i < kVectorSize; i++) {
+            chunk.SetValue(0, i, Value::BigInt(static_cast<int64_t>(at + i)));
+        }
+        chunk.SetCardinality(kVectorSize);
+        table.Append(chunk);
+    }
+    const auto snap = table.Snapshot();
+    ASSERT_EQ(snap->row_group_count(), 4U);
+    const std::vector<TableFilter> keep_last = {
+        {0, CompareOp::Ge, Value::BigInt(static_cast<int64_t>(3 * kRowGroupSize))}};
+    const auto widest = [](MorselScan& scan) {
+        idx_t w = 0;
+        ScanMorsel m;
+        while (scan.Next(m)) {
+            w = std::max(w, m.count);
+        }
+        return w;
+    };
+    MorselScan all(snap, {0}, {}, 0, 16);
+    MorselScan pruned(snap, {0}, keep_last, 0, 16);
+    EXPECT_EQ(pruned.row_groups_scanned(), 1U);
+    EXPECT_EQ(pruned.RowCount(), kRowGroupSize);
+    // 491,520 rows over 16 threads x 4 morsels -> 8192-row morsels; the 122,880 rows that survive
+    // pruning -> 2048-row morsels. Sizing from the rows that are actually read keeps the
+    // pruned scan fine-grained.
+    const idx_t widest_all = widest(all), widest_pruned = widest(pruned); // drains both cursors
+    EXPECT_EQ(widest_all, ExpectedMorselRows(4 * kRowGroupSize, 16));
+    EXPECT_EQ(widest_pruned, ExpectedMorselRows(kRowGroupSize, 16));
+    EXPECT_EQ(widest_all, 8192U);
+    EXPECT_EQ(widest_pruned, 2048U);
+    MorselScan all_again(snap, {0}, {}, 0, 16), pruned_again(snap, {0}, keep_last, 0, 16);
+    EXPECT_EQ(all_again.MorselCount(), ExpectedMorselCount(*snap, 8192));
+    EXPECT_EQ(pruned_again.MorselCount(), kRowGroupSize / 2048);
+}
+
 } // namespace cdb

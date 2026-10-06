@@ -26,9 +26,11 @@ class PhysicalTableScan final : public PhysicalOperator {
     bool GetData(GlobalSourceState&, LocalSourceState&, DataChunk& out) override;
     bool ParallelSource() const override { return true; }
     idx_t MaxSourceThreads(GlobalSourceState&) const override;
+    void SetThreadHint(size_t threads) override { threads_ = threads; }
 
   private:
     std::string table_name_;
+    size_t threads_ = 1;
     std::shared_ptr<const TableSnapshot> snapshot_;
     std::vector<idx_t> column_ids_;
     std::vector<TableFilter> filters_;

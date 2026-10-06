@@ -65,11 +65,14 @@ void Executor::RunPipeline(const Pipeline& p) {
         const auto it = sinks_.find(op);
         return it == sinks_.end() ? nullptr : it->second.get();
     };
+    const bool parallel =
+        scheduler_ != nullptr && scheduler_->threads() > 1 && PipelineIsParallel(p);
+    p.source->SetThreadHint(parallel ? scheduler_->threads() : 1);
     const std::unique_ptr<GlobalSourceState> global_source =
         p.source->GetGlobalSourceState(find_sink(p.source));
 
     size_t participants = 1;
-    if (scheduler_ != nullptr && scheduler_->threads() > 1 && PipelineIsParallel(p)) {
+    if (parallel) {
         participants = std::clamp<size_t>(p.source->MaxSourceThreads(*global_source), 1,
                                           scheduler_->threads());
     }

@@ -85,10 +85,15 @@ class ParallelChunkSource final : public PhysicalOperator {
     // How many threads took part in the last run (one local source state each).
     int participants() const { return locals_.load(); }
 
+    // What the executor last told the source about how many threads will read it (0: never told).
+    void SetThreadHint(size_t threads) override { hint_ = threads; }
+    size_t thread_hint() const { return hint_; }
+
   private:
     const std::vector<DataChunk>* chunks_;
     size_t per_batch_;
     std::atomic<int> locals_{0};
+    size_t hint_ = 0;
 };
 
 // A streaming operator that passes chunks through but, on each thread's first chunk, waits until
@@ -326,6 +331,58 @@ TEST(ParallelExecution, LimitRunsOnOneThreadAndReturnsTheFirstRowsInOrder) {
             ASSERT_TRUE(test::CompareTuples(got[i], d.rows[begin + i]) == 0) << i;
         }
     }
+}
+
+TEST(ParallelExecution, TheExecutorTellsTheSourceHowManyThreadsWillReadIt) {
+    Rng rng(6);
+    const std::vector<LogicalType> in = {LogicalType::Integer(), LogicalType::Varchar()};
+    const Data d = MakeData(rng, in, 40, SmallGen());
+    for (const size_t threads : {size_t{1}, size_t{2}, size_t{4}, size_t{8}}) {
+        Pipe parallel(in, &d.chunks);
+        parallel.Finish(in);
+        RunPlan(parallel.plan, threads);
+        EXPECT_EQ(parallel.source->thread_hint(), threads);
+
+        // a pipeline that must stay on one thread is not sized for more
+        Pipe limited(in, &d.chunks);
+        limited.Add<PhysicalLimit>(in, 5, 0);
+        limited.Finish(in);
+        RunPlan(limited.plan, threads);
+        EXPECT_EQ(limited.source->thread_hint(), 1U) << "LIMIT: serial pipeline, " << threads;
+
+        Pipe serial(in, &d.chunks);
+        serial.Add<SerialOnly>(in);
+        serial.Finish(in);
+        RunPlan(serial.plan, threads);
+        EXPECT_EQ(serial.source->thread_hint(), 1U);
+    }
+}
+
+TEST(ParallelExecution, ATableScanCutsItsMorselsByTheThreadHint) {
+    const idx_t saved = MorselScan::DefaultMorselRows();
+    MorselScan::SetDefaultMorselRows(0); // the built-in size, which only the hint can shrink
+    Table table("t", {{"x", LogicalType::BigInt()}});
+    for (idx_t at = 0; at < 15000; at += kVectorSize) {
+        const idx_t n = std::min<idx_t>(kVectorSize, 15000 - at);
+        DataChunk chunk;
+        chunk.Initialize({LogicalType::BigInt()}, kVectorSize);
+        for (idx_t i = 0; i < n; i++) {
+            chunk.SetValue(0, i, Value::BigInt(static_cast<int64_t>(at + i)));
+        }
+        chunk.SetCardinality(n);
+        table.Append(chunk);
+    }
+    PhysicalTableScan scan("t", table.Snapshot(), {0}, {}, {LogicalType::BigInt()});
+    const auto morsels = [&](size_t hint) {
+        scan.SetThreadHint(hint);
+        const auto global = scan.GetGlobalSourceState(nullptr);
+        return scan.MaxSourceThreads(*global);
+    };
+    EXPECT_EQ(morsels(1), 1U) << "no hint: the built-in 16,384-row morsel holds the whole table";
+    EXPECT_EQ(morsels(2), 8U);
+    EXPECT_EQ(morsels(16), 8U) << "never smaller than one vector";
+    EXPECT_EQ(morsels(1), 1U) << "the hint can be changed again";
+    MorselScan::SetDefaultMorselRows(saved == MorselScan::kDefaultMorselRows ? 0 : saved);
 }
 
 TEST(ParallelExecution, ASingleChunkSourceNeverUsesMoreThanOneParticipant) {

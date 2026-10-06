@@ -119,8 +119,10 @@ void MorselScan::SetDefaultMorselRows(idx_t rows) noexcept {
 }
 
 MorselScan::MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vector<idx_t> column_ids,
-                       std::vector<TableFilter> filters, idx_t morsel_rows)
+                       std::vector<TableFilter> filters, idx_t morsel_rows, size_t threads)
     : snapshot_(std::move(snapshot)), column_ids_(std::move(column_ids)) {
+    const bool adapt =
+        morsel_rows == 0 && threads > 1 && MorselRowsSetting().load(std::memory_order_relaxed) == 0;
     if (morsel_rows == 0) {
         morsel_rows = DefaultMorselRows();
     }
@@ -133,6 +135,8 @@ MorselScan::MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vecto
     for (const TableFilter& f : filters) {
         CDB_CHECK(f.column_index < schema.size());
     }
+    std::vector<const RowGroup*> kept;
+    idx_t kept_rows = 0;
     for (idx_t g = 0; g < snapshot_->row_group_count(); g++) {
         const RowGroup& group = snapshot_->row_group(g);
         if (CanSkipGroup(group, filters)) {
@@ -140,6 +144,15 @@ MorselScan::MorselScan(std::shared_ptr<const TableSnapshot> snapshot, std::vecto
             continue;
         }
         scanned_++;
+        kept.push_back(&group);
+        kept_rows += group.count();
+    }
+    if (adapt) {
+        const idx_t even = AlignUp(kept_rows / (threads * kMorselsPerThread), kVectorSize);
+        morsel_rows = std::clamp<idx_t>(even, kVectorSize, morsel_rows);
+    }
+    for (const RowGroup* g : kept) {
+        const RowGroup& group = *g;
         for (idx_t offset = 0; offset < group.count(); offset += morsel_rows) {
             ScanMorsel m;
             m.group = &group;
