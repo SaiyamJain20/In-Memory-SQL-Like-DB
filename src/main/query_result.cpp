@@ -53,20 +53,20 @@ std::vector<std::vector<Value>> QueryResult::Rows() const {
     return rows;
 }
 
-std::string QueryResult::ToString() const {
+std::string QueryResult::ToString(std::optional<idx_t> max_rows) const {
     if (!ok_)
         return error_message_;
     if (types_.empty())
         return "";
-    const auto rows = Rows();
+    const idx_t shown = max_rows ? std::min(*max_rows, row_count_) : row_count_;
     std::vector<size_t> width(types_.size());
     for (size_t c = 0; c < types_.size(); c++)
         width[c] = names_[c].size();
     std::vector<std::vector<std::string>> cells;
-    for (const auto& row : rows) {
+    for (idx_t r = 0; r < shown; r++) {
         std::vector<std::string> line;
-        for (size_t c = 0; c < row.size(); c++) {
-            std::string text = row[c].ToString();
+        for (size_t c = 0; c < types_.size(); c++) {
+            std::string text = GetValue(c, r).ToString();
             const size_t nl = text.find('\n');
             if (nl != std::string::npos)
                 text = text.substr(0, nl) + "..."; // keep rows on one line
@@ -91,8 +91,11 @@ std::string QueryResult::ToString() const {
         }
         out += "\n";
     }
-    out += "(" + std::to_string(rows.size()) + (rows.size() == 1 ? " row)" : " rows)");
-    return out;
+    out += "(" + std::to_string(row_count_) + (row_count_ == 1 ? " row" : " rows");
+    if (shown < row_count_) {
+        out += ", showing the first " + std::to_string(shown);
+    }
+    return out + ")";
 }
 
 } // namespace cdb

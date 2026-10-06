@@ -328,6 +328,18 @@ TEST(Connection, LaterStatementsSeeEarlierDdl) {
     EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "  SCAN t [a]");
 }
 
+TEST(Connection, ResultRenderingCanTruncateLongResults) {
+    Session s;
+    s.Ok("CREATE TABLE t (a INT)");
+    s.Ok("INSERT INTO t VALUES (1), (2), (3), (4), (5)");
+    const QueryResult r = s.Ok("SELECT a FROM t ORDER BY a");
+    EXPECT_EQ(r.ToString(2), " a\n--\n 1\n 2\n(5 rows, showing the first 2)");
+    EXPECT_EQ(r.ToString(0), " a\n--\n(5 rows, showing the first 0)");
+    EXPECT_EQ(r.ToString(5), r.ToString()) << "a limit that is not exceeded changes nothing";
+    EXPECT_EQ(r.ToString(100), r.ToString());
+    EXPECT_NE(r.ToString().find(" 5\n(5 rows)"), std::string::npos);
+}
+
 TEST(Connection, TwoConnectionsShareOneDatabase) {
     Database db;
     Connection a(db), b(db);
