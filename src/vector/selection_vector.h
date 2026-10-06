@@ -22,6 +22,18 @@ class SelectionVector {
         : owner_(Buffer::Allocate(count * sizeof(sel_t))), data_(owner_->As<sel_t>()),
           capacity_(count) {}
 
+    // Owning vector of `count` indices that are NOT initialised: for producers that write every
+    // entry they hand out before anything reads it (zeroing an array that is about to be
+    // overwritten was measurable in join-heavy queries). The public constructor above stays
+    // zero-filled.
+    static SelectionVector Uninitialized(idx_t count) {
+        SelectionVector s;
+        s.owner_ = Buffer::AllocateUninitialized(count * sizeof(sel_t));
+        s.data_ = s.owner_->As<sel_t>();
+        s.capacity_ = count;
+        return s;
+    }
+
     // Read-only [0, 1, 2, ..., kVectorSize-1].
     static const SelectionVector& Identity();
     // Read-only [0, 0, 0, ...] of length kVectorSize; the selection of a constant vector.

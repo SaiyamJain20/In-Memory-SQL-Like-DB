@@ -3,6 +3,7 @@
 // Helpers for storage tests: build random DataChunks while recording a plain row-model of what
 // was appended, and read a table back through TableScan into the same shape for comparison.
 
+#include "storage/encoding.h"
 #include "storage/table.h"
 #include "test_util.h"
 
@@ -12,6 +13,21 @@
 #include <vector>
 
 namespace cdb::test {
+
+// Turns compression on or off for the lifetime of the object (it is a process-wide switch, so tests
+// that rely on a particular segment layout say so explicitly).
+class ScopedCompression {
+  public:
+    explicit ScopedCompression(bool enabled) : previous_(CompressionEnabled()) {
+        SetCompressionEnabled(enabled);
+    }
+    ~ScopedCompression() { SetCompressionEnabled(previous_); }
+    ScopedCompression(const ScopedCompression&) = delete;
+    ScopedCompression& operator=(const ScopedCompression&) = delete;
+
+  private:
+    bool previous_;
+};
 
 // Column-major model of a table's contents.
 struct TableModel {

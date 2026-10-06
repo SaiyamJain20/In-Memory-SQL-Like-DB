@@ -145,6 +145,23 @@ void Vector::Reference(const Vector& other) {
     sel_ = other.sel_;
 }
 
+void Vector::SetDictionary(const Vector& child, SelectionVector sel) {
+    CDB_CHECK(child.format_ == VectorFormat::Flat && child.type_ == type_);
+    auto shared = std::shared_ptr<Vector>(new Vector(type_, child.capacity_, NoAllocTag{}));
+    shared->Reference(child);
+    SetDictionary(std::move(shared), std::move(sel));
+}
+
+void Vector::SetDictionary(std::shared_ptr<Vector> child, SelectionVector sel) {
+    CDB_CHECK(child != nullptr && child->format_ == VectorFormat::Flat && child->type_ == type_);
+    child_ = std::move(child);
+    sel_ = std::move(sel);
+    format_ = VectorFormat::Dictionary;
+    data_.reset();
+    validity_ = ValidityMask(capacity_);
+    heap_.reset();
+}
+
 void Vector::ReferenceFlat(std::shared_ptr<Buffer> data, ValidityMask validity,
                            std::shared_ptr<StringHeap> heap) {
     CDB_CHECK(data != nullptr && data->size() >= capacity_ * type_.width());
@@ -240,7 +257,7 @@ void Vector::Slice(const SelectionVector& sel, idx_t count) {
     if (format_ == VectorFormat::Constant) {
         return;
     }
-    SelectionVector new_sel(count);
+    SelectionVector new_sel = SelectionVector::Uninitialized(count);
     if (format_ == VectorFormat::Flat) {
         EnsureData();
         for (idx_t i = 0; i < count; i++) {

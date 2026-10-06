@@ -73,6 +73,21 @@ class Vector {
         return data_->As<T>();
     }
 
+    // Like FlatData<T>() for a vector whose first rows the caller is about to overwrite completely
+    // (a decoder, a gather): if storage still has to be allocated it is not zero-filled, so rows
+    // the caller does not write hold unspecified bytes. Strings are always zero-filled (string_t
+    // has padding invariants).
+    template <class T> T* FlatDataForOverwrite() {
+        CDB_ASSERT(format_ == VectorFormat::Flat && PhysicalTypeOf<T>::value == type_.physical());
+        if (!data_) {
+            const size_t bytes = capacity_ * type_.width();
+            data_ = type_.physical() == PhysicalType::String ? Buffer::Allocate(bytes)
+                                                             : Buffer::AllocateUninitialized(bytes);
+        }
+        CDB_ASSERT(!data_->read_only());
+        return data_->As<T>();
+    }
+
     // The Flat vector's storage as raw bytes (capacity() * type().width() of them).
     uint8_t* FlatBytes() {
         CDB_ASSERT(format_ == VectorFormat::Flat);
@@ -135,6 +150,15 @@ class Vector {
 
     // Converts to Flat, materialising the first `count` rows. No-op if already Flat.
     void Flatten(idx_t count);
+
+    // Becomes a Dictionary vector over `child` (a Flat vector of this type): row i is child's row
+    // sel[i]. `child` is shared, not copied, so it must stay unmodified afterwards; every
+    // sel[i] < child.capacity(). Used by dictionary-encoded storage, where one dictionary serves
+    // every vector of a segment.
+    void SetDictionary(const Vector& child, SelectionVector sel);
+    // The same, sharing an existing child object instead of making one (no allocation): for a
+    // dictionary that serves many vectors and is never modified after it is built.
+    void SetDictionary(std::shared_ptr<Vector> child, SelectionVector sel);
 
     // Replaces this vector with rows `sel[0..count)` of itself, without copying data: Flat
     // becomes Dictionary, Dictionary composes selections (depth stays 1), Constant is a no-op.

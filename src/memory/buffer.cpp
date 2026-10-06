@@ -8,10 +8,12 @@
 
 namespace cdb {
 
-Buffer::Buffer(size_t bytes) : size_(bytes) {
+Buffer::Buffer(size_t bytes, bool zero) : size_(bytes) {
     const size_t total = AlignUp(bytes, kAlignment) + kPadding;
     data_ = static_cast<uint8_t*>(::operator new(total, std::align_val_t{kAlignment}));
-    std::memset(data_, 0, total);
+    if (zero) {
+        std::memset(data_, 0, total);
+    }
 }
 
 Buffer::Buffer(std::shared_ptr<Buffer> parent, size_t offset, size_t size)
@@ -29,7 +31,11 @@ std::shared_ptr<Buffer> Buffer::View(std::shared_ptr<Buffer> parent, size_t offs
 }
 
 std::shared_ptr<Buffer> Buffer::Allocate(size_t bytes) {
-    return std::shared_ptr<Buffer>(new Buffer(bytes));
+    return std::shared_ptr<Buffer>(new Buffer(bytes, /*zero=*/true));
+}
+
+std::shared_ptr<Buffer> Buffer::AllocateUninitialized(size_t bytes) {
+    return std::shared_ptr<Buffer>(new Buffer(bytes, /*zero=*/false));
 }
 
 } // namespace cdb

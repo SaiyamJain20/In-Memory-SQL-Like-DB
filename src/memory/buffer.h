@@ -19,6 +19,10 @@ class Buffer {
     static constexpr size_t kPadding = 64;
 
     static std::shared_ptr<Buffer> Allocate(size_t bytes);
+    // Like Allocate, but the bytes are NOT zeroed (the padding is still readable memory). For a
+    // buffer whose owner overwrites everything it will expose before anything reads it; zeroing a
+    // 16 KB vector that a decoder is about to fill showed up as 12% of a scan-heavy query.
+    static std::shared_ptr<Buffer> AllocateUninitialized(size_t bytes);
 
     // A zero-copy, READ-ONLY window [offset, offset + size) into `parent`, which it keeps alive.
     // Requires offset + size <= parent->size().
@@ -38,7 +42,7 @@ class Buffer {
     template <class T> const T* As() const noexcept { return reinterpret_cast<const T*>(data_); }
 
   private:
-    explicit Buffer(size_t bytes);
+    Buffer(size_t bytes, bool zero);
     Buffer(std::shared_ptr<Buffer> parent, size_t offset, size_t size);
 
     uint8_t* data_;
