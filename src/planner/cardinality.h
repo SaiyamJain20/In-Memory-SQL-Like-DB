@@ -38,6 +38,9 @@ const BoundExpr* AsColumnRef(const BoundExpr& e);
 // The fraction of the rows described by `input` for which `predicate` (over their columns) is TRUE.
 double Selectivity(const BoundExpr& predicate, const Estimate& input);
 
+// (Selectivity of an AND, with interval bounds on one column combined; see cardinality.cpp.)
+double AndSelectivity(const BoundExpr& conjunction, const Estimate& input);
+
 // `input` restricted to the rows that satisfy `predicate`: fewer rows, and the bounds and
 // distinct counts of the columns it constrains narrowed.
 Estimate ApplyFilter(const Estimate& input, const BoundExpr& predicate);

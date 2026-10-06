@@ -277,6 +277,85 @@ const BoundExpr* AsColumnRef(const BoundExpr& e) {
     return x->kind == BoundKind::ColumnRef ? x : nullptr;
 }
 
+namespace {
+
+void FlattenAnd(const BoundExpr& e, std::vector<const BoundExpr*>& out) {
+    if (e.kind == BoundKind::Operator && e.op == OperatorKind::And) {
+        FlattenAnd(*e.children[0], out);
+        FlattenAnd(*e.children[1], out);
+    } else {
+        out.push_back(&e);
+    }
+}
+
+// A conjunct that bounds one column from one side by a constant: `column > 5`, `date <= x`, ...
+struct OneSidedRange {
+    idx_t column = 0;
+    Cmp op = Cmp::Lt;
+    const Value* constant = nullptr;
+    bool lower() const { return op == Cmp::Gt || op == Cmp::Ge; }
+};
+
+std::optional<OneSidedRange> AsOneSidedRange(const BoundExpr& e, const Estimate& in) {
+    if (e.kind != BoundKind::Operator) {
+        return std::nullopt;
+    }
+    const auto cmp = ComparisonOf(e.op);
+    if (!cmp || *cmp == Cmp::Eq || *cmp == Cmp::Ne) {
+        return std::nullopt;
+    }
+    const BoundExpr* column = AsColumnRef(*e.children[0]);
+    const Value* k = AsConstant(*e.children[1]);
+    Cmp op = *cmp;
+    if (column == nullptr || k == nullptr) {
+        column = AsColumnRef(*e.children[1]);
+        k = AsConstant(*e.children[0]);
+        op = Flip(op);
+    }
+    if (column == nullptr || k == nullptr || k->IsNull() || column->ordinal >= in.columns.size() ||
+        !NumericValue(*k)) {
+        return std::nullopt;
+    }
+    return OneSidedRange{column->ordinal, op, k};
+}
+
+} // namespace
+
+// The conjuncts of an AND are taken as independent, except that a lower and an upper bound on the
+// same column describe an interval: `d >= 1994-01-01 AND d < 1995-01-01` keeps the year between
+// them (P(d < b) - P(d < a)), not the product of two shares that both include most of the range.
+double AndSelectivity(const BoundExpr& e, const Estimate& in) {
+    std::vector<const BoundExpr*> parts;
+    FlattenAnd(e, parts);
+    std::vector<bool> used(parts.size(), false);
+    double selectivity = 1.0;
+    for (size_t i = 0; i < parts.size(); i++) {
+        const auto lower = AsOneSidedRange(*parts[i], in);
+        if (used[i] || !lower || !lower->lower()) {
+            continue;
+        }
+        for (size_t j = 0; j < parts.size(); j++) {
+            const auto upper = AsOneSidedRange(*parts[j], in);
+            if (j == i || used[j] || !upper || upper->lower() || upper->column != lower->column) {
+                continue;
+            }
+            const ColumnEstimate& c = in.columns[lower->column];
+            const double non_null = 1.0 - c.null_fraction;
+            // P(low bound) + P(high bound) - P(either) = P(both), and P(either) = non-NULL rows
+            selectivity *= Clamp01(RangeSelectivity(c, lower->op, *lower->constant) +
+                                   RangeSelectivity(c, upper->op, *upper->constant) - non_null);
+            used[i] = used[j] = true;
+            break;
+        }
+    }
+    for (size_t i = 0; i < parts.size(); i++) {
+        if (!used[i]) {
+            selectivity *= Selectivity(*parts[i], in);
+        }
+    }
+    return selectivity;
+}
+
 double Selectivity(const BoundExpr& e, const Estimate& in) {
     switch (e.kind) {
     case BoundKind::Constant:
@@ -287,7 +366,7 @@ double Selectivity(const BoundExpr& e, const Estimate& in) {
                                                        : kDefaultOther;
     case BoundKind::Operator: {
         if (e.op == OperatorKind::And) {
-            return Selectivity(*e.children[0], in) * Selectivity(*e.children[1], in);
+            return AndSelectivity(e, in);
         }
         if (e.op == OperatorKind::Or) {
             const double a = Selectivity(*e.children[0], in), b = Selectivity(*e.children[1], in);

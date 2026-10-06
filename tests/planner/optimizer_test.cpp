@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <regex>
 #include <sstream>
 
 namespace cdb {
@@ -59,12 +60,17 @@ struct Env {
         Run("INSERT INTO small VALUES " + small);
     }
 
+    // The plan's shape: EXPLAIN without the row estimate that follows each operator
+    // (`  (~123 rows)`), which the explain tests check on their own.
     std::string Explain(const std::string& sql) {
         const QueryResult r = conn.Query("EXPLAIN " + sql);
         EXPECT_TRUE(r.ok()) << r.error_message();
+        static const std::regex estimate(R"(  \(~[0-9]+ rows\)$)");
         std::string out;
         for (idx_t i = 0; i < r.RowCount(); i++) {
-            out += r.GetValue(0, i).GetVarchar() + "\n";
+            const std::string line = r.GetValue(0, i).GetVarchar();
+            EXPECT_TRUE(std::regex_search(line, estimate)) << "no estimate on: " << line;
+            out += std::regex_replace(line, estimate, "") + "\n";
         }
         return out;
     }

@@ -180,6 +180,74 @@ TEST(CardinalityRules, RangesInterpolateBetweenTheBounds) {
     EXPECT_EQ(Selectivity(*Cmp(OperatorKind::Gt, Col(0), Int(8)), flat), 0.0);
 }
 
+TEST(CardinalityRules, ALowerAndAnUpperBoundOnOneColumnAreAnIntervalNotTwoIndependentShares) {
+    // a: the integers 0..99. `a >= 20 AND a < 30` is ten values, not 0.8 * 0.3
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(0), Int(20)), Cmp(OperatorKind::Lt, Col(0), Int(30)))),
+        0.10, 1e-12);
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Gt, Col(0), Int(20)), Cmp(OperatorKind::Le, Col(0), Int(30)))),
+        0.10, 1e-12);
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(0), Int(20)), Cmp(OperatorKind::Le, Col(0), Int(30)))),
+        0.11, 1e-12);
+    // the bounds in either order, and the constant on the left
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Lt, Col(0), Int(30)), Cmp(OperatorKind::Ge, Col(0), Int(20)))),
+        0.10, 1e-12);
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Le, Int(20), Col(0)), Cmp(OperatorKind::Gt, Int(30), Col(0)))),
+        0.10, 1e-12);
+    // an empty interval, and one wider than the data
+    EXPECT_EQ(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(0), Int(50)), Cmp(OperatorKind::Lt, Col(0), Int(40)))),
+        0.0);
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(0), Int(-10)), Cmp(OperatorKind::Lt, Col(0), Int(500)))),
+        1.0, 1e-12);
+    // NULLs are in no interval: b (0..9, 20% NULL) in [2, 4]
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(1), Int(2)), Cmp(OperatorKind::Le, Col(1), Int(4)))),
+        0.8 * 0.3, 1e-12);
+    // two columns: one interval each, independent of one another
+    EXPECT_NEAR(
+        Sel(*And(
+            And(Cmp(OperatorKind::Ge, Col(0), Int(20)), Cmp(OperatorKind::Lt, Col(0), Int(30))),
+            And(Cmp(OperatorKind::Ge, Col(1), Int(2)), Cmp(OperatorKind::Le, Col(1), Int(4))))),
+        0.10 * 0.24, 1e-12);
+    // a third conjunct that is not a range is multiplied in
+    EXPECT_NEAR(Sel(*And(And(Cmp(OperatorKind::Ge, Col(0), Int(20)),
+                             Cmp(OperatorKind::Lt, Col(0), Int(30))),
+                         Cmp(OperatorKind::Eq, Col(1), Int(3)))),
+                0.10 * 0.08, 1e-12);
+    // two lower bounds do not make an interval: they stay independent
+    EXPECT_NEAR(
+        Sel(*And(Cmp(OperatorKind::Ge, Col(0), Int(20)), Cmp(OperatorKind::Gt, Col(0), Int(40)))),
+        0.8 * 0.59, 1e-12);
+    // a column in a join output is a column like any other (the dates of orders: a year of 2400
+    // days)
+    Estimate dates;
+    dates.rows = 150000;
+    ColumnEstimate d;
+    d.distinct = 2400;
+    d.min = Value::Date(date_t{8035});
+    d.max = Value::Date(date_t{10435});
+    dates.columns = {d};
+    const auto date = [](int32_t days) { return BoundExpr::Constant(Value::Date(date_t{days})); };
+    const double year =
+        Selectivity(*And(Cmp(OperatorKind::Ge, Col(0, LogicalType::Date()), date(8766)),
+                         Cmp(OperatorKind::Lt, Col(0, LogicalType::Date()), date(9131))),
+                    dates);
+    EXPECT_NEAR(year, 365.0 / 2400, 0.002) << "a year of the seven, 15%";
+    // ApplyFilter agrees, and narrows the bounds to the interval
+    const Estimate out =
+        ApplyFilter(dates, *And(Cmp(OperatorKind::Ge, Col(0, LogicalType::Date()), date(8766)),
+                                Cmp(OperatorKind::Lt, Col(0, LogicalType::Date()), date(9131))));
+    EXPECT_NEAR(out.rows, 150000 * 365.0 / 2400, 150000 * 0.002);
+    EXPECT_EQ(NumericValue(*out.columns[0].min), 8766.0);
+    EXPECT_EQ(NumericValue(*out.columns[0].max), 9131.0);
+}
+
 TEST(CardinalityRules, BooleanStructureNullsListsAndPatterns) {
     const double eq = 1.0 / 100;
     const auto a_eq = [](int k) { return Cmp(OperatorKind::Eq, Col(0), Int(k)); };

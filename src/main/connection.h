@@ -2,6 +2,7 @@
 
 #include "main/database.h"
 #include "main/query_result.h"
+#include "planner/cardinality.h"
 #include "planner/logical_plan.h"
 
 #include <string_view>
@@ -13,7 +14,8 @@ namespace cdb {
 //
 // SELECT and INSERT ... SELECT go through the optimizer (filter pushdown, join ordering, column
 // pruning), the physical planner and the push-based pipeline executor. DDL, COPY and EXPLAIN are
-// handled directly. EXPLAIN shows the optimized logical plan.
+// handled directly. EXPLAIN shows the optimized logical plan with estimated row counts; EXPLAIN
+// ANALYZE runs the query and shows what each operator really produced and how long it took.
 class Connection {
   public:
     explicit Connection(Database& db) : db_(db) {}
@@ -39,6 +41,9 @@ class Connection {
     QueryResult Execute(LogicalPtr plan);
     QueryResult ExecuteSelect(LogicalPtr plan);
     QueryResult ExecuteInsert(LogicalPtr plan);
+    // Runs the (optimized) query with a profile and returns the annotated plan.
+    std::string ExplainAnalyzeQuery(const LogicalOperator& optimized,
+                                    CardinalityEstimator& estimator);
 
     Database& db_;
     bool optimize_ = true;

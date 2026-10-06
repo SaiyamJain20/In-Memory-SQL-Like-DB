@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <sstream>
 
 namespace cdb {
@@ -41,6 +42,35 @@ void Executor::Run() {
 
 namespace {
 
+// Adds the time of a scope to an operator's profile (nothing when there is none).
+class CallTimer {
+  public:
+    CallTimer(OperatorProfile* profile, bool sink_role) : profile_(profile), sink_role_(sink_role) {
+        if (profile_ != nullptr) {
+            start_ = std::chrono::steady_clock::now();
+        }
+    }
+    ~CallTimer() {
+        if (profile_ != nullptr) {
+            const auto ns =
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - start_)
+                                          .count());
+            profile_->nanos.fetch_add(ns, std::memory_order_relaxed);
+            if (sink_role_) {
+                profile_->sink_nanos.fetch_add(ns, std::memory_order_relaxed);
+            }
+        }
+    }
+    CallTimer(const CallTimer&) = delete;
+    CallTimer& operator=(const CallTimer&) = delete;
+
+  private:
+    OperatorProfile* profile_;
+    bool sink_role_;
+    std::chrono::steady_clock::time_point start_;
+};
+
 // A pipeline may run on several threads only if every role in it allows it.
 bool PipelineIsParallel(const Pipeline& p) {
     if (!p.source->ParallelSource() || !p.sink->ParallelSink()) {
@@ -60,6 +90,13 @@ void Executor::RunPipeline(const Pipeline& p) {
         sink_slot = p.sink->GetGlobalSinkState();
     }
     GlobalSinkState& global_sink = *sink_slot;
+
+    OperatorProfile* const source_profile = profile_ ? profile_->Find(p.source) : nullptr;
+    OperatorProfile* const sink_profile = profile_ ? profile_->Find(p.sink) : nullptr;
+    std::vector<OperatorProfile*> operator_profiles;
+    for (const PhysicalOperator* op : p.operators) {
+        operator_profiles.push_back(profile_ ? profile_->Find(op) : nullptr);
+    }
 
     const auto find_sink = [&](const PhysicalOperator* op) -> GlobalSinkState* {
         const auto it = sinks_.find(op);
@@ -97,12 +134,24 @@ void Executor::RunPipeline(const Pipeline& p) {
         // is wanted from the source (a satisfied LIMIT, or a sink that is full).
         const auto push = [&](auto&& self, const DataChunk& input, size_t level) -> bool {
             if (level == p.operators.size()) {
+                if (sink_profile != nullptr) {
+                    sink_profile->rows_in.fetch_add(input.size(), std::memory_order_relaxed);
+                }
+                const CallTimer timer(sink_profile, /*sink_role=*/true);
                 return p.sink->Sink(global_sink, *local_sink, input) == SinkResult::NeedMoreInput;
             }
             DataChunk& output = buffers[level];
+            OperatorProfile* const profile = operator_profiles[level];
             for (;;) {
                 output.Reset();
-                const OperatorResult r = p.operators[level]->Execute(*states[level], input, output);
+                OperatorResult r;
+                {
+                    const CallTimer timer(profile, /*sink_role=*/false);
+                    r = p.operators[level]->Execute(*states[level], input, output);
+                }
+                if (profile != nullptr) {
+                    profile->rows_out.fetch_add(output.size(), std::memory_order_relaxed);
+                }
                 if (output.size() > 0 && !self(self, output, level + 1)) {
                     return false;
                 }
@@ -120,11 +169,19 @@ void Executor::RunPipeline(const Pipeline& p) {
             chunk.Initialize(p.source->types());
             while (!stop.load(std::memory_order_relaxed)) {
                 chunk.Reset();
-                if (!p.source->GetData(*global_source, *local_source, chunk)) {
+                bool more;
+                {
+                    const CallTimer timer(source_profile, /*sink_role=*/false);
+                    more = p.source->GetData(*global_source, *local_source, chunk);
+                }
+                if (!more) {
                     break;
                 }
                 if (chunk.size() == 0) {
                     continue;
+                }
+                if (source_profile != nullptr) {
+                    source_profile->rows_out.fetch_add(chunk.size(), std::memory_order_relaxed);
                 }
                 local_sink->batch_index = local_source->batch_index;
                 if (!push(push, chunk, 0)) {
@@ -138,6 +195,7 @@ void Executor::RunPipeline(const Pipeline& p) {
             stop.store(true, std::memory_order_relaxed); // the others stop at their next chunk
             throw;
         }
+        const CallTimer timer(sink_profile, /*sink_role=*/true);
         p.sink->Combine(global_sink, *local_sink);
     };
 
@@ -147,6 +205,7 @@ void Executor::RunPipeline(const Pipeline& p) {
         scheduler_->RunParallel(participants, participant);
     }
     ExecutionContext context{scheduler_};
+    const CallTimer finalize_timer(sink_profile, /*sink_role=*/true);
     p.sink->FinalizeParallel(global_sink, context);
 }
 
