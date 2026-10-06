@@ -4,12 +4,29 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phases 0–3 of 9 complete).** Build, CI, the vector/type system, the
-> columnar storage layer (zone maps, snapshot scans, catalog) and the SQL front end (parser, binder,
-> logical plans, DuckDB-verified expression semantics, CSV loading, a shell) are in place;
-> queries over tables are bound but not yet executable - the vectorized executor is Phase 4. The engine is being built phase by phase. Nothing below is
-> claimed until it is implemented *and* measured — see the [roadmap](docs/ROADMAP.md) for what is
-> done and [`docs/PROGRESS.md`](docs/PROGRESS.md) for the dated log.
+> **Status: early development (Phases 0–4 of 9 complete).** The engine runs SQL end to end: a
+> hand-written parser and binder, a rule-based optimizer, a push-based vectorized executor
+> (hash aggregation, hash joins, sort/top-N) over columnar storage with zone-map pruning. It runs
+> the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on all of them at
+> SF0.01, SF0.1 and SF1**. It is single-threaded so far: on one thread the geometric mean over
+> those queries is 1.7x DuckDB's time at SF0.1 and 3.1x at SF1 (the multi-way joins are the weak
+> spot, up to 11x). Compression and SIMD (Phase 5), parallelism (Phase 6), persistence (Phase 7)
+> and subqueries/statistics (Phase 8) are still ahead. Every number is in
+> [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and command; see the
+> [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
+
+## Try it
+```bash
+cmake --preset release && cmake --build --preset release
+build/release/tools/cdb_shell
+cdb> CREATE TABLE t (a INTEGER, b VARCHAR);
+cdb> INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'x');
+cdb> SELECT b, count(*), sum(a) FROM t GROUP BY b ORDER BY b;
+cdb> EXPLAIN SELECT b FROM t WHERE a > 1 ORDER BY b LIMIT 2;
+```
+TPC-H: `python3 -m venv .venv && .venv/bin/pip install -r tools/requirements-dev.txt`, then
+`.venv/bin/python tools/tpch_data.py --sf 1` and `build/release/bench/cdb_tpch --sf 1`
+(`tools/tpch_duckdb_time.py` times DuckDB the same way).
 
 ## Goals
 - **Correct** — differential-tested against DuckDB; all 22 TPC-H queries.
