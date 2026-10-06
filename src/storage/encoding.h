@@ -6,6 +6,9 @@
 
 namespace cdb {
 
+class BinaryWriter;
+class BinaryReader;
+
 // Lightweight column encodings for sealed (immutable) segments. Each is chosen per segment at seal
 // time from the data itself, and only when it is clearly smaller than the raw layout; otherwise the
 // segment stays raw and keeps its zero-copy scans.
@@ -44,7 +47,20 @@ class EncodedColumn {
     // NULLs included, and returns true.
     virtual bool DecodeVector(idx_t v, idx_t n, const ValidityMask& validity,
                               Vector& out) const = 0;
+
+    // Writes the encoding's own data (not its kind): see SerializeEncodedColumn.
+    virtual void Serialize(BinaryWriter& w) const = 0;
 };
+
+// The encoding as a self-describing byte string: its kind, then its payload.
+void SerializeEncodedColumn(const EncodedColumn& column, BinaryWriter& w);
+
+// Reads one back for a column of `count` rows of `type`. The bytes are untrusted: every offset,
+// width, run end and dictionary code is checked against the sizes it will be used with, so that
+// decoding any vector of the result cannot read outside its own buffers. Throws
+// Error(ErrorCode::Corruption) otherwise.
+std::shared_ptr<EncodedColumn> DeserializeEncodedColumn(BinaryReader& r, LogicalType type,
+                                                        idx_t count);
 
 // What to try. Auto picks the smallest encoding that saves at least 30%; the others force one
 // (ignoring the size) and exist so tests can exercise every encoding on any data.
