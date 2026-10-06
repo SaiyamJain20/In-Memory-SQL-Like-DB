@@ -414,7 +414,7 @@ TEST(ParserNotImplemented, ValidButUnsupportedSql) {
         "SELECT 1 UNION ALL SELECT 2",
         "SELECT 1 INTERSECT SELECT 2",
         "SELECT 1 EXCEPT SELECT 2",
-        "WITH x AS (SELECT 1) SELECT * FROM x",
+        "WITH RECURSIVE x AS (SELECT 1) SELECT * FROM x",
         "SELECT * FROM s.t",
         "SELECT s.t.c FROM t",
         "SELECT (1, 2)",
@@ -484,6 +484,15 @@ TEST(ParserErrors, PositionsAndMessages) {
         {"SELECT x BETWEEN 1 2", 19, "expected AND"},
         {"SELECT * FROM (SELECT 1", 23, "expected \")\""},
         {"SELECT 1;;; ) ", 12, "expected a statement"},
+        {"WITH SELECT 1", 5, "a name for the common table expression"},
+        {"WITH x SELECT 1", 7, "expected AS"},
+        {"WITH x AS SELECT 1", 10, "expected \"(\""},
+        {"WITH x AS () SELECT 1", 11, "expected SELECT"},
+        {"WITH x AS (SELECT 1 SELECT 2", 20, "expected \")\""},
+        {"WITH x AS (SELECT 1)", 20, "expected SELECT"},
+        {"WITH x AS (SELECT 1),  SELECT 2", 23, "a name for the common table expression"},
+        {"WITH x () AS (SELECT 1) SELECT 1", 8, "a column name"},
+        {"WITH x (a,) AS (SELECT 1) SELECT 1", 10, "a column name"},
     };
     for (const Case& c : cases) {
         const Err e = StatementError(c.sql);
@@ -676,6 +685,17 @@ std::vector<std::string> RoundTripCorpus() {
         "INSERT INTO t SELECT a FROM u",
         "COPY t FROM 'it''s.csv' (DELIMITER '|', HEADER)",
         "EXPLAIN ANALYZE SELECT * FROM t",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+        "WITH x (a, b) AS (SELECT 1, 2), y AS (SELECT a FROM x) SELECT * FROM x JOIN y ON x.a = "
+        "y.a",
+        "WITH \"Odd Name\" AS (SELECT 1 AS \"select\") SELECT * FROM \"Odd Name\"",
+        "SELECT (WITH x AS (SELECT 1) SELECT max(a) FROM x) FROM t",
+        "SELECT a FROM t WHERE a IN (WITH x AS (SELECT 1) SELECT * FROM x)",
+        "SELECT * FROM (WITH x AS (SELECT 1 AS a) SELECT a FROM x) AS d",
+        "INSERT INTO t WITH x AS (SELECT 1) SELECT * FROM x",
+        "WITH x AS (WITH y AS (SELECT 1) SELECT * FROM y) SELECT * FROM x",
+        "SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.a = t.a) AND a NOT IN (SELECT b "
+        "FROM v)",
     };
     return c;
 }
@@ -758,10 +778,8 @@ TEST(ParserTpch, AllTwentyTwoQueriesParseAndRoundTrip) {
             not_implemented.push_back(name);
         }
     }
-    // Only constructs we deliberately do not support yet may be rejected (WITH, for Q15).
-    EXPECT_GE(parsed, 21);
-    for (const std::string& n : not_implemented)
-        EXPECT_EQ(n, "q15.sql");
+    EXPECT_EQ(parsed, 22);
+    EXPECT_TRUE(not_implemented.empty()) << "every TPC-H query parses";
 }
 
 } // namespace cdb

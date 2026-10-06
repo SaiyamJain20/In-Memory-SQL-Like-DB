@@ -256,7 +256,27 @@ std::string SubqueryRef::ToString() const {
 // ------------------------------------------------------------------------------ statements
 
 std::string SelectStatement::ToString() const {
-    std::string out = "SELECT ";
+    std::string out;
+    if (!ctes.empty()) {
+        out = "WITH ";
+        for (size_t i = 0; i < ctes.size(); i++) {
+            if (i > 0)
+                out += ", ";
+            out += QuoteIdentifier(ctes[i].name);
+            if (!ctes[i].columns.empty()) {
+                out += " (";
+                for (size_t c = 0; c < ctes[i].columns.size(); c++) {
+                    if (c > 0)
+                        out += ", ";
+                    out += QuoteIdentifier(ctes[i].columns[c]);
+                }
+                out += ")";
+            }
+            out += " AS (" + ctes[i].select->ToString() + ")";
+        }
+        out += " ";
+    }
+    out += "SELECT ";
     if (distinct)
         out += "DISTINCT ";
     for (size_t i = 0; i < items.size(); i++) {

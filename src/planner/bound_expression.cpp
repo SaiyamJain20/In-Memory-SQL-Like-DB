@@ -107,6 +107,19 @@ BoundExprPtr BoundExpr::ColumnRef(idx_t ordinal, LogicalType type, std::string n
     return e;
 }
 
+BoundExprPtr BoundExpr::OuterColumn(idx_t ordinal, LogicalType type, std::string name) {
+    auto e = std::make_unique<BoundExpr>(BoundKind::OuterColumn, type);
+    e->ordinal = ordinal;
+    e->name = std::move(name);
+    return e;
+}
+
+BoundExprPtr BoundExpr::SubqueryValue(idx_t index, LogicalType type) {
+    auto e = std::make_unique<BoundExpr>(BoundKind::SubqueryValue, type);
+    e->ordinal = index;
+    return e;
+}
+
 BoundExprPtr BoundExpr::Constant(Value value) {
     auto e = std::make_unique<BoundExpr>(BoundKind::Constant, value.type());
     e->value = std::move(value);
@@ -194,6 +207,8 @@ bool BoundExpr::Equals(const BoundExpr& o) const {
         return false;
     switch (kind) {
     case BoundKind::ColumnRef:
+    case BoundKind::OuterColumn:
+    case BoundKind::SubqueryValue:
         if (ordinal != o.ordinal)
             return false;
         break;
@@ -259,6 +274,10 @@ std::string BoundExpr::ToString() const {
     switch (kind) {
     case BoundKind::ColumnRef:
         return name.empty() ? "#" + std::to_string(ordinal) : name;
+    case BoundKind::OuterColumn:
+        return "outer." + (name.empty() ? "#" + std::to_string(ordinal) : name);
+    case BoundKind::SubqueryValue:
+        return "$subquery" + std::to_string(ordinal);
     case BoundKind::Constant:
         return Quote(*value);
     case BoundKind::Cast:
@@ -313,13 +332,34 @@ std::string BoundExpr::ToString() const {
 }
 
 bool BoundExpr::IsConstantTree() const {
-    if (kind == BoundKind::ColumnRef || kind == BoundKind::Aggregate)
+    if (kind == BoundKind::ColumnRef || kind == BoundKind::Aggregate ||
+        kind == BoundKind::OuterColumn || kind == BoundKind::SubqueryValue)
         return false;
     for (const auto& c : children) {
         if (!c->IsConstantTree())
             return false;
     }
     return true;
+}
+
+bool BoundExpr::ContainsOuterColumn() const {
+    if (kind == BoundKind::OuterColumn)
+        return true;
+    for (const auto& c : children) {
+        if (c->ContainsOuterColumn())
+            return true;
+    }
+    return false;
+}
+
+bool BoundExpr::ContainsSubqueryValue() const {
+    if (kind == BoundKind::SubqueryValue)
+        return true;
+    for (const auto& c : children) {
+        if (c->ContainsSubqueryValue())
+            return true;
+    }
+    return false;
 }
 
 bool BoundExpr::ContainsAggregate() const {

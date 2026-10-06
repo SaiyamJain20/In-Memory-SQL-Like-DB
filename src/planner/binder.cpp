@@ -1,6 +1,7 @@
 #include "planner/binder.h"
 
 #include "common/error.h"
+#include "planner/expr_util.h"
 #include "planner/scalar_eval.h"
 #include "types/cast.h"
 
@@ -243,6 +244,9 @@ Binder::BoundTable Binder::BindTableRef(const TableRef& ref) {
 }
 
 Binder::BoundTable Binder::BindBaseTable(const BaseTableRef& ref) {
+    if (const CteEntry* cte = FindCte(Lower(ref.name))) {
+        return BindCte(*cte, ref); // a WITH query shadows a table of the same name
+    }
     std::shared_ptr<Table> table = catalog_.TryGetTable(ref.name);
     if (!table) {
         Fail(ErrorCode::Catalog, "table \"" + ref.name + "\" does not exist", ref.pos);
@@ -404,35 +408,130 @@ std::optional<int64_t> ConstantInteger(const BoundExpr& e, const char* what, siz
 
 } // namespace
 
-LogicalPtr Binder::BindSelect(const SelectStatement& sel) {
+Binder::CteScope::CteScope(Binder& binder, const SelectStatement& select)
+    : binder_(binder), saved_head_(binder.cte_head_), count_(0) {
+    for (size_t i = 0; i < select.ctes.size(); i++) {
+        const std::string name = Lower(select.ctes[i].name);
+        for (size_t k = 0; k < i; k++) {
+            if (Lower(select.ctes[k].name) == name) {
+                Unwind(); // a constructor that throws is not destroyed: undo what was pushed
+                Fail(ErrorCode::Binder, "WITH query name \"" + name + "\" specified more than once",
+                     0);
+            }
+        }
+        binder_.cte_storage_.push_back({name, &select.ctes[i], binder_.cte_head_});
+        binder_.cte_head_ = &binder_.cte_storage_.back();
+        count_++;
+    }
+}
+
+Binder::CteScope::~CteScope() {
+    Unwind();
+}
+
+void Binder::CteScope::Unwind() {
+    for (size_t i = 0; i < count_; i++) {
+        binder_.cte_storage_.pop_back();
+    }
+    binder_.cte_head_ = saved_head_;
+    count_ = 0;
+}
+
+LogicalPtr Binder::BindSelect(const SelectStatement& sel, const ExprContext* outer) {
+    CteScope ctes(*this, sel);
+    SubqueryCollector collector;
+    Block block = BindFromWhere(sel, outer, /*allow_correlated=*/false, collector);
+    return BindSelectBody(sel, outer, std::move(block), collector);
+}
+
+namespace {
+
+// The AND-ed parts of a parsed condition.
+void SplitParsedAnd(const ParsedExpr& e, std::vector<const ParsedExpr*>& out) {
+    if (e.kind == ExprKind::Binary && static_cast<const BinaryExpr&>(e).op == BinaryOp::And) {
+        SplitParsedAnd(*static_cast<const BinaryExpr&>(e).left, out);
+        SplitParsedAnd(*static_cast<const BinaryExpr&>(e).right, out);
+        return;
+    }
+    out.push_back(&e);
+}
+
+} // namespace
+
+Binder::Block Binder::BindFromWhere(const SelectStatement& sel, const ExprContext* outer,
+                                    bool allow_correlated, SubqueryCollector& collector) {
     // ---- FROM --------------------------------------------------------------------------
-    BoundTable from;
+    Block block;
     if (sel.from) {
-        from = BindTableRef(*sel.from);
+        BoundTable from = BindTableRef(*sel.from);
+        block.plan = std::move(from.plan);
+        block.scope = std::move(from.scope);
     } else {
         auto values = std::make_unique<LogicalValues>();
         values->rows.emplace_back(); // one row, no columns
-        from.plan = std::move(values);
+        block.plan = std::move(values);
     }
-    LogicalPtr plan = std::move(from.plan);
-    const Scope& scope = from.scope;
-    const ExprContext plain{&scope, false};
-    const ExprContext with_aggs{&scope, true};
+    LogicalPtr& plan = block.plan;
+    Scope& scope = block.scope;
+    const ExprContext plain{&scope, false, outer, &collector};
 
     // ---- WHERE -------------------------------------------------------------------------
     if (sel.where) {
-        BoundExprPtr pred = BindExpr(*sel.where, plain);
-        if (pred->type.id() != TypeId::Boolean) {
-            Fail(ErrorCode::Type, "WHERE clause must be BOOLEAN but is " + pred->type.ToString(),
-                 sel.where->pos);
+        std::vector<const ParsedExpr*> parts;
+        SplitParsedAnd(*sel.where, parts);
+        std::vector<BoundExprPtr> conditions;
+        std::vector<const ParsedExpr*> subquery_conditions;
+        for (const ParsedExpr* part : parts) {
+            if (IsSubqueryPredicate(*part)) {
+                subquery_conditions.push_back(part);
+                continue;
+            }
+            BoundExprPtr pred = BindExpr(*part, plain);
+            if (pred->type.id() != TypeId::Boolean) {
+                Fail(ErrorCode::Type,
+                     "WHERE clause must be BOOLEAN but is " + pred->type.ToString(), part->pos);
+            }
+            if (pred->ContainsOuterColumn()) {
+                if (!allow_correlated) {
+                    Fail(ErrorCode::NotImplemented,
+                         "a correlated condition is not supported in this position", part->pos);
+                }
+                if (pred->ContainsSubqueryValue()) {
+                    Fail(ErrorCode::NotImplemented,
+                         "a correlated condition that contains a subquery is not supported yet",
+                         part->pos);
+                }
+                block.correlated.push_back(std::move(pred));
+            } else {
+                conditions.push_back(std::move(pred));
+            }
         }
-        auto filter = std::make_unique<LogicalFilter>();
-        filter->names = plan->names;
-        filter->types = plan->types;
-        filter->predicate = std::move(pred);
-        filter->children.push_back(std::move(plan));
-        plan = std::move(filter);
+        // the scalar subqueries met in the conditions are joined in first, then replaced
+        AttachScalars(plan, &scope, collector, /*allow_correlated=*/true);
+        for (BoundExprPtr& c : conditions) {
+            ReplaceSubqueryValues(c, collector);
+        }
+        if (!conditions.empty()) {
+            auto filter = std::make_unique<LogicalFilter>();
+            filter->names = plan->names;
+            filter->types = plan->types;
+            filter->predicate = AndAll(std::move(conditions));
+            filter->children.push_back(std::move(plan));
+            plan = std::move(filter);
+        }
+        for (const ParsedExpr* c : subquery_conditions) {
+            ApplySubqueryPredicate(plan, scope, *c, plain);
+        }
     }
+    return block;
+}
+
+LogicalPtr Binder::BindSelectBody(const SelectStatement& sel, const ExprContext* outer, Block block,
+                                  SubqueryCollector& collector) {
+    LogicalPtr plan = std::move(block.plan);
+    Scope& scope = block.scope;
+    const ExprContext plain{&scope, false, outer, &collector};
+    const ExprContext with_aggs{&scope, true, outer, &collector};
 
     // ---- select list -------------------------------------------------------------------
     std::vector<SelectItemBound> items;
@@ -639,7 +738,11 @@ LogicalPtr Binder::BindSelect(const SelectStatement& sel) {
         agg->aggregates = std::move(aggregates);
         agg->children.push_back(std::move(plan));
         plan = std::move(agg);
+        // scalar subqueries of the select list / HAVING / ORDER BY are joined onto the aggregate's
+        // output (they are constants of the query; a correlated one cannot be, there)
+        AttachScalars(plan, nullptr, collector, /*allow_correlated=*/false);
         if (having) {
+            ReplaceSubqueryValues(having, collector);
             auto filter = std::make_unique<LogicalFilter>();
             filter->names = plan->names;
             filter->types = plan->types;
@@ -647,6 +750,11 @@ LogicalPtr Binder::BindSelect(const SelectStatement& sel) {
             filter->children.push_back(std::move(plan));
             plan = std::move(filter);
         }
+    } else {
+        AttachScalars(plan, &scope, collector, /*allow_correlated=*/true);
+    }
+    for (auto& it : items) {
+        ReplaceSubqueryValues(it.expr, collector);
     }
 
     // ---- projection ----------------------------------------------------------------------

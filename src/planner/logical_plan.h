@@ -30,6 +30,7 @@ enum class LogicalKind : uint8_t {
     Copy,
     Explain,
     Checkpoint,
+    ScalarGuard,
 };
 
 struct LogicalOperator;
@@ -81,6 +82,8 @@ struct LogicalAggregate : LogicalOperator {
     std::string Describe() const override;
 };
 
+// Semi / Anti / AntiNullAware joins (from unnested subqueries) output the LEFT columns only; their
+// condition is still over left ++ right.
 struct LogicalJoin : LogicalOperator {
     JoinType join_type = JoinType::Inner;
     BoundExprPtr condition; // null for CROSS joins; over left ++ right columns otherwise
@@ -147,6 +150,13 @@ struct LogicalCopy : LogicalOperator {
     std::string delimiter = ",";
     bool header = false;
     LogicalCopy() : LogicalOperator(LogicalKind::Copy) {}
+    std::string Describe() const override;
+};
+
+// Exactly one row: the child's row; a row of NULLs if the child has none; an error if it has
+// several. What a scalar subquery that is not statically a single row is wrapped in.
+struct LogicalScalarGuard : LogicalOperator {
+    LogicalScalarGuard() : LogicalOperator(LogicalKind::ScalarGuard) {}
     std::string Describe() const override;
 };
 

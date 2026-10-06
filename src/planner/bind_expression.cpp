@@ -195,6 +195,30 @@ Binder::Lookup Binder::ResolveColumn(const Scope& scope, const std::string& tabl
 }
 
 BoundExprPtr Binder::BindColumnRef(const ColumnRefExpr& e, const ExprContext& ctx) {
+    if (BoundExprPtr bound = TryBindColumnRef(e, ctx)) {
+        return bound;
+    }
+    // Not found in any block. A qualified name is blamed on the innermost block that has a table
+    // of that name (`t.nope`: no column "nope" in table "t"); otherwise on the block it was written
+    // in.
+    const std::string table = Lower(e.table), column = Lower(e.column);
+    if (!table.empty()) {
+        for (const ExprContext* c = &ctx; c != nullptr; c = c->outer) {
+            if (c->scope != nullptr &&
+                std::any_of(c->scope->columns.begin(), c->scope->columns.end(),
+                            [&](const ScopeColumn& col) { return col.table == table; })) {
+                Fail(ErrorCode::Binder,
+                     "Referenced column \"" + column + "\" not found in table \"" + table + "\"",
+                     e.pos);
+            }
+        }
+        Fail(ErrorCode::Binder, "Referenced table \"" + table + "\" not found in FROM clause",
+             e.pos);
+    }
+    Fail(ErrorCode::Binder, "Referenced column \"" + column + "\" not found in FROM clause", e.pos);
+}
+
+BoundExprPtr Binder::TryBindColumnRef(const ColumnRefExpr& e, const ExprContext& ctx) {
     static const Scope kEmpty;
     const Scope& scope = ctx.scope ? *ctx.scope : kEmpty;
     const std::string table = Lower(e.table), column = Lower(e.column);
@@ -225,18 +249,19 @@ BoundExprPtr Binder::BindColumnRef(const ColumnRefExpr& e, const ExprContext& ct
     case Lookup::NotFound:
         break;
     }
-    if (!table.empty()) {
-        const bool table_exists =
-            std::any_of(scope.columns.begin(), scope.columns.end(),
-                        [&](const ScopeColumn& c) { return c.table == table; });
-        if (!table_exists) {
-            Fail(ErrorCode::Binder, "Referenced table \"" + table + "\" not found in FROM clause",
-                 e.pos);
-        }
-        Fail(ErrorCode::Binder,
-             "Referenced column \"" + column + "\" not found in table \"" + table + "\"", e.pos);
+    if (ctx.outer == nullptr) {
+        return nullptr;
     }
-    Fail(ErrorCode::Binder, "Referenced column \"" + column + "\" not found in FROM clause", e.pos);
+    // not a column of this block: it may belong to the enclosing one (a correlated reference)
+    BoundExprPtr outer = TryBindColumnRef(e, *ctx.outer);
+    if (outer == nullptr) {
+        return nullptr;
+    }
+    if (outer->kind == BoundKind::OuterColumn) {
+        Fail(ErrorCode::NotImplemented,
+             "a subquery referring to a column two query levels up is not supported yet", e.pos);
+    }
+    return BoundExpr::OuterColumn(outer->ordinal, outer->type, outer->name);
 }
 
 // ------------------------------------------------------------------------------ expressions
@@ -264,10 +289,13 @@ BoundExprPtr Binder::BindExpr(const ParsedExpr& e, const ExprContext& ctx) {
         return BindBetween(static_cast<const BetweenExpr&>(e), ctx);
     case ExprKind::InList:
         return BindInList(static_cast<const InListExpr&>(e), ctx);
+    case ExprKind::ScalarSubquery:
+        return BindScalarSubquery(static_cast<const ScalarSubqueryExpr&>(e), ctx);
     case ExprKind::InSubquery:
     case ExprKind::Exists:
-    case ExprKind::ScalarSubquery:
-        Fail(ErrorCode::NotImplemented, "subqueries in expressions are not supported yet", e.pos);
+        Fail(ErrorCode::NotImplemented,
+             "EXISTS and IN subqueries are only supported as AND-ed conditions of a WHERE clause",
+             e.pos);
     case ExprKind::Like:
         return BindLike(static_cast<const LikeExpr&>(e), ctx);
     case ExprKind::Case:

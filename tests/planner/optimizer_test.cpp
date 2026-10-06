@@ -283,6 +283,120 @@ TEST(OptimizerShapes, InnerJoinTreesAreNotFlattenedAcrossAnOuterJoin) {
         "    SCAN small [k]\n");
 }
 
+TEST(OptimizerShapes, SemiAndAntiJoinsSinkToTheSideOfTheJoinThatTheyMention) {
+    Env env;
+    env.SizedTables();
+    // only big is mentioned: the semi join filters big before the join with mid
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.v)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (big.k = mid.k)\n"
+              "    JOIN SEMI ON (v = k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN small [k]\n"
+              "    SCAN mid [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE big.v NOT IN "
+                          "(SELECT k FROM small)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (big.k = mid.k)\n"
+              "    JOIN ANTI (NULL-AWARE) ON (v = k)\n"
+              "      SCAN big [k, v]\n"
+              "      PROJECT [k]\n"
+              "        SCAN small [k]\n"
+              "    SCAN mid [k]\n");
+    // only mid is mentioned: it sinks into the other input
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = mid.w)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (big.k = mid.k)\n"
+              "    SCAN big [k, v]\n"
+              "    JOIN SEMI ON (w = k)\n"
+              "      SCAN mid [k, w]\n"
+              "      SCAN small [k]\n");
+    // a residual that mentions both inputs has to stay above the join
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = mid.w AND small.k < big.v)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON ((w = k) AND (k < v))\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN mid [k, w]\n"
+              "    SCAN small [k]\n");
+}
+
+TEST(OptimizerShapes, SemiAndAntiJoinsStayAboveTheNullSuppliedSideOfAnOuterJoin) {
+    Env env;
+    env.SizedTables();
+    // the semi join mentions mid, the null-supplied side of the LEFT join: moving it below would
+    // keep the NULL-extended rows it rejects
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big LEFT JOIN mid ON big.k = mid.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = mid.w)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON (w = k)\n"
+              "    JOIN LEFT ON (big.k = mid.k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN mid [k, w]\n"
+              "    SCAN small [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big LEFT JOIN mid ON big.k = mid.k WHERE NOT EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.v)"),
+              "PROJECT [v]\n"
+              "  JOIN ANTI ON (v = k)\n"
+              "    JOIN LEFT ON (big.k = mid.k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN mid [k]\n"
+              "    SCAN small [k]\n");
+}
+
+TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {
+    Env env;
+    env.SizedTables();
+    // an aggregate is one row by construction: no guard
+    EXPECT_EQ(env.Explain("SELECT v FROM big WHERE v > (SELECT avg(w) FROM mid)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (CAST(v AS DOUBLE) > $scalar0)\n"
+              "    SCAN big [v]\n"
+              "    PROJECT [avg(CAST(w AS DOUBLE)) AS avg(w)]\n"
+              "      AGGREGATE groups=[] aggregates=[avg(CAST(w AS DOUBLE))]\n"
+              "        SCAN mid [w]\n");
+    // anything else could return several rows: guarded
+    EXPECT_EQ(env.Explain("SELECT v FROM big WHERE v = (SELECT w FROM mid)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (v = $scalar0)\n"
+              "    SCAN big [v]\n"
+              "    SCALAR_GUARD (one row, NULL if none, error if several)\n"
+              "      PROJECT [w]\n"
+              "        SCAN mid [w]\n");
+    // an uncorrelated EXISTS has no keys at all; the build side needs no columns
+    EXPECT_EQ(env.Explain("SELECT v FROM big WHERE EXISTS (SELECT 1 FROM small)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI\n"
+              "    SCAN big [v]\n"
+              "    PROJECT []\n"
+              "      SCAN small [k]\n");
+    EXPECT_EQ(
+        env.Explain("SELECT v FROM big WHERE NOT EXISTS (SELECT 1 FROM small WHERE z = 'z1')"),
+        "PROJECT [v]\n"
+        "  JOIN ANTI\n"
+        "    SCAN big [v]\n"
+        "    PROJECT []\n"
+        "      FILTER (z = 'z1')\n"
+        "        SCAN small [z] prune(z = z1)\n");
+}
+
+TEST(OptimizerShapes, ACorrelatedScalarAggregateJoinsOnItsGroupedInner) {
+    Env env;
+    env.SizedTables();
+    EXPECT_EQ(
+        env.Explain("SELECT v FROM big b WHERE v > (SELECT avg(w) FROM mid WHERE mid.k = b.k)"),
+        "PROJECT [v]\n"
+        "  FILTER (CAST(v AS DOUBLE) > $scalar0)\n"
+        "    JOIN LEFT ON (k = $scalar0_key)\n"
+        "      SCAN big [k, v]\n"
+        "      PROJECT [#0 AS $key0, avg(CAST(w AS DOUBLE)) AS $value]\n"
+        "        AGGREGATE groups=[k] aggregates=[avg(CAST(w AS DOUBLE))]\n"
+        "          SCAN mid [k, w]\n");
+}
+
 // ---------------------------------------------------------------------------------- semantics
 
 namespace {
@@ -359,7 +473,7 @@ struct ColRef {
 
 class QueryGen {
   public:
-    explicit QueryGen(Rng& rng) : rng_(rng) {}
+    explicit QueryGen(Rng& rng, bool subqueries = false) : rng_(rng), subqueries_(subqueries) {}
 
     std::string Query() {
         scope_.clear();
@@ -371,6 +485,10 @@ class QueryGen {
         }
         if (!extra_where_.empty()) {
             where += (where.empty() ? " WHERE " : " AND ") + extra_where_;
+        }
+        const size_t nsub = subqueries_ ? RandBelow(rng_, 3) : 0;
+        for (size_t i = 0; i < nsub; i++) {
+            where += (where.empty() ? " WHERE " : " AND ") + SubqueryPred();
         }
         std::string select, tail;
         int outputs;
@@ -564,12 +682,59 @@ class QueryGen {
             return c.name + " IS NOT NULL";
         }
     }
+    // A subquery over r2 (alias s) or r3 (alias t), as an AND-ed conjunct: every shape the binder
+    // unnests, correlated on an integer column of the outer query.
+    std::string SubqueryPred() {
+        const std::string outer = IntCol().name;
+        const std::string outer2 = IntCol().name;
+        const std::string k = std::to_string(RandBelow(rng_, 5));
+        static const char* const kCmp[] = {"=", "<>", "<", "<=", ">", ">="};
+        const std::string cmp = kCmp[RandBelow(rng_, 6)];
+        switch (RandBelow(rng_, 14)) {
+        case 0:
+            return outer + " IN (SELECT s.a FROM r2 AS s WHERE s.d > " + k + ")";
+        case 1:
+            return outer + " NOT IN (SELECT s.d FROM r2 AS s WHERE s.d IS NOT NULL AND s.a > " + k +
+                   ")";
+        case 2: // NOT IN over a column that holds NULLs
+            return outer + " NOT IN (SELECT s.d FROM r2 AS s WHERE s.a < " + k + ")";
+        case 3:
+            return outer + " IN (SELECT t.d FROM r3 AS t)";
+        case 4:
+            return "EXISTS (SELECT 1 FROM r2 AS s WHERE s.a = " + outer + ")";
+        case 5:
+            return "NOT EXISTS (SELECT 1 FROM r2 AS s WHERE s.a = " + outer + " AND s.d " + cmp +
+                   " " + k + ")";
+        case 6: // residual referencing both sides
+            return "EXISTS (SELECT 1 FROM r2 AS s WHERE s.a = " + outer + " AND s.d " + cmp + " " +
+                   outer2 + ")";
+        case 7:
+            return "NOT EXISTS (SELECT 1 FROM r2 AS s WHERE s.d " + cmp + " " + outer + ")";
+        case 8: // uncorrelated EXISTS: a constant
+            return std::string(Chance(rng_, 0.5) ? "" : "NOT ") +
+                   "EXISTS (SELECT 1 FROM r3 AS t WHERE t.g " + cmp + " " + k + ")";
+        case 9:
+            return outer + " " + cmp + " (SELECT max(s.d) FROM r2 AS s WHERE s.a = " + outer2 + ")";
+        case 10:
+            return "(SELECT count(*) FROM r2 AS s WHERE s.a = " + outer + ") " + cmp + " " + k;
+        case 11:
+            return outer + " " + cmp + " (SELECT avg(t.g) FROM r3 AS t)";
+        case 12:
+            return outer + " IN (SELECT s.d FROM r2 AS s WHERE s.a = " + outer2 + ")";
+        default:
+            return "EXISTS (SELECT 1 FROM r2 AS s WHERE s.a = " + outer +
+                   " AND EXISTS (SELECT 1 "
+                   "FROM r3 AS t WHERE t.d = s.d))";
+        }
+    }
+
     std::string Pred2() {
         const ColRef c = scope_[RandBelow(rng_, scope_.size())];
         return c.name + (Chance(rng_, 0.5) ? " IS NULL" : " > " + Const(c.kind));
     }
 
     Rng& rng_;
+    bool subqueries_;
     std::vector<ColRef> scope_;
     std::string extra_where_;
     bool ordered_ = false;
@@ -708,5 +873,43 @@ TEST_P(OptimizerEquivalence, RandomQueriesGiveTheSameAnswerWithAndWithoutTheOpti
 }
 
 INSTANTIATE_TEST_SUITE_P(Seeds, OptimizerEquivalence, ::testing::Values(1, 2, 3, 4, 5, 6));
+
+// The same with subqueries in the WHERE clause: unnesting plus semi / anti join pushdown, ON vs
+// OFF.
+class OptimizerSubqueryEquivalence : public ::testing::TestWithParam<uint64_t> {};
+
+TEST_P(OptimizerSubqueryEquivalence, RandomSubqueriesGiveTheSameAnswerWithAndWithoutTheOptimizer) {
+    Rng rng(GetParam());
+    Env env;
+    LoadRandomTables(env, rng);
+    QueryGen gen(rng, /*subqueries=*/true);
+    int ok_queries = 0, nonempty = 0, with_subquery = 0;
+    constexpr int kQueries = 500;
+    for (int i = 0; i < kQueries; i++) {
+        const std::string sql = gen.Query();
+        with_subquery += sql.find("SELECT", 8) != std::string::npos ? 1 : 0;
+        env.conn.SetOptimizerEnabled(false);
+        const QueryResult plain = env.conn.Query(sql);
+        env.conn.SetOptimizerEnabled(true);
+        const QueryResult optimized = env.conn.Query(sql);
+        std::string why;
+        ASSERT_TRUE(SameResult(plain, optimized, gen.ordered(), why)) << sql << "\n  " << why;
+        if (!plain.ok() && std::getenv("CDB_SHOW_FAILED")) {
+            std::cerr << "FAILED: " << sql << "\n   " << plain.error_message().substr(0, 150)
+                      << "\n";
+        }
+        if (plain.ok()) {
+            ok_queries++;
+            nonempty += plain.RowCount() > 0 ? 1 : 0;
+        }
+    }
+    EXPECT_GT(with_subquery, kQueries / 2) << "most queries should contain a subquery";
+    EXPECT_GT(ok_queries, kQueries * 9 / 10) << "the generator should produce valid queries";
+    EXPECT_GT(nonempty, kQueries / 4)
+        << "and many should return rows, or the comparison proves little";
+}
+
+INSTANTIATE_TEST_SUITE_P(Seeds, OptimizerSubqueryEquivalence,
+                         ::testing::Values(11, 12, 13, 14, 15, 16, 17, 18));
 
 } // namespace cdb

@@ -19,8 +19,8 @@ import duckdb
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TABLES = ["nation", "region", "part", "supplier", "partsupp", "customer", "orders", "lineitem"]
-# Queries without subqueries / WITH: the ones the binder (and later the executor) supports.
-SUPPORTED = [1, 3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 19]
+# All 22 TPC-H queries (subqueries and WITH are supported since Phase 8).
+SUPPORTED = list(range(1, 23))
 
 
 def main():

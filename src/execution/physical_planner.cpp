@@ -1,5 +1,7 @@
 #include "execution/physical_planner.h"
 
+#include "execution/scalar_guard.h"
+
 #include "execution/basic_operators.h"
 #include "execution/hash_aggregate.h"
 #include "execution/hash_join.h"
@@ -131,6 +133,9 @@ class Builder {
         case LogicalKind::Join:
             BuildJoin(static_cast<const LogicalJoin&>(op), current);
             return;
+        case LogicalKind::ScalarGuard:
+            Breaker(*op.children[0], current, plan_.Make<PhysicalScalarGuard>(op.types));
+            return;
         default:
             throw Error(ErrorCode::Internal, "cannot plan operator: " + op.Describe());
         }
@@ -193,15 +198,31 @@ class Builder {
         }
         const bool swap = join.join_type == JoinType::Right;
         JoinSplit split = SplitCondition(join.condition.get(), lw);
-        const PhysicalJoinType type =
-            join.join_type == JoinType::Inner || join.join_type == JoinType::Cross
-                ? PhysicalJoinType::Inner
-                : PhysicalJoinType::Left;
+        PhysicalJoinType type = PhysicalJoinType::Left;
+        switch (join.join_type) {
+        case JoinType::Inner:
+        case JoinType::Cross:
+            type = PhysicalJoinType::Inner;
+            break;
+        case JoinType::Semi:
+            type = PhysicalJoinType::Semi;
+            break;
+        case JoinType::Anti:
+            type = PhysicalJoinType::Anti;
+            break;
+        case JoinType::AntiNullAware:
+            type = PhysicalJoinType::AntiNullAware;
+            break;
+        default:
+            break; // Left / Right
+        }
 
         const LogicalOperator& probe = swap ? right : left;
         const LogicalOperator& build = swap ? left : right;
         std::vector<LogicalType> out_types = probe.types;
-        out_types.insert(out_types.end(), build.types.begin(), build.types.end());
+        if (!IsFilterJoin(join.join_type)) { // semi and anti joins keep the probe columns only
+            out_types.insert(out_types.end(), build.types.begin(), build.types.end());
+        }
         BoundExprPtr residual = std::move(split.residual);
         std::vector<BoundExprPtr> probe_keys = std::move(swap ? split.right_keys : split.left_keys);
         std::vector<BoundExprPtr> build_keys = std::move(swap ? split.left_keys : split.right_keys);

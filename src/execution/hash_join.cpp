@@ -28,6 +28,9 @@ struct JoinGlobalState final : GlobalSinkState {
         ChunkStore payload, keys;
     };
     std::vector<Part> parts;
+    // Build rows seen, and those left out because a key was NULL (summed over the threads by
+    // Combine): what a null-aware anti join needs to know about the build side.
+    uint64_t rows_seen = 0, rows_with_null_key = 0;
     ChunkStore payload; // build rows (all right columns)
     ChunkStore keys;    // their evaluated join keys, same row ids (no columns for key-less joins)
     // One entry per build row: its hash and the next row of its bucket's chain, side by side so
@@ -49,6 +52,7 @@ struct BuildLocalState final : LocalSinkState {
     ChunkStore keys;
     std::vector<ExpressionExecutor> key_executors;
     DataChunk key_chunk;
+    uint64_t rows_seen = 0, rows_with_null_key = 0;
 };
 
 struct ProbeState final : OperatorState {
@@ -99,6 +103,8 @@ PhysicalHashJoin::PhysicalHashJoin(std::vector<LogicalType> types, PhysicalJoinT
     const bool keep_right =
         join_type_ == PhysicalJoinType::Inner || join_type_ == PhysicalJoinType::Left;
     CDB_CHECK(this->types().size() == left_types_.size() + (keep_right ? right_types_.size() : 0));
+    CDB_CHECK(join_type_ != PhysicalJoinType::AntiNullAware ||
+              (left_keys_.size() == 1 && residual_ == nullptr));
 }
 
 std::string PhysicalHashJoin::Name() const {
@@ -106,7 +112,7 @@ std::string PhysicalHashJoin::Name() const {
 }
 
 std::string PhysicalHashJoin::Describe() const {
-    static const char* const kNames[] = {"INNER", "LEFT", "SEMI", "ANTI"};
+    static const char* const kNames[] = {"INNER", "LEFT", "SEMI", "ANTI", "ANTI (NULL-AWARE)"};
     std::string out = Name() + " " + kNames[static_cast<int>(join_type_)];
     for (size_t k = 0; k < left_keys_.size(); k++) {
         out +=
@@ -146,6 +152,7 @@ std::unique_ptr<LocalSinkState> PhysicalHashJoin::GetLocalSinkState(GlobalSinkSt
 SinkResult PhysicalHashJoin::Sink(GlobalSinkState&, LocalSinkState& state, const DataChunk& input) {
     auto& l = static_cast<BuildLocalState&>(state);
     const idx_t n = input.size();
+    l.rows_seen += n;
     if (right_keys_.empty()) {
         l.payload.Append(input);
         return SinkResult::NeedMoreInput;
@@ -170,6 +177,7 @@ SinkResult PhysicalHashJoin::Sink(GlobalSinkState&, LocalSinkState& state, const
             keep.Set(kept++, static_cast<sel_t>(i));
         }
     }
+    l.rows_with_null_key += n - kept;
     if (kept == n) {
         l.payload.Append(input);
         l.keys.Append(l.key_chunk);
@@ -184,6 +192,8 @@ void PhysicalHashJoin::Combine(GlobalSinkState& global, LocalSinkState& local) {
     auto& g = static_cast<JoinGlobalState&>(global);
     auto& l = static_cast<BuildLocalState&>(local);
     const std::lock_guard<std::mutex> lock(g.mutex);
+    g.rows_seen += l.rows_seen;
+    g.rows_with_null_key += l.rows_with_null_key;
     g.parts.push_back({std::move(l.payload), std::move(l.keys)});
 }
 
@@ -412,6 +422,13 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
             HashColumns(cols.data(), cols.size(), n, st.hashes.data());
             st.comparator.emplace(cols, /*nulls_equal=*/false);
             Prefetch(st, build, n);
+        } else if (!residual_ &&
+                   (join_type_ == PhysicalJoinType::Semi || join_type_ == PhysicalJoinType::Anti)) {
+            // EXISTS / NOT EXISTS of an uncorrelated subquery: every left row has a partner iff the
+            // build side has any row, so no pair is ever enumerated
+            std::fill(st.matched.begin(), st.matched.end(), build.payload.Count() > 0 ? 1 : 0);
+            st.pos = n;
+            st.phase = ProbeState::Phase::Unmatched;
         }
     }
 
@@ -510,9 +527,21 @@ OperatorResult PhysicalHashJoin::Execute(OperatorState& state, const DataChunk& 
     const bool want_matched = join_type_ == PhysicalJoinType::Semi;
     SelectionVector sel(std::max<idx_t>(n, 1));
     idx_t count = 0;
-    for (idx_t i = 0; i < n; i++) {
-        if ((st.matched[i] != 0) == want_matched) {
-            sel.Set(count++, static_cast<sel_t>(i));
+    if (join_type_ == PhysicalJoinType::AntiNullAware) {
+        // x NOT IN (build): TRUE for every row if the build side is empty; otherwise only for a
+        // non-NULL x that matches nothing, and only if the build side has no NULL key at all
+        const bool all = build.rows_seen == 0;
+        const bool none = !all && build.rows_with_null_key > 0;
+        for (idx_t i = 0; i < n && !none; i++) {
+            if (all || (st.key_ok[i] != 0 && st.matched[i] == 0)) {
+                sel.Set(count++, static_cast<sel_t>(i));
+            }
+        }
+    } else {
+        for (idx_t i = 0; i < n; i++) {
+            if ((st.matched[i] != 0) == want_matched) {
+                sel.Set(count++, static_cast<sel_t>(i));
+            }
         }
     }
     if (count > 0) {

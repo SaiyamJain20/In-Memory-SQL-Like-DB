@@ -61,7 +61,8 @@ std::string LogicalAggregate::Describe() const {
 }
 
 std::string LogicalJoin::Describe() const {
-    static const char* const kNames[] = {"INNER", "LEFT", "RIGHT", "FULL", "CROSS"};
+    static const char* const kNames[] = {"INNER", "LEFT", "RIGHT", "FULL",
+                                         "CROSS", "SEMI", "ANTI",  "ANTI (NULL-AWARE)"};
     std::string out = std::string("JOIN ") + kNames[static_cast<int>(join_type)];
     if (condition)
         out += " ON " + condition->ToString();
@@ -112,6 +113,10 @@ std::string LogicalInsert::Describe() const {
 std::string LogicalCopy::Describe() const {
     return "COPY " + table->name() + " FROM '" + path + "' (delimiter '" + delimiter +
            "', header " + (header ? "true" : "false") + ")";
+}
+
+std::string LogicalScalarGuard::Describe() const {
+    return "SCALAR_GUARD (one row, NULL if none, error if several)";
 }
 
 std::string LogicalCheckpoint::Describe() const {

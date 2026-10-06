@@ -203,6 +203,9 @@ double EstimateRows(const LogicalOperator& op) {
         if (j.join_type == JoinType::Left) {
             return l;
         }
+        if (IsFilterJoin(j.join_type)) {
+            return std::max(1.0, l * 0.5); // a semi / anti join keeps some of the left rows
+        }
         return j.condition ? std::max(l, r) : l * r;
     }
     case LogicalKind::Limit: {
@@ -523,10 +526,105 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
     return proj;
 }
 
+// Semi / anti joins (unnested subqueries). Their output is the left side, so a predicate above them
+// refers to left columns only and moves to the left child; a condition part that only mentions the
+// right side filters the subquery's rows before the join. And the join itself moves down: if its
+// condition needs only the columns of one input of an inner join below it, it is applied to that
+// input first (the semi join then shrinks the rows before they are joined further, instead of
+// after).
+LogicalPtr PushFilterJoin(LogicalPtr op, Conjuncts conjuncts) {
+    auto& join = static_cast<LogicalJoin&>(*op);
+    const idx_t lw = join.children[0]->ColumnCount();
+    LogicalOperator& left = *join.children[0];
+    if (left.kind == LogicalKind::Join && join.condition) {
+        auto& inner = static_cast<LogicalJoin&>(left);
+        if (inner.join_type == JoinType::Inner || inner.join_type == JoinType::Cross) {
+            const idx_t a_width = inner.children[0]->ColumnCount();
+            std::set<idx_t> refs;
+            CollectColumnRefs(*join.condition, refs);
+            std::set<idx_t> left_refs;
+            for (const idx_t r : refs) {
+                if (r < lw) {
+                    left_refs.insert(r);
+                }
+            }
+            const bool in_a = !left_refs.empty() && *left_refs.rbegin() < a_width;
+            const bool in_b = !left_refs.empty() && *left_refs.begin() >= a_width;
+            if (in_a || in_b) {
+                // Semi(A x B, S) -> Semi(A, S) x B  or  A x Semi(B, S); the inner join's own
+                // condition and everything above keep their meaning (the output columns are
+                // unchanged).
+                const idx_t b_width = lw - a_width;
+                LogicalPtr a = std::move(inner.children[0]);
+                LogicalPtr b = std::move(inner.children[1]);
+                LogicalPtr subquery = std::move(join.children[1]);
+                auto filter = std::make_unique<LogicalJoin>();
+                filter->join_type = join.join_type;
+                if (in_a) {
+                    // A's columns keep their ordinals; the subquery's columns now follow A alone
+                    filter->condition = RemapColumns(*join.condition, [lw, b_width](idx_t o) {
+                        return o < lw ? o : o - b_width;
+                    });
+                    filter->names = a->names;
+                    filter->types = a->types;
+                    filter->children.push_back(std::move(a));
+                    filter->children.push_back(std::move(subquery));
+                    inner.children[0] = std::move(filter);
+                    inner.children[1] = std::move(b);
+                } else {
+                    // B's columns start at a_width in the old layout and at 0 in the new; the
+                    // subquery's columns follow the left side in both
+                    filter->condition =
+                        RemapColumns(*join.condition, [a_width](idx_t o) { return o - a_width; });
+                    filter->names = b->names;
+                    filter->types = b->types;
+                    filter->children.push_back(std::move(b));
+                    filter->children.push_back(std::move(subquery));
+                    inner.children[0] = std::move(a);
+                    inner.children[1] = std::move(filter);
+                }
+                // `inner` is the new top: its own condition is unchanged (it only mentions A's and
+                // B's columns, in the same positions)
+                LogicalPtr top = std::move(join.children[0]);
+                return Push(std::move(top), std::move(conjuncts));
+            }
+        }
+    }
+    Conjuncts to_left, keep, to_right;
+    for (auto& c : conjuncts) {
+        to_left.push_back(std::move(c)); // above a filter join only left columns exist
+    }
+    if (join.condition) {
+        Conjuncts parts;
+        SplitAndFactor(std::move(join.condition), parts);
+        for (auto& p : parts) {
+            std::set<idx_t> refs;
+            CollectColumnRefs(*p, refs);
+            const bool left_only = !refs.empty() && *refs.rbegin() < lw;
+            const bool right_only = !refs.empty() && *refs.begin() >= lw;
+            if (right_only) {
+                to_right.push_back(RemapColumns(*p, [lw](idx_t o) { return o - lw; }));
+            } else if (left_only && join.join_type == JoinType::Semi) {
+                to_left.push_back(
+                    std::move(p)); // EXISTS (... AND f(left)) = f(left) AND EXISTS (...)
+            } else {
+                keep.push_back(std::move(p)); // for anti joins f(left) cannot leave the condition
+            }
+        }
+    }
+    join.condition = AndAll(std::move(keep));
+    join.children[0] = Push(std::move(join.children[0]), std::move(to_left));
+    join.children[1] = Push(std::move(join.children[1]), std::move(to_right));
+    return op;
+}
+
 LogicalPtr PushJoin(LogicalPtr op, Conjuncts conjuncts) {
     auto& join = static_cast<LogicalJoin&>(*op);
     if (join.join_type == JoinType::Inner || join.join_type == JoinType::Cross) {
         return PushInnerJoinTree(std::move(op), std::move(conjuncts));
+    }
+    if (IsFilterJoin(join.join_type)) {
+        return PushFilterJoin(std::move(op), std::move(conjuncts));
     }
     const idx_t lw = join.children[0]->ColumnCount();
     const bool preserve_left = join.join_type == JoinType::Left;
@@ -613,6 +711,11 @@ LogicalPtr Push(LogicalPtr op, Conjuncts conjuncts) {
     }
     case LogicalKind::Join:
         return PushJoin(std::move(op), std::move(conjuncts));
+    case LogicalKind::ScalarGuard:
+        // one row whatever the child holds: nothing moves through it, but the subquery under it is
+        // optimized on its own
+        op->children[0] = Push(std::move(op->children[0]), {});
+        return Wrap(std::move(op), std::move(conjuncts));
     case LogicalKind::Order:
     case LogicalKind::Distinct:
         op->children[0] = Push(std::move(op->children[0]), std::move(conjuncts));
@@ -747,6 +850,38 @@ Mapping Prune(LogicalOperator& op, const std::vector<bool>& required) {
     case LogicalKind::Join: {
         auto& j = static_cast<LogicalJoin&>(op);
         const idx_t lw = op.children[0]->ColumnCount();
+        if (IsFilterJoin(j.join_type)) {
+            // output = the left columns; the condition may also need left and right columns
+            std::vector<bool> need_left = required;
+            std::vector<bool> need_right(op.children[1]->ColumnCount(), false);
+            if (j.condition) {
+                std::set<idx_t> refs;
+                CollectColumnRefs(*j.condition, refs);
+                for (const idx_t r : refs) {
+                    if (r < lw) {
+                        need_left.at(r) = true;
+                    } else {
+                        need_right.at(r - lw) = true;
+                    }
+                }
+            }
+            const Mapping lm = Prune(*op.children[0], need_left);
+            const Mapping rm = Prune(*op.children[1], need_right);
+            const idx_t new_lw = op.children[0]->ColumnCount();
+            Mapping both(lw + rm.size(), kDropped);
+            for (idx_t i = 0; i < lw; i++) {
+                both[i] = lm[i];
+            }
+            for (idx_t i = 0; i < rm.size(); i++) {
+                both[lw + i] = rm[i] == kDropped ? kDropped : new_lw + rm[i];
+            }
+            if (j.condition) {
+                j.condition = Remap(*j.condition, both);
+            }
+            j.names = op.children[0]->names;
+            j.types = op.children[0]->types;
+            return lm;
+        }
         std::vector<bool> need = required;
         if (j.condition) {
             Need(*j.condition, need);
@@ -792,8 +927,10 @@ Mapping Prune(LogicalOperator& op, const std::vector<bool>& required) {
         op.types = op.children[0]->types;
         return m;
     }
-    case LogicalKind::Distinct: {
-        // DISTINCT depends on every column: nothing below may be dropped.
+    case LogicalKind::Distinct:
+    case LogicalKind::ScalarGuard: {
+        // DISTINCT depends on every column (and a scalar guard counts rows): nothing below may be
+        // dropped.
         Prune(*op.children[0], std::vector<bool>(op.ColumnCount(), true));
         return Identity(op.ColumnCount());
     }

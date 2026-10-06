@@ -129,7 +129,7 @@ class Parser {
 
     StatementPtr ParseStatementBody() {
         const Token& t = Peek();
-        if (t.IsKeyword(Keyword::SELECT))
+        if (t.IsKeyword(Keyword::SELECT) || t.IsKeyword(Keyword::WITH))
             return ParseSelect();
         if (t.IsKeyword(Keyword::CREATE))
             return ParseCreate();
@@ -145,8 +145,6 @@ class Parser {
             Advance();
             return std::make_unique<CheckpointStatement>();
         }
-        if (t.IsKeyword(Keyword::WITH))
-            NotImplemented("WITH (common table expressions)", t);
         Fail("expected a statement (SELECT, CREATE, DROP, INSERT, COPY, CHECKPOINT or EXPLAIN)");
     }
 
@@ -228,7 +226,7 @@ class Parser {
             } while (AcceptSymbol(","));
             ExpectSymbol(")");
         }
-        if (Peek().IsKeyword(Keyword::SELECT)) {
+        if (IsSelectStart()) {
             stmt->select = std::shared_ptr<SelectStatement>(ParseSelect().release());
             return stmt;
         }
@@ -295,10 +293,45 @@ class Parser {
 
     // ------------------------------------------------------------------ SELECT
 
+    bool IsSelectStart() const {
+        return Peek().IsKeyword(Keyword::SELECT) || Peek().IsKeyword(Keyword::WITH);
+    }
+
+    // WITH [RECURSIVE] name [(cols)] AS (select) [, ...]
+    std::vector<CommonTableExpression> ParseWith() {
+        ExpectKeyword(Keyword::WITH);
+        if (IsWord("recursive"))
+            NotImplemented("WITH RECURSIVE", Peek());
+        std::vector<CommonTableExpression> ctes;
+        do {
+            CommonTableExpression cte;
+            cte.name = ParseIdentifier("a name for the common table expression");
+            if (Peek().IsSymbol("(")) {
+                Advance();
+                do {
+                    cte.columns.push_back(ParseIdentifier("a column name"));
+                } while (AcceptSymbol(","));
+                ExpectSymbol(")");
+            }
+            ExpectKeyword(Keyword::AS);
+            ExpectSymbol("(");
+            if (!IsSelectStart())
+                Fail("expected SELECT");
+            cte.select = std::shared_ptr<SelectStatement>(ParseSelect().release());
+            ExpectSymbol(")");
+            ctes.push_back(std::move(cte));
+        } while (AcceptSymbol(","));
+        return ctes;
+    }
+
     std::unique_ptr<SelectStatement> ParseSelect() {
         NestingGuard guard(*this);
+        std::vector<CommonTableExpression> ctes;
+        if (Peek().IsKeyword(Keyword::WITH))
+            ctes = ParseWith();
         ExpectKeyword(Keyword::SELECT);
         auto sel = std::make_unique<SelectStatement>();
+        sel->ctes = std::move(ctes);
         if (AcceptKeyword(Keyword::DISTINCT)) {
             sel->distinct = true;
         } else {
@@ -452,7 +485,7 @@ class Parser {
         if (t.IsSymbol("(")) {
             NestingGuard guard(*this);
             Advance();
-            if (Peek().IsKeyword(Keyword::SELECT)) {
+            if (IsSelectStart()) {
                 auto select = std::shared_ptr<SelectStatement>(ParseSelect().release());
                 ExpectSymbol(")");
                 std::string alias = ParseOptionalAlias();
@@ -632,7 +665,7 @@ class Parser {
         }
         if (AcceptKeyword(Keyword::IN)) {
             ExpectSymbol("(");
-            if (Peek().IsKeyword(Keyword::SELECT)) {
+            if (IsSelectStart()) {
                 auto select = std::shared_ptr<SelectStatement>(ParseSelect().release());
                 ExpectSymbol(")");
                 const uint32_t d = DepthOf(*left);
@@ -804,7 +837,7 @@ class Parser {
         case Keyword::EXISTS: {
             Advance();
             ExpectSymbol("(");
-            if (!Peek().IsKeyword(Keyword::SELECT))
+            if (!IsSelectStart())
                 Fail("expected SELECT");
             auto select = std::shared_ptr<SelectStatement>(ParseSelect().release());
             ExpectSymbol(")");
@@ -827,7 +860,7 @@ class Parser {
     ExprPtr ParseParenthesised() {
         NestingGuard guard(*this);
         const size_t pos = Advance().pos; // (
-        if (Peek().IsKeyword(Keyword::SELECT)) {
+        if (IsSelectStart()) {
             auto select = std::shared_ptr<SelectStatement>(ParseSelect().release());
             ExpectSymbol(")");
             return std::make_unique<ScalarSubqueryExpr>(pos, std::move(select));
