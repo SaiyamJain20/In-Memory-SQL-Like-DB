@@ -405,6 +405,18 @@ TEST(SqlFuzz, RandomQueriesMatchDuckDBWithAndWithoutTheOptimizer) {
             }
         }
     }
+    {
+        // one file on a database that loses power and is recovered after every statement: the
+        // statistics come back from checkpoints and logs, and plans and answers must not care
+        SCOPED_TRACE(files.front());
+        int skipped = 0;
+        RunSqlFile(files.front(),
+                   {.persistent = true, .unsupported = &skipped, .approximate_doubles = true});
+        if (::testing::Test::HasFatalFailure()) {
+            return;
+        }
+        EXPECT_LE(skipped, 12);
+    }
     std::cout << "[sqlfuzz] " << files.size() << " files, " << total_queries << " queries, "
               << unsupported / 2 << " NotImplemented per mode\n";
     EXPECT_LE(unsupported / 2, total_queries / 33)

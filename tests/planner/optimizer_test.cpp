@@ -847,6 +847,74 @@ TEST(OptimizerShapes, AlwaysTrueConjunctsAreDroppedAndAlwaysFalseOnesStay) {
     EXPECT_NE(env.Explain("SELECT v FROM big WHERE 1 = 2").find("FILTER false"), std::string::npos);
 }
 
+// The three regimes of the join search - exhaustive (<= 12 relations), greedy left-deep (<= 60) and
+// "as written" (more) - must all return what the unoptimized plan returns.
+TEST(OptimizerEquivalenceDirected, ManyRelationsInEveryRegimeOfTheJoinSearch) {
+    Rng rng(91);
+    for (const size_t n : {size_t{3}, size_t{11}, size_t{12}, size_t{13}, size_t{14}, size_t{16}}) {
+        Env env;
+        std::string from, where;
+        for (size_t i = 0; i < n; i++) {
+            const std::string t = "m" + std::to_string(i);
+            env.Run("CREATE TABLE " + t + " (a INTEGER, b INTEGER)");
+            // two rows each: the unoptimized cross product of 16 tables is 65,536 rows
+            env.Run("INSERT INTO " + t + " VALUES (" + std::to_string(RandBelow(rng, 2)) + ", " +
+                    std::to_string(i) + "), (" + std::to_string(RandBelow(rng, 2)) + ", " +
+                    std::to_string(100 + i) + ")");
+            from += (i ? ", " : "") + t;
+            if (i > 0 && Chance(rng, 0.7)) { // a chain of equalities, with gaps (cross products)
+                where += (where.empty() ? "" : " AND ") + std::string("m") + std::to_string(i - 1) +
+                         ".a = " + t + ".a";
+            }
+            if (Chance(rng, 0.2)) {
+                where += (where.empty() ? "" : " AND ") + t + ".b < " + std::to_string(50 + i);
+            }
+        }
+        const std::string sql = "SELECT count(*), sum(m0.b), min(m" + std::to_string(n - 1) +
+                                ".b) FROM " + from + (where.empty() ? "" : " WHERE " + where);
+        env.conn.SetOptimizerEnabled(false);
+        const QueryResult plain = env.conn.Query(sql);
+        env.conn.SetOptimizerEnabled(true);
+        const QueryResult optimized = env.conn.Query(sql);
+        ASSERT_TRUE(plain.ok()) << sql << "\n" << plain.error_message();
+        std::string why;
+        ASSERT_TRUE(SameResult(plain, optimized, /*ordered=*/true, why))
+            << "n = " << n << ": " << sql << "\n  " << why;
+    }
+}
+
+TEST(OptimizerEquivalenceDirected, MoreRelationsThanTheSearchCanOrderStillJoinCorrectly) {
+    // 62 relations of one row each (so the unoptimized cross product is one row): past the 60 the
+    // search can mask, the plan keeps the order as written and all predicates go on the top join
+    Env env;
+    std::string from, where;
+    constexpr int kRelations = 62;
+    for (int i = 0; i < kRelations; i++) {
+        const std::string t = "w" + std::to_string(i);
+        env.Run("CREATE TABLE " + t + " (a INTEGER, b INTEGER)");
+        env.Run("INSERT INTO " + t + " VALUES (7, " + std::to_string(i) + ")");
+        from += (i ? ", " : "") + t;
+        if (i > 0) {
+            where += (where.empty() ? "" : " AND ") + std::string("w") + std::to_string(i - 1) +
+                     ".a = " + t + ".a";
+        }
+    }
+    for (const std::string& extra :
+         {std::string(""), std::string(" AND w61.b > 60"), std::string(" AND w3.b > 99")}) {
+        const std::string sql =
+            "SELECT count(*), sum(w0.b + w61.b) FROM " + from + " WHERE " + where + extra;
+        env.conn.SetOptimizerEnabled(false);
+        const QueryResult plain = env.conn.Query(sql);
+        env.conn.SetOptimizerEnabled(true);
+        const QueryResult optimized = env.conn.Query(sql);
+        ASSERT_TRUE(plain.ok()) << plain.error_message();
+        ASSERT_TRUE(optimized.ok()) << optimized.error_message();
+        std::string why;
+        ASSERT_TRUE(SameResult(plain, optimized, /*ordered=*/true, why)) << extra << ": " << why;
+        EXPECT_EQ(optimized.GetValue(0, 0).GetBigInt(), extra == " AND w3.b > 99" ? 0 : 1) << extra;
+    }
+}
+
 TEST(OptimizerEquivalenceDirected, PredicatesWithoutColumnsPlaceThemselvesOnAnyJoinTree) {
     Rng rng(77);
     Env env;

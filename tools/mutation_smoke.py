@@ -929,7 +929,7 @@ MUTATIONS = [
     ('subquery: an uncorrelated scalar subquery is never guarded against several rows',
      'src/planner/bind_subquery.cpp',
      'if (IsSingleRow(*plan)) {',
-     'if (true) {', None),
+     'if (IsSingleRow(*plan) || true) {', None),
     ('scalar guard: a second row is tolerated',
      'src/execution/scalar_guard.cpp',
      'if (g.rows + input.size() > 1) {',

@@ -117,7 +117,7 @@ counts for `COUNT(*)`) and optional pruning filters.
 **Catalog [implemented]**: case-insensitive, thread-safe name → table registry (`Catalog`,
 owned by `Database`).
 
-## SQL front end — [implemented: Phase 3]
+## SQL front end — [implemented: Phase 3; subqueries and WITH: Phase 8]
 `parser/` is a hand-written lexer and recursive-descent / precedence-climbing parser producing a
 syntax-only AST. Every node records its source offset, and `ToString()` prints fully
 parenthesised SQL, so *parse → print → parse is a fixpoint* (tested on a corpus, all 22 TPC-H
@@ -139,10 +139,19 @@ on ~4,300 generated expressions (`tests/planner/golden_expression_test.cpp`).
 
 `Connection::Query` parses, binds, optimizes, plans and executes: DDL, `INSERT … VALUES` and
 `INSERT … SELECT` (atomic, via a staging table merged in one step), `COPY … FROM` (CSV, atomic the
-same way), `EXPLAIN` (the optimized logical plan) and `SELECT` run. **12 of the 22 TPC-H queries
-run** (and match DuckDB); the other 10 stop precisely at a subquery or `WITH` (Phase 8).
+same way), `EXPLAIN` / `EXPLAIN ANALYZE` and `SELECT` run. **All 22 TPC-H queries run** and match
+DuckDB.
 
-## Execution — [implemented: Phase 4; morsel-driven parallelism: Phase 6]
+**Subqueries and `WITH` [implemented: Phase 8]** ([ADR 0010](adr/0010-statistics-subqueries-and-cost-based-joins.md)).
+Non-recursive CTEs are inlined through a scope chain (shadowing, column aliases, nesting). A subquery
+is unnested while binding, so there is no per-row subquery operator: `[NOT] EXISTS` and `[NOT] IN` (as
+AND-ed `WHERE` conjuncts) become semi / anti joins, `NOT IN` a null-aware anti join; an uncorrelated
+scalar becomes a cross join with its one row (guarded: one row, NULL if none, an error if several);
+a correlated scalar aggregate becomes a `LEFT` join with the aggregate grouped by the correlation keys
+and the aggregate's empty-input value for outer rows without a group. Other shapes (correlated `NOT IN`,
+`IN` / `EXISTS` under `OR`, correlation two levels up, ...) are `NotImplemented` at the expression.
+
+## Execution — [implemented: Phase 4; morsel-driven parallelism: Phase 6; subquery joins: Phase 8]
 **Push-based pipelines** ([ADR 0005](adr/0005-push-pipelines-with-global-and-local-state.md)).
 A query compiles to pipelines `source → streaming operators → sink`, run in dependency order.
 Pipeline breakers (hash aggregate, join build, sort, top-N) are a sink in one pipeline and the
@@ -154,11 +163,11 @@ operators can report `Finished` (a satisfied `LIMIT`), which stops the source be
 **Operators.** Table scan (snapshot per query, zone-map pruning), `VALUES`, filter (selection
 vectors; zero-copy dictionary output), projection, limit/offset, hash aggregate (also `DISTINCT`;
 `COUNT/SUM/AVG/MIN/MAX` and their `DISTINCT` forms; integer `SUM` is exact in 128 bits and an error only if the total leaves `BIGINT`), `ORDER BY`
-(stable) and top-N (prunes while consuming), hash join (inner / left / semi / anti, multi-key,
+(stable) and top-N (prunes while consuming), hash join (inner / left / semi / anti / null-aware anti, multi-key,
 residual predicates, NULL keys never match; nested loop when there is no equality; output resumes
 mid-chain so a probe row with many matches never overflows a chunk), result collector and INSERT.
-`RIGHT` joins run as swapped `LEFT` joins; `FULL` is not supported yet; semi/anti exist in the
-operator but nothing produces them until subquery unnesting (Phase 8).
+`RIGHT` joins run as swapped `LEFT` joins; `FULL` is not supported yet. A scalar guard enforces "at most
+one row" for a scalar subquery that is not an aggregate. Semi / anti joins always build the subquery side.
 
 **Data structures.** `ChunkStore` (append-only rows as flat chunks, gather by row id), `KeyIndex`
 (open-addressing hash index assigning dense ids to distinct keys, NULLs equal), `GroupTable` (key
@@ -182,14 +191,28 @@ decode, ungrouped SUM/MIN/MAX, integer hashing. Each is tested against the scala
 independent definition; results do not depend on the CPU (the one documented exception is the
 re-association of ungrouped `SUM(DOUBLE)`). `CDB_NO_SIMD` forces the scalar path.
 
-**Optimizer** ([ADR 0006](adr/0006-rule-based-optimizer.md)): filter pushdown (outer-join aware),
-zone-map hints, greedy join ordering sized by distinct-value estimates from zone maps, OR
-factoring, `LIMIT` below projections (top-N), column pruning. Statistics-based costing is Phase 8.
+**Optimizer** ([ADR 0006](adr/0006-rule-based-optimizer.md), join ordering superseded by
+[ADR 0010](adr/0010-statistics-subqueries-and-cost-based-joins.md)): filter pushdown (outer-join aware;
+semi / anti joins sink below inner joins), zone-map hints, OR factoring, **cost-based join ordering**
+(see below), `LIMIT` below projections (top-N), column pruning.
 
-**Verification.** All 12 runnable TPC-H queries match DuckDB at SF0.01 / 0.1 / 1; ~240 queries in
-`tests/sql/*.test` (expected results generated by DuckDB); random expressions executor vs
-interpreter; random queries optimizer on vs off; every operator against a naive reference;
-`tools/mutation_smoke.py`. Numbers vs DuckDB are in [BENCHMARKS](BENCHMARKS.md).
+**Statistics and cost-based joins [implemented: Phase 8]** (ADR 0010). Every sealed column segment
+carries a HyperLogLog sketch (`storage/hyperloglog`, built at seal time, persisted in the checkpoint);
+`Table::Statistics()` merges zone maps and sketches into per-column bounds, NULL counts and distinct
+counts, cached by table version. `planner/cardinality` estimates the rows and columns of every operator
+(equality `1/distinct`, ranges over a value grid, interval bounds on one column, containment for join
+keys, composite keys capped by the larger input, aggregate group counts). `planner/join_order` finds
+the cheapest join tree for up to 12 relations by dynamic programming over subsets - bushy trees
+included, no cross product where a predicate avoids one, the smaller input built - and falls back to a
+greedy left-deep order beyond. `EXPLAIN` shows `(~N rows)` per operator; `EXPLAIN ANALYZE` runs the
+query and shows estimated and actual rows, the build side of each join, and per-operator CPU time.
+
+**Verification.** All 22 TPC-H queries match DuckDB (SF0.01 in the gate on memory / checkpoint / log,
+SF0.1 and SF1 by hand); ~350 queries in `tests/sql/*.test` (expected results generated by DuckDB);
+random SQL (`tools/fuzz_sql.py`) vs DuckDB with the optimizer on and off; random expressions
+executor vs interpreter; random queries optimizer on vs off (with and without subqueries); every
+operator against a naive reference; `tools/mutation_smoke.py`. Numbers vs DuckDB are in
+[BENCHMARKS](BENCHMARKS.md).
 
 **Morsel-driven parallelism — [implemented: Phase 6]** ([ADR 0008](adr/0008-morsel-driven-parallelism.md)).
 `Database` owns a fixed pool (`TaskScheduler`; one thread by default, `CDB_THREADS` / `SetThreads`, the
@@ -257,7 +280,7 @@ result with an error state.
 |---|---|
 | Unit | GoogleTest, every format × type × null combination for data structures |
 | SQL | `sqllogictest`-style files in `tests/sql/` (DuckDB-generated expected results) **[implemented]** |
-| Differential | 12 TPC-H queries vs DuckDB (SF0.01 in the gate, SF0.1/SF1 by hand) **[implemented]**; random expressions vs the interpreter and random queries optimizer-on vs off **[implemented]**; random SQL fuzzing vs DuckDB [planned: Phase 8] |
+| Differential | all 22 TPC-H queries vs DuckDB (SF0.01 in the gate, SF0.1/SF1 by hand) **[implemented]**; random expressions vs the interpreter and random queries optimizer-on vs off **[implemented]**; random SQL (every join kind, aggregates, CTEs, subqueries) vs DuckDB with the optimizer on and off **[implemented: Phase 8]** |
 | Fuzz | libFuzzer on the parser, the checkpoint file reader and write-ahead-log recovery **[implemented]** |
 | Concurrency | ThreadSanitizer in CI, the whole suite also in `-parallel` mode (4 threads, 1-vector morsels, all thresholds at 1) **[implemented]** |
 | Crash safety | a crash at **every** mutating I/O operation of several workloads x six power-cut policies (torn and reordered writes included), then a second cut at every operation of the recovery; an I/O error at every operation; 25 real `kill -9`s; the SQL suite with a power cut after every statement; TPC-H on reopened databases; every bit flip and truncation of a checkpoint detected **[implemented]** |

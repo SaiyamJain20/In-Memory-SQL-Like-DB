@@ -8,14 +8,17 @@
 //                                folds the log into a snapshot, closing the shell checkpoints
 //
 // Dot commands (interactive or in scripts):
-//   .tables   .schema [table]   .read FILE   .timer on|off   .maxrows N|off   .threads N|auto
-//   .help   .quit
+//   .tables   .schema [table]   .stats [table]   .read FILE   .timer on|off   .maxrows N|off
+//   .threads N|auto   .help   .quit
+// (.stats prints what the optimizer knows: per column the NULL count, the estimated number of
+// distinct values, and the bounds, tab-separated.)
 // Queries use one thread per hardware thread by default (CDB_THREADS overrides).
 // Without --db the database lives in memory for the lifetime of the process.
 
 #include "common/version.h"
 #include "main/connection.h"
 #include "main/database.h"
+#include "storage/table_statistics.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -149,6 +152,25 @@ int main(int argc, char** argv) {
                     }
                     std::cout << ")\n";
                 }
+            } else if (cmd == ".stats") {
+                for (const auto& name :
+                     arg.empty() ? db.catalog().ListTables() : std::vector<std::string>{arg}) {
+                    auto table = db.catalog().TryGetTable(name);
+                    if (!table) {
+                        std::cerr << "no such table: " << name << "\n";
+                        continue;
+                    }
+                    const auto stats = table->Statistics();
+                    std::cout << table->name() << "\t" << stats->row_count << " rows\n";
+                    for (size_t c = 0; c < table->schema().size(); c++) {
+                        const auto& col = stats->columns[c];
+                        std::cout << table->name() << "." << table->schema()[c].name << "\t"
+                                  << col.null_count << " nulls\t"
+                                  << static_cast<long long>(col.distinct + 0.5) << " distinct\t"
+                                  << (col.min ? col.min->ToString() : "-") << "\t"
+                                  << (col.max ? col.max->ToString() : "-") << "\n";
+                    }
+                }
             } else if (cmd == ".read") {
                 bool ok;
                 const std::string text = ReadFile(arg, ok);
@@ -175,8 +197,10 @@ int main(int argc, char** argv) {
                     std::cout << db.threads() << " thread(s)\n";
                 }
             } else if (cmd == ".help") {
-                std::cout << ".tables  .schema [table]  .read FILE  .timer on|off  .maxrows N|off  "
-                             ".threads N|auto  .quit\nEXPLAIN <query> shows the optimized plan.\n";
+                std::cout << ".tables  .schema [table]  .stats [table]  .read FILE  .timer on|off  "
+                             ".maxrows N|off  .threads N|auto  .quit\n"
+                             "EXPLAIN <query> shows the plan with estimated rows; EXPLAIN ANALYZE "
+                             "<query> runs it and shows the actual rows and times.\n";
             } else {
                 std::cerr << "unknown command " << cmd << "\n";
             }

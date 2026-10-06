@@ -537,7 +537,7 @@ def generate(seed, count, out_path):
         except Exception:  # noqa: BLE001 - not valid for DuckDB: not a test
             rejected += 1
             continue
-        if len(rows) > 400 or time.perf_counter() - started > 0.1:
+        if len(rows) > 400 or time.perf_counter() - started > (0.1 if big else 0.01):
             rejected += 1  # an answer too large to keep in a file, or a query too heavy for a debug build
             continue
         accepted += 1
