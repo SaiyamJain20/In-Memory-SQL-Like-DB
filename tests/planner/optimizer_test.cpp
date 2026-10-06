@@ -164,34 +164,39 @@ TEST(OptimizerShapes, LimitSitsDirectlyOnOrderByAndColumnsArePruned) {
 TEST(OptimizerShapes, JoinOrderStartsFromTheLargestAndAvoidsCrossProducts) {
     Env env;
     env.SizedTables();
-    // Written as small, big, mid: the plan probes with big, builds mid, then small - never a cross
-    // join.
+    // Written as small, big, mid: big probes, and what it probes is mid joined with small first -
+    // small keeps only 5 of mid's 100 keys, so big meets a 5-row hash table instead of building
+    // mid's 100 rows - never a cross join. (The earlier left-deep order, big x mid x small, was
+    // the best a greedy search could do; the search is now over all bushy trees by estimated cost.)
     EXPECT_EQ(
         env.Explain("SELECT small.z FROM small, big, mid WHERE small.k = mid.k AND mid.k = big.k"),
         "PROJECT [z]\n"
         "  PROJECT [z]\n"
-        "    JOIN INNER ON (small.k = mid.k)\n"
-        "      JOIN INNER ON (mid.k = big.k)\n"
-        "        SCAN big [k]\n"
+        "    JOIN INNER ON (mid.k = big.k)\n"
+        "      SCAN big [k]\n"
+        "      JOIN INNER ON (small.k = mid.k)\n"
         "        SCAN mid [k]\n"
-        "      SCAN small [k, z]\n");
-    // Listed as big, mid, small the leaves already come out in join order, so there is no
-    // column-restoring projection - but the join tree is the same.
+        "        SCAN small [k, z]\n");
+    // Listed as big, mid, small the leaves come out in a different order than written, so a
+    // projection restores the columns - but the join tree is the same.
     EXPECT_EQ(
         env.Explain("SELECT small.z FROM big, mid, small WHERE small.k = mid.k AND mid.k = big.k"),
         "PROJECT [z]\n"
-        "  JOIN INNER ON (small.k = mid.k)\n"
-        "    JOIN INNER ON (mid.k = big.k)\n"
-        "      SCAN big [k]\n"
+        "  JOIN INNER ON (mid.k = big.k)\n"
+        "    SCAN big [k]\n"
+        "    JOIN INNER ON (small.k = mid.k)\n"
         "      SCAN mid [k]\n"
-        "    SCAN small [k, z]\n");
+        "      SCAN small [k, z]\n");
 }
 
 TEST(OptimizerShapes, JoinOrderWeighsPredicateSelectivityNotJustRelationSize) {
     // The TPC-H Q5 trap. `cust` is the smaller relation, but its only link to `fact` before `ords`
     // joins is `cust.nat = fact.nat`, a 25-valued key: each fact row would match ~4 customers, so
     // the intermediate result quadruples. `ords` is bigger but joins on a unique key and keeps the
-    // result at 2000 rows, so it must come first; cust then joins on both of its keys.
+    // result at 2000 rows, so it must come first; cust then joins on both of its keys. The search
+    // now finds something better still: ords x cust first (500 rows, one customer per order), then
+    // fact against that on (ord, nat) together. Either way cust is never joined to fact on `nat`
+    // alone.
     Env env;
     env.Run("CREATE TABLE fact (id INTEGER, ord INTEGER, nat INTEGER)");
     env.Run("CREATE TABLE ords (ord INTEGER, cust INTEGER)");
@@ -216,11 +221,11 @@ TEST(OptimizerShapes, JoinOrderWeighsPredicateSelectivityNotJustRelationSize) {
         env.Explain("SELECT fact.id FROM fact, ords, cust "
                     "WHERE fact.ord = ords.ord AND ords.cust = cust.cust AND cust.nat = fact.nat"),
         "PROJECT [id]\n"
-        "  JOIN INNER ON ((ords.cust = cust.cust) AND (cust.nat = fact.nat))\n"
-        "    JOIN INNER ON (fact.ord = ords.ord)\n"
-        "      SCAN fact [id, ord, nat]\n"
+        "  JOIN INNER ON ((fact.ord = ords.ord) AND (cust.nat = fact.nat))\n"
+        "    SCAN fact [id, ord, nat]\n"
+        "    JOIN INNER ON (ords.cust = cust.cust)\n"
         "      SCAN ords [ord, cust]\n"
-        "    SCAN cust [cust, nat]\n");
+        "      SCAN cust [cust, nat]\n");
 }
 
 TEST(OptimizerShapes, ACompositeKeyIsSizedAsOneKeyNotAsEachColumnAlone) {
@@ -287,14 +292,17 @@ TEST(OptimizerShapes, SemiAndAntiJoinsSinkToTheSideOfTheJoinThatTheyMention) {
     Env env;
     env.SizedTables();
     // only big is mentioned: the semi join filters big before the join with mid
+    // (small.k matches 5 of big's 1000 distinct keys: the semi join leaves ~5 rows of big, which
+    // then build the hash table that mid probes)
     EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE EXISTS "
-                          "(SELECT 1 FROM small WHERE small.k = big.v)"),
+                          "(SELECT 1 FROM small WHERE small.k = big.k)"),
               "PROJECT [v]\n"
-              "  JOIN INNER ON (big.k = mid.k)\n"
-              "    JOIN SEMI ON (v = k)\n"
-              "      SCAN big [k, v]\n"
-              "      SCAN small [k]\n"
-              "    SCAN mid [k]\n");
+              "  PROJECT [v]\n"
+              "    JOIN INNER ON (big.k = mid.k)\n"
+              "      SCAN mid [k]\n"
+              "      JOIN SEMI ON (big.k = k)\n"
+              "        SCAN big [k, v]\n"
+              "        SCAN small [k]\n");
     EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN mid ON big.k = mid.k WHERE big.v NOT IN "
                           "(SELECT k FROM small)"),
               "PROJECT [v]\n"

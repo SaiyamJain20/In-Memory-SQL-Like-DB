@@ -1,10 +1,14 @@
 #include "planner/optimizer.h"
 
+#include "common/assert.h"
+#include "planner/cardinality.h"
 #include "planner/expr_util.h"
+#include "planner/join_order.h"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <optional>
 
 namespace cdb {
@@ -161,127 +165,6 @@ std::optional<TableFilter> AsTableFilter(const BoundExpr& e, const LogicalGet& g
     return TableFilter{get.column_ids.at(col->ordinal), op, *konst->value};
 }
 
-// Rough output cardinality, from table sizes and fixed selectivities. Only the relative sizes of
-// join inputs matter.
-double Selectivity(const BoundExpr& e) {
-    if (e.kind == BoundKind::Operator) {
-        if (e.op == OperatorKind::Eq) {
-            return 0.1;
-        }
-        if (e.op == OperatorKind::Lt || e.op == OperatorKind::Le || e.op == OperatorKind::Gt ||
-            e.op == OperatorKind::Ge) {
-            return 0.33;
-        }
-        if (e.op == OperatorKind::And) {
-            return Selectivity(*e.children[0]) * Selectivity(*e.children[1]);
-        }
-    }
-    if (e.kind == BoundKind::InList) {
-        return std::min(0.5, 0.1 * static_cast<double>(e.children.size() - 1));
-    }
-    if (e.kind == BoundKind::Function && e.function == FunctionId::Like) {
-        return 0.2;
-    }
-    return 0.5;
-}
-
-double EstimateRows(const LogicalOperator& op) {
-    switch (op.kind) {
-    case LogicalKind::Get:
-        return std::max<double>(
-            1, static_cast<double>(static_cast<const LogicalGet&>(op).table->RowCount()));
-    case LogicalKind::Filter:
-        return std::max(1.0, EstimateRows(*op.children[0]) *
-                                 Selectivity(*static_cast<const LogicalFilter&>(op).predicate));
-    case LogicalKind::Aggregate: {
-        const auto& agg = static_cast<const LogicalAggregate&>(op);
-        return agg.groups.empty() ? 1.0 : std::max(1.0, EstimateRows(*op.children[0]) * 0.1);
-    }
-    case LogicalKind::Join: {
-        const auto& j = static_cast<const LogicalJoin&>(op);
-        const double l = EstimateRows(*op.children[0]), r = EstimateRows(*op.children[1]);
-        if (j.join_type == JoinType::Left) {
-            return l;
-        }
-        if (IsFilterJoin(j.join_type)) {
-            return std::max(1.0, l * 0.5); // a semi / anti join keeps some of the left rows
-        }
-        return j.condition ? std::max(l, r) : l * r;
-    }
-    case LogicalKind::Limit: {
-        const auto& lim = static_cast<const LogicalLimit&>(op);
-        const double child = EstimateRows(*op.children[0]);
-        return lim.limit ? std::min(child, static_cast<double>(*lim.limit)) : child;
-    }
-    case LogicalKind::Values:
-        return std::max<double>(
-            1, static_cast<double>(static_cast<const LogicalValues&>(op).rows.size()));
-    default:
-        return op.children.empty() ? 1.0 : EstimateRows(*op.children[0]);
-    }
-}
-
-// Distinct-value estimates for join sizing. For an integer or date column read straight from a
-// table (through filters and column-only projections) the zone maps bound the number of distinct
-// values by the value range: min(rows, max - min + 1). That alone separates the 25 nation keys
-// from the 150,000 order keys, which is what decides whether a join multiplies rows or not.
-std::optional<int64_t> AsInt64(const Value& v) {
-    switch (v.type().id()) {
-    case TypeId::Integer:
-        return v.GetInteger();
-    case TypeId::BigInt:
-        return v.GetBigInt();
-    case TypeId::Date:
-        return v.GetDate().days;
-    default:
-        return std::nullopt;
-    }
-}
-
-double TableColumnNdv(const Table& table, idx_t table_column, double rows) {
-    const auto snapshot = table.Snapshot();
-    std::optional<int64_t> lo, hi;
-    for (idx_t g = 0; g < snapshot->row_group_count(); g++) {
-        const ColumnStats& st = snapshot->row_group(g).column(table_column).stats();
-        if (!st.min || !st.max) {
-            continue; // all NULL (or no usable bounds)
-        }
-        const auto a = AsInt64(*st.min), b = AsInt64(*st.max);
-        if (!a || !b) {
-            return rows; // not an integer-like column
-        }
-        lo = lo ? std::min(*lo, *a) : *a;
-        hi = hi ? std::max(*hi, *b) : *b;
-    }
-    if (!lo || !hi) {
-        return rows;
-    }
-    return std::min(rows, static_cast<double>(*hi) - static_cast<double>(*lo) + 1.0);
-}
-
-double ColumnNdv(const LogicalOperator& op, idx_t column, double rows) {
-    switch (op.kind) {
-    case LogicalKind::Filter:
-        return std::min(rows, ColumnNdv(*op.children[0], column, EstimateRows(*op.children[0])));
-    case LogicalKind::Get: {
-        const auto& get = static_cast<const LogicalGet&>(op);
-        const double base = static_cast<double>(get.table->RowCount());
-        return std::min(rows,
-                        TableColumnNdv(*get.table, get.column_ids.at(column), std::max(1.0, base)));
-    }
-    case LogicalKind::Projection: {
-        const auto& p = static_cast<const LogicalProjection&>(op);
-        if (p.exprs.at(column)->kind == BoundKind::ColumnRef) {
-            return std::min(rows, ColumnNdv(*op.children[0], p.exprs[column]->ordinal,
-                                            EstimateRows(*op.children[0])));
-        }
-        return rows;
-    }
-    default:
-        return rows;
-    }
-}
-
 LogicalPtr Push(LogicalPtr op, Conjuncts conjuncts);
 
 // ---------------------------------------------------------------------------------- join trees
@@ -380,138 +263,130 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
     }
 
     // ---- choose the join order ------------------------------------------------------------
-    std::vector<double> est(n);
-    for (size_t i = 0; i < n; i++) {
-        est[i] = EstimateRows(*flat.leaves[i]);
-    }
-    std::vector<size_t> order;
-    if (!can_mask) {
+    // The relations' estimated sizes (after their own filters) and the join predicates between
+    // them go to the cost-based search (planner/join_order.h); what comes back is a tree of
+    // binary joins, the larger input of each on the probe side and the smaller one built.
+    JoinTree plan_tree;
+    std::vector<size_t> order(n); // the relations in the order of the tree's leaves
+    if (can_mask) {
+        CardinalityEstimator estimator;
+        std::vector<double> rows(n);
+        Estimate global; // the columns of all relations, in the flattened layout
         for (size_t i = 0; i < n; i++) {
-            order.push_back(i);
+            const Estimate& e = estimator.Of(*flat.leaves[i]);
+            rows[i] = e.rows;
+            global.columns.insert(global.columns.end(), e.columns.begin(), e.columns.end());
         }
-    } else {
-        uint64_t chosen = 0;
-        size_t start = 0;
-        for (size_t i = 1; i < n; i++) {
-            if (est[i] > est[start]) {
-                start = i;
+        std::vector<JoinEdge> edges;
+        for (size_t c = 0; c < flat.conjuncts.size(); c++) {
+            if (consumed[c] || std::popcount(mask[c]) < 2) {
+                continue;
             }
-        }
-        order.push_back(start);
-        chosen |= uint64_t{1} << start;
-        double current_rows = est[start];
-        while (order.size() < n) {
-            // Next relation: among those connected to the chosen ones by some predicate, the one
-            // giving the smallest estimated intermediate result (rows x rows x selectivity, with an
-            // equality's selectivity 1 / max(distinct values of its two columns)); relations with
-            // no connecting predicate (a cross product) only when nothing else is left.
-            bool best_connected = false;
-            double best_result = 0;
-            size_t best = n;
-            for (size_t l = 0; l < n; l++) {
-                if (chosen >> l & 1) {
-                    continue;
-                }
-                double selectivity = 1.0;
-                double key_combinations = 1.0; // product of the equalities' distinct-value counts
-                bool has_equality = false;
-                bool connected = false;
-                for (size_t c = 0; c < flat.conjuncts.size(); c++) {
-                    if (consumed[c] || !(mask[c] >> l & 1) || std::popcount(mask[c]) < 2 ||
-                        (mask[c] & ~(chosen | (uint64_t{1} << l))) != 0) {
-                        continue;
-                    }
-                    connected = true;
-                    const BoundExpr& e = *flat.conjuncts[c];
-                    const bool plain_equality = e.kind == BoundKind::Operator &&
-                                                e.op == OperatorKind::Eq &&
-                                                e.children[0]->kind == BoundKind::ColumnRef &&
-                                                e.children[1]->kind == BoundKind::ColumnRef;
-                    if (!plain_equality) {
-                        selectivity *=
-                            e.kind == BoundKind::Operator && e.op == OperatorKind::Eq ? 0.1 : 0.3;
-                        continue;
-                    }
-                    double max_ndv = 1;
-                    for (const auto& side : e.children) {
-                        const size_t leaf = leaf_of(side->ordinal);
-                        const double rows = (chosen >> leaf & 1) ? current_rows : est[leaf];
-                        max_ndv =
-                            std::max(max_ndv, ColumnNdv(*flat.leaves[leaf],
-                                                        side->ordinal - flat.base[leaf], rows));
-                    }
-                    key_combinations *= max_ndv;
-                    has_equality = true;
-                }
-                if (has_equality) {
-                    // k equalities form a composite key: its distinct combinations cannot exceed
-                    // the larger input's row count (so (partkey, suppkey) against partsupp is ~ one
-                    // match per row, not 1 / (ndv1 * ndv2) of them).
-                    selectivity /=
-                        std::max(1.0, std::min(key_combinations, std::max(current_rows, est[l])));
-                }
-                const double result = std::max(1.0, current_rows * est[l] * selectivity);
-                if (best == n || (connected && !best_connected) ||
-                    (connected == best_connected &&
-                     (result < best_result || (result == best_result && est[l] < est[best])))) {
-                    best = l;
-                    best_connected = connected;
-                    best_result = result;
-                }
+            const BoundExpr& e = *flat.conjuncts[c];
+            JoinEdge edge;
+            edge.relations = mask[c];
+            const BoundExpr* left = e.kind == BoundKind::Operator && e.op == OperatorKind::Eq
+                                        ? AsColumnRef(*e.children[0])
+                                        : nullptr;
+            const BoundExpr* right = left != nullptr ? AsColumnRef(*e.children[1]) : nullptr;
+            if (left != nullptr && right != nullptr &&
+                leaf_of(left->ordinal) != leaf_of(right->ordinal)) {
+                edge.equality = true;
+                edge.a = static_cast<int>(leaf_of(left->ordinal));
+                edge.b = static_cast<int>(leaf_of(right->ordinal));
+                edge.distinct_a = global.columns.at(left->ordinal).distinct;
+                edge.distinct_b = global.columns.at(right->ordinal).distinct;
+            } else {
+                edge.selectivity = std::max(1e-6, Selectivity(e, global));
             }
-            order.push_back(best);
-            chosen |= uint64_t{1} << best;
-            current_rows = best_result;
+            edges.push_back(edge);
         }
+        plan_tree = ChooseJoinOrder(rows, edges);
     }
 
-    // ---- rebuild the tree left-deep in that order ------------------------------------------
-    std::vector<idx_t> layout_base(n, 0);
-    const size_t first = order[0];
-    LogicalPtr current = std::move(flat.leaves[first]);
-    idx_t width_so_far = widths[first];
-    layout_base[first] = 0;
-    uint64_t chosen = can_mask ? uint64_t{1} << first : 0;
+    // ---- rebuild the plan from the tree ---------------------------------------------------
+    struct Built {
+        LogicalPtr plan;
+        std::vector<size_t> leaves; // the relations of `plan`'s output, left to right
+    };
     std::vector<bool> applied = consumed;
-    for (size_t k = 1; k < n; k++) {
-        const size_t l = order[k];
-        layout_base[l] = width_so_far;
-        if (can_mask) {
-            chosen |= uint64_t{1} << l;
+    const auto base_of = [&](const std::vector<size_t>& leaves) {
+        std::vector<idx_t> base(n, 0);
+        idx_t width = 0;
+        for (const size_t l : leaves) {
+            base[l] = width;
+            width += widths[l];
+        }
+        return base;
+    };
+    const auto join_two = [&](Built left, Built right, uint64_t set, bool last) {
+        Built out;
+        out.leaves = left.leaves;
+        out.leaves.insert(out.leaves.end(), right.leaves.begin(), right.leaves.end());
+        const std::vector<idx_t> base = base_of(out.leaves);
+        uint64_t left_set = 0, right_set = 0;
+        for (const size_t l : left.leaves) {
+            left_set |= uint64_t{1} << l;
+        }
+        for (const size_t l : right.leaves) {
+            right_set |= uint64_t{1} << l;
         }
         auto join = std::make_unique<LogicalJoin>();
-        join->names = current->names;
-        join->names.insert(join->names.end(), flat.leaves[l]->names.begin(),
-                           flat.leaves[l]->names.end());
-        join->types = current->types;
-        join->types.insert(join->types.end(), flat.leaves[l]->types.begin(),
-                           flat.leaves[l]->types.end());
+        join->names = left.plan->names;
+        join->names.insert(join->names.end(), right.plan->names.begin(), right.plan->names.end());
+        join->types = left.plan->types;
+        join->types.insert(join->types.end(), right.plan->types.begin(), right.plan->types.end());
+        // the predicates that this join is the first to have every relation of
         Conjuncts cond;
         for (size_t c = 0; c < flat.conjuncts.size(); c++) {
-            const bool covered = can_mask ? (mask[c] & ~chosen) == 0 : k + 1 == n;
+            const bool covered = can_mask ? (mask[c] & ~set) == 0 && (mask[c] & ~left_set) != 0 &&
+                                                (mask[c] & ~right_set) != 0
+                                          : last;
             if (applied[c] || !covered) {
                 continue;
             }
             applied[c] = true;
             cond.push_back(RemapColumns(*flat.conjuncts[c], [&](idx_t g) {
                 const size_t leaf = leaf_of(g);
-                return layout_base[leaf] + (g - flat.base[leaf]);
+                return base[leaf] + (g - flat.base[leaf]);
             }));
         }
         join->condition = AndAll(std::move(cond));
         join->join_type = join->condition ? JoinType::Inner : JoinType::Cross;
-        join->children.push_back(std::move(current));
-        join->children.push_back(std::move(flat.leaves[l]));
-        current = std::move(join);
-        width_so_far += widths[l];
+        join->children.push_back(std::move(left.plan));
+        join->children.push_back(std::move(right.plan));
+        out.plan = std::move(join);
+        return out;
+    };
+    Built result;
+    if (can_mask) {
+        const std::function<Built(int)> build = [&](int node) -> Built {
+            const JoinTree::Node& nd = plan_tree.nodes[static_cast<size_t>(node)];
+            if (nd.relation >= 0) {
+                return {std::move(flat.leaves[static_cast<size_t>(nd.relation)]),
+                        {static_cast<size_t>(nd.relation)}};
+            }
+            Built left = build(nd.left);
+            Built right = build(nd.right);
+            return join_two(std::move(left), std::move(right), nd.set, false);
+        };
+        result = build(plan_tree.root);
+    } else { // too many relations to reason about: as written, all predicates at the top
+        result = {std::move(flat.leaves[0]), {0}};
+        for (size_t k = 1; k < n; k++) {
+            result = join_two(std::move(result), {std::move(flat.leaves[k]), {k}}, 0, k + 1 == n);
+        }
     }
+    CDB_CHECK(std::all_of(applied.begin(), applied.end(), [](bool b) { return b; }));
+    order = result.leaves;
     bool identity = true;
     for (size_t k = 0; k < n; k++) {
         identity = identity && order[k] == k;
     }
     if (identity) {
-        return current;
+        return std::move(result.plan);
     }
+    const std::vector<idx_t> layout_base = base_of(order);
     auto proj = std::make_unique<LogicalProjection>();
     proj->names = orig_names;
     proj->types = orig_types;
@@ -522,7 +397,7 @@ LogicalPtr PushInnerJoinTree(LogicalPtr tree, Conjuncts incoming) {
                                                        orig_names[original]));
         }
     }
-    proj->children.push_back(std::move(current));
+    proj->children.push_back(std::move(result.plan));
     return proj;
 }
 
