@@ -474,6 +474,18 @@ TEST(OptimizerShapes, ASemiOrAntiJoinStaysAboveTheJoinWithAScalarSubquery) {
               "        PROJECT [w]\n"
               "          SCAN mid [w]\n"
               "    SCAN small [k]\n");
+    // three rows are not one: a join with a three-row table is a real join, the semi join that
+    // keeps 0.5% of big sinks below it
+    env.Run("CREATE TABLE tiny (k INTEGER)");
+    env.Run("INSERT INTO tiny VALUES (1), (2), (3)");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM big JOIN tiny ON big.k = tiny.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.k)"),
+              "PROJECT [v]\n"
+              "  JOIN INNER ON (big.k = tiny.k)\n"
+              "    JOIN SEMI ON (big.k = k)\n"
+              "      SCAN big [k, v]\n"
+              "      SCAN small [k]\n"
+              "    SCAN tiny [k]\n");
 }
 
 TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {

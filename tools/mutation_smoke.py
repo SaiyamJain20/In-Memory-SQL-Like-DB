@@ -849,10 +849,12 @@ MUTATIONS = [
      'src/storage/checkpoint.cpp',
      'footer_offset + footer_size + kTrailerSize != size) {',
      'footer_offset + footer_size + kTrailerSize > size) {', None),
-    ('checkpoint reader: a row group of zero rows is accepted',
+    # (the directory's check for a group of zero rows is equivalent to ReadSegment's: a group has at
+    # least one column, and a segment of zero rows is rejected there, so no input tells them apart)
+    ('checkpoint reader: a row group larger than the table\'s is accepted',
      'src/storage/checkpoint.cpp',
      'if (g.rows == 0 || g.rows > group_size) {',
-     'if (g.rows > group_size) {', None),
+     'if (g.rows == 0) {', None),
     ('checkpoint reader: a segment may extend past the data area',
      'src/storage/checkpoint.cpp',
      's.offset + s.size > footer_offset) {',

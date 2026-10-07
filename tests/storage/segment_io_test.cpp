@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace cdb {
@@ -333,6 +334,20 @@ TEST(ChunkIo, ARowCountAboveTheVectorSizeIsRejected) {
     DataChunk out;
     BinaryReader r(w.buffer().data(), w.buffer().size(), "chunk");
     ExpectCorruption([&] { ReadChunk(r, {LogicalType::Integer()}, out); }, "oversized chunk");
+
+    // the same with every byte the rows would need present: only the count is wrong
+    for (const uint32_t rows : {kVectorSize + 1, 2 * kVectorSize}) {
+        BinaryWriter full;
+        full.U32(rows);
+        full.U8(0); // no NULLs
+        for (uint32_t i = 0; i < rows; i++) {
+            full.U32(i);
+        }
+        DataChunk chunk;
+        BinaryReader reader(full.buffer().data(), full.buffer().size(), "chunk");
+        ExpectCorruption([&] { ReadChunk(reader, {LogicalType::Integer()}, chunk); },
+                         "a chunk of " + std::to_string(rows) + " rows, all its bytes present");
+    }
 }
 
 TEST(ChunkIo, EveryTruncationIsRejectedAndEveryByteChangeIsSafe) {
@@ -537,6 +552,107 @@ TEST(SegmentIo, EveryTruncationOfASegmentIsRejected) {
                 Deserialize(longer, seg->type(), seg->count());
             },
             name + " with a trailing byte");
+    }
+}
+
+// The statistics are written before the validity bits, and a reader that trusted them would hand
+// zone-map pruning and NULL-fraction estimates a number the data contradicts.
+TEST(SegmentIo, ANullCountThatTheValidityBitsContradictIsRejectedInEveryFormat) {
+    size_t checked = 0, encoded_checked = 0;
+    for (const auto& [name, seg] : SmallSegments()) {
+        const idx_t nulls = seg->stats().null_count;
+        if (nulls == 0 || nulls == seg->count()) {
+            continue; // one more or less than all or none would trip another check first
+        }
+        const std::vector<uint8_t> bytes = Serialize(*seg);
+        constexpr size_t kNullCountAt = 1 + 1 + 4; // type, encoded flag, row count
+        uint32_t written;
+        std::memcpy(&written, bytes.data() + kNullCountAt, sizeof(written));
+        ASSERT_EQ(written, nulls) << name;
+        for (const uint32_t wrong :
+             {static_cast<uint32_t>(nulls - 1), static_cast<uint32_t>(nulls + 1)}) {
+            std::vector<uint8_t> lie = bytes;
+            std::memcpy(lie.data() + kNullCountAt, &wrong, sizeof(wrong));
+            try {
+                Deserialize(lie, seg->type(), seg->count());
+                ADD_FAILURE() << name << ": accepted a null count of " << wrong << " for " << nulls;
+            } catch (const Error& e) {
+                EXPECT_EQ(e.code(), ErrorCode::Corruption) << name;
+                EXPECT_NE(std::string(e.what()).find("validity bits hold"), std::string::npos)
+                    << name << ": " << e.what();
+            }
+        }
+        checked++;
+        encoded_checked += seg->encoded() ? 1 : 0;
+    }
+    EXPECT_GE(checked, 6U);
+    EXPECT_GE(encoded_checked, 3U) << "the encoded path has its own check";
+}
+
+// Encoded columns are validated as they are read: a decoder that indexes with what it read would
+// walk out of its arrays. These craft the payloads by hand, valid in every other respect.
+TEST(EncodingIo, RunEndsThatDoNotIncreaseAreRejected) {
+    const auto rle = [](const std::vector<uint32_t>& ends) {
+        BinaryWriter w;
+        w.U8(static_cast<uint8_t>(EncodingKind::Rle));
+        w.U32(static_cast<uint32_t>(ends.size()));
+        for (size_t i = 0; i < ends.size(); i++) {
+            w.I64(static_cast<int64_t>(i));
+        }
+        for (const uint32_t e : ends) {
+            w.U32(e);
+        }
+        w.U32(1); // one vector of 10 rows
+        w.U32(0); // it starts in run 0
+        return w.Take();
+    };
+    const auto read = [&](const std::vector<uint32_t>& ends) {
+        const std::vector<uint8_t> bytes = rle(ends);
+        BinaryReader r(bytes.data(), bytes.size(), "rle");
+        DeserializeEncodedColumn(r, LogicalType::Integer(), 10);
+        r.ExpectEnd();
+    };
+    EXPECT_NO_THROW(read({5, 8, 10})) << "the hand-built payload itself is valid";
+    EXPECT_NO_THROW(read({10}));
+    ExpectCorruption([&] { read({5, 3, 10}); }, "a run end that goes back");
+    ExpectCorruption([&] { read({5, 5, 10}); }, "a run end that repeats");
+    ExpectCorruption([&] { read({6, 4, 3, 10}); }, "ends that decrease");
+    ExpectCorruption([&] { read({5, 12, 10}); }, "a run end beyond the rows");
+    ExpectCorruption([&] { read({5, 8, 9}); }, "runs that stop short of the rows");
+}
+
+TEST(EncodingIo, ADictionaryCodeBeyondTheDictionaryIsRejected) {
+    // 60 rows of three distinct strings: a dictionary of 3 entries and codes of 2 bits (0..2), so
+    // the fourth value, 3, fits the width and is not an entry
+    std::vector<Value> values;
+    for (int i = 0; i < 60; i++) {
+        values.push_back(Value::Varchar(std::string(1, static_cast<char>('a' + i % 3))));
+    }
+    const auto raw = MakeRawSegment(LogicalType::Varchar(), values);
+    const auto encoded = EncodeSegment(*raw, EncodingChoice::Dictionary);
+    ASSERT_NE(encoded, nullptr);
+    ASSERT_EQ(encoded->kind(), EncodingKind::Dictionary);
+    const std::vector<uint8_t> bytes = Serialize(*WithEncoding(*raw, encoded));
+    EXPECT_NO_THROW(Deserialize(bytes, LogicalType::Varchar(), 60));
+    // the packed codes are the last thing in the segment, behind their u32 byte count
+    size_t payload = 0;
+    for (size_t size = 1; size <= 64; size++) {
+        uint32_t stored;
+        std::memcpy(&stored, bytes.data() + bytes.size() - size - 4, sizeof(stored));
+        if (stored == size) {
+            ASSERT_EQ(payload, 0U) << "ambiguous payload size";
+            payload = size;
+        }
+    }
+    ASSERT_GT(payload, 0U);
+    std::vector<uint8_t> bad = bytes;
+    bad[bytes.size() - payload] = 0xFF; // the first four codes are 3
+    try {
+        Deserialize(bad, LogicalType::Varchar(), 60);
+        ADD_FAILURE() << "a code of 3 in a dictionary of 3 was accepted";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Corruption);
+        EXPECT_NE(std::string(e.what()).find("dictionary code"), std::string::npos) << e.what();
     }
 }
 

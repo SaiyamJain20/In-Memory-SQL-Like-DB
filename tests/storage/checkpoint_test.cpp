@@ -470,6 +470,63 @@ TEST(Checkpoint, ACorrectlyChecksummedButLyingDirectoryIsRejected) {
     ExpectCorruption([&] { ReadCheckpoint(*fs, kPath, nullptr); }, "bytes after the segment");
 }
 
+// A row group is at most the table's row group size. (A group of zero rows is rejected twice, by
+// the directory and again by the segment reader, so only a group that is too large isolates the
+// directory's check: its segment is perfectly valid.)
+TEST(Checkpoint, ARowGroupLargerThanTheTablesIsRejectedEvenWithValidSegments) {
+    Rng rng(8);
+    TableImage big = RandomTable("x", kVectorSize + 1, 4 * kVectorSize, rng);
+    ASSERT_EQ(big.groups.size(), 1U);
+    ASSERT_EQ(big.groups[0]->count(), kVectorSize + 1);
+    BinaryWriter seg;
+    WriteSegment(seg, big.groups[0]->column(1)); // an INTEGER column of 2049 rows
+    const std::vector<uint8_t> block = Frame(1, seg.buffer());
+    const auto build = [&](uint64_t group_size) {
+        BinaryWriter f;
+        f.U64(1);
+        f.U32(1);
+        f.String("t");
+        f.U32(1);
+        f.String("c");
+        f.U8(static_cast<uint8_t>(TypeId::Integer));
+        f.U8(0);
+        f.U64(group_size);
+        f.U32(1);
+        f.U64(kVectorSize + 1);
+        f.U64(32);
+        f.U32(static_cast<uint32_t>(block.size()));
+        return HandBuiltFile(1, {block}, f.buffer());
+    };
+    auto fs = NewFs();
+    Plant(*fs, build(2 * kVectorSize));
+    const CheckpointImage ok = ReadCheckpoint(*fs, kPath, nullptr);
+    ASSERT_EQ(ok.tables.size(), 1U);
+    EXPECT_EQ(ok.tables[0].groups[0]->count(), kVectorSize + 1)
+        << "the same file with room for the group is valid";
+    Plant(*fs, build(kVectorSize));
+    ExpectCorruption([&] { ReadCheckpoint(*fs, kPath, nullptr); },
+                     "2049 rows in a table of 2048-row groups");
+}
+
+// The trailer is read from the end of the file and says where the footer is; bytes between the
+// footer and the trailer would be skipped silently, with every checksum still right.
+TEST(Checkpoint, BytesBetweenTheFooterAndTheTrailerAreRejected) {
+    Rng rng(9);
+    auto fs = NewFs();
+    WriteCheckpoint(*fs, kPath, SmallImage(rng), nullptr);
+    const std::vector<uint8_t> bytes = fs->Contents(kPath);
+    constexpr size_t kTrailerBytes = 24; // u64 footer offset, u32 footer size, u32 crc, 8 magic
+    ASSERT_GT(bytes.size(), kTrailerBytes);
+    EXPECT_NO_THROW(ReadCheckpoint(*fs, kPath, nullptr));
+    for (const size_t extra : {size_t{1}, size_t{7}, size_t{4096}}) {
+        std::vector<uint8_t> padded = bytes;
+        padded.insert(padded.end() - static_cast<long>(kTrailerBytes), extra, 0xAB);
+        Plant(*fs, padded);
+        ExpectCorruption([&] { ReadCheckpoint(*fs, kPath, nullptr); },
+                         std::to_string(extra) + " bytes before the trailer");
+    }
+}
+
 TEST(Checkpoint, ErrorsInOneRowGroupSurfaceFromTheParallelReader) {
     Rng rng(7);
     CheckpointImage image;
