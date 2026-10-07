@@ -297,7 +297,9 @@ void PhysicalHashJoin::FinalizeParallel(GlobalSinkState& global, ExecutionContex
     while ((size_t{1} << partition_bits) < partitions) {
         partition_bits++;
     }
-    const unsigned shift = bucket_bits - partition_bits;
+    // (a small build on many threads has more partitions than buckets: a bucket is then a
+    // partition of its own, and the partitions past the last bucket stay empty)
+    const unsigned shift = bucket_bits > partition_bits ? bucket_bits - partition_bits : 0;
     const auto partition_of = [&](idx_t row) {
         return static_cast<size_t>((g.entries[row].hash & g.mask) >> shift);
     };
