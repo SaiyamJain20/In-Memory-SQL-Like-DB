@@ -486,6 +486,27 @@ TEST(OptimizerShapes, ASemiOrAntiJoinStaysAboveTheJoinWithAScalarSubquery) {
               "      SCAN big [k, v]\n"
               "      SCAN small [k]\n"
               "    SCAN tiny [k]\n");
+    EXPECT_EQ(env.Explain("SELECT big.v FROM tiny JOIN big ON big.k = tiny.k WHERE EXISTS "
+                          "(SELECT 1 FROM small WHERE small.k = big.k)"),
+              "PROJECT [v]\n"
+              "  PROJECT [v]\n"
+              "    JOIN INNER ON (big.k = tiny.k)\n"
+              "      JOIN SEMI ON (big.k = k)\n"
+              "        SCAN big [k, v]\n"
+              "        SCAN small [k]\n"
+              "      SCAN tiny [k]\n");
+    // the one-row input on the left, as the binder wrote it: still above
+    EXPECT_EQ(env.Explain("SELECT v FROM (SELECT avg(w) AS a FROM mid) AS s, big WHERE v > s.a AND "
+                          "EXISTS (SELECT 1 FROM small WHERE small.k = big.k)"),
+              "PROJECT [v]\n"
+              "  JOIN SEMI ON (k = k)\n"
+              "    PROJECT [k, v]\n"
+              "      JOIN INNER ON (CAST(v AS DOUBLE) > a)\n"
+              "        SCAN big [k, v]\n"
+              "        PROJECT [avg(CAST(w AS DOUBLE)) AS a]\n"
+              "          AGGREGATE groups=[] aggregates=[avg(CAST(w AS DOUBLE))]\n"
+              "            SCAN mid [w]\n"
+              "    SCAN small [k]\n");
 }
 
 TEST(OptimizerShapes, UncorrelatedSubqueriesBecomeJoinsWithoutKeys) {
