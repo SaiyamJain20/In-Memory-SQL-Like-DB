@@ -88,11 +88,11 @@ DuckDB at SF0.1 and SF1; first honest numbers in `BENCHMARKS.md`.
 
 **Done** (verified): all 12 TPC-H queries that need no subqueries match DuckDB at SF0.01, SF0.1 and
 SF1; single-thread geometric mean vs DuckDB 1.7x (SF0.1) / 3.1x (SF1), see `BENCHMARKS.md`. Semi/anti
-joins exist in the operator but are only reachable once subqueries are unnested (Phase 8); `FULL`
-joins and `EXPLAIN ANALYZE` are not implemented. Carried into later phases from what Phase 4
+joins exist in the operator but were only reachable once subqueries were unnested (done in Phase 8); `FULL`
+joins are not implemented (`EXPLAIN ANALYZE`: Phase 8). Carried into later phases from what Phase 4
 measured: the join hash table layout and hashing (Phase 5: SIMD/cache behaviour, the SF1 gap on
 Q7/Q8/Q9), parallel CSV loading (Phase 6: lineitem SF1 takes 5 s to load on one thread), column
-statistics and a real selectivity model for `LIKE` (Phase 8).
+statistics and a real selectivity model for `LIKE` (done in Phase 8).
 
 ### Phase 5 — Compression, zone maps, SIMD
 Lightweight encodings chosen per segment (constant, RLE, dictionary, frame-of-reference +
@@ -146,6 +146,15 @@ unnesting (uncorrelated + the correlated shapes TPC-H needs), `EXPLAIN` and `EXP
 with per-operator rows and time.
 
 **Exit:** all 22 TPC-H queries correct vs DuckDB; optimizer ablation (on/off) recorded.
+
+**Status: done (2026-10-07).** All 22 TPC-H queries match DuckDB at SF0.01 (in the gate, from memory / a checkpoint / a log), SF0.1 and
+SF1; 18,000 fresh random queries (and 60,000 earlier) match DuckDB with the optimizer on and off. Subqueries and non-recursive `WITH` are
+unnested while binding; every column segment carries a HyperLogLog sketch (checkpoint format 2); a cardinality estimator and a
+bushy dynamic-programming join order drive the plans; `EXPLAIN ANALYZE` shows estimated vs actual rows per operator. SF1 geometric mean
+over the 22 queries: 2.31x DuckDB's time on one thread, 1.51x at 16 (4.4x speedup from 1 to 16 threads); 10 of the 22 queries do not
+finish without the optimizer (SF0.01, 45 s). See `PROGRESS.md` / `BENCHMARKS.md`. Carried forward, in order of the gap they close:
+semi-join reduction of decorrelated aggregates (Q17 is 10x DuckDB's time), reverse semi / anti joins (Q4, Q21, Q22), histograms
+(Q18's `HAVING` is estimated 35,000x off), outer-join elimination, correlated `NOT IN`, `WITH RECURSIVE`.
 
 ### Phase 9 — Stretch
 Choose by remaining time and target audience: spill-to-disk (external sort, grace hash join),

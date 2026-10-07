@@ -5,6 +5,7 @@
 #include "execution/hash_aggregate.h"
 #include "execution/hash_join.h"
 #include "execution/pipeline.h"
+#include "execution/scalar_guard.h"
 #include "execution/sort.h"
 #include "planner/scalar_eval.h"
 
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <random>
 #include <tuple>
 
@@ -859,6 +861,168 @@ TEST(Operators, JoinKeysIncludeNaNAndSignedZero) {
     const Data right = make({-0.0, nan, 2.0});
     const Rows got = RunJoin(left, right, t, t, {{0, 0}}, nullptr, PhysicalJoinType::Inner);
     EXPECT_EQ(got.size(), 2U) << "0.0 = -0.0 and NaN = NaN, as in the = operator";
+}
+
+// x NOT IN (build keys) under three-valued logic: the row is kept only if the predicate is TRUE.
+TEST(Operators, NullAwareAntiJoinImplementsNotInThreeValuedLogic) {
+    Rng rng(23);
+    const std::vector<LogicalType> lt = {LogicalType::Integer(), LogicalType::Varchar()};
+    const std::vector<LogicalType> rt = {LogicalType::Integer()};
+    for (int round = 0; round < 200; round++) {
+        // few distinct values so that matches are common; nulls of both sides vary by round
+        const double left_nulls = round % 3 == 0 ? 0.0 : 0.25;
+        const double right_nulls = round % 4 == 0 ? 0.0 : (round % 4 == 1 ? 0.05 : 0.3);
+        const Data left =
+            MakeData(rng, lt, 1 + static_cast<int>(RandBelow(rng, 3)), Gen(left_nulls), false);
+        const Data right =
+            MakeData(rng, rt, static_cast<int>(RandBelow(rng, 3)), Gen(right_nulls), false);
+        Rows want;
+        for (const auto& l : left.rows) {
+            bool unknown_or_false = false;
+            if (!right.rows.empty()) {
+                if (l[0].IsNull()) {
+                    unknown_or_false = true;
+                } else {
+                    for (const auto& r : right.rows) {
+                        if (r[0].IsNull() || Value::Compare(l[0], r[0]) == 0) {
+                            unknown_or_false = true; // equal: FALSE; NULL on the right: UNKNOWN
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!unknown_or_false) {
+                want.push_back(l);
+            }
+        }
+        const Rows got =
+            RunJoin(left, right, lt, rt, {{0, 0}}, nullptr, PhysicalJoinType::AntiNullAware);
+        ExpectSameMultiset(got, want, "round " + std::to_string(round));
+        if (::testing::Test::HasFailure()) {
+            return;
+        }
+    }
+}
+
+namespace {
+
+Data IntColumn(const std::vector<std::vector<std::optional<int32_t>>>& chunks) {
+    Data d;
+    const std::vector<LogicalType> t = {LogicalType::Integer()};
+    for (const auto& values : chunks) {
+        DataChunk c;
+        c.Initialize(t);
+        for (idx_t i = 0; i < values.size(); i++) {
+            const Value v = values[i] ? Value::Integer(*values[i]) : Value::Null(t[0]);
+            c.SetValue(0, i, v);
+            d.rows.push_back({v});
+        }
+        c.SetCardinality(values.size());
+        d.chunks.push_back(std::move(c));
+    }
+    return d;
+}
+
+// probe x NOT IN (build), single INTEGER column on both sides
+Rows NullAware(const Data& left, const Data& right) {
+    const std::vector<LogicalType> t = {LogicalType::Integer()};
+    return RunJoin(left, right, t, t, {{0, 0}}, nullptr, PhysicalJoinType::AntiNullAware);
+}
+
+} // namespace
+
+TEST(Operators, NullAwareAntiJoinHandWrittenCases) {
+    const Data probe = IntColumn({{1, std::nullopt, 7}, {}, {2}});
+    // an empty build side: NOT IN () is TRUE for every row, a NULL probe key included
+    EXPECT_EQ(NullAware(probe, IntColumn({})).size(), 4U);
+    EXPECT_EQ(NullAware(probe, IntColumn({{}})).size(), 4U);
+    // no NULL on the build side: unmatched non-NULL rows survive, the NULL row does not
+    const Rows plain = NullAware(probe, IntColumn({{7}, {9}}));
+    ASSERT_EQ(plain.size(), 2U);
+    EXPECT_EQ(plain[0][0], Value::Integer(1));
+    EXPECT_EQ(plain[1][0], Value::Integer(2));
+    // a NULL anywhere on the build side (here in the second chunk) empties the result
+    EXPECT_TRUE(NullAware(probe, IntColumn({{7}, {std::nullopt}})).empty());
+    EXPECT_TRUE(NullAware(probe, IntColumn({{std::nullopt}})).empty());
+    // an empty probe side
+    EXPECT_TRUE(NullAware(IntColumn({}), IntColumn({{1}})).empty());
+}
+
+// ---------------------------------------------------------------------------------- scalar guard
+
+namespace {
+
+// Runs `data` through a ScalarGuard (sink) and reads back what it yields (source).
+Rows RunGuard(const Data& data, const std::vector<LogicalType>& types) {
+    PhysicalPlan plan;
+    auto& src = plan.Make<ChunkListSource>(types, &data.chunks);
+    auto& guard = plan.Make<PhysicalScalarGuard>(types);
+    auto& result = plan.Make<PhysicalResultCollector>(types);
+    Pipeline first;
+    first.source = &src;
+    first.sink = &guard;
+    Pipeline second;
+    second.source = &guard;
+    second.sink = &result;
+    second.dependencies = {0};
+    plan.pipelines = {first, second};
+    plan.root = &result;
+    return Collect(plan);
+}
+
+} // namespace
+
+TEST(Operators, ScalarGuardYieldsExactlyOneRow) {
+    const std::vector<LogicalType> t = {LogicalType::Integer()};
+    // no rows at all, or only empty chunks: a row of NULLs
+    for (const Data& none : {IntColumn({}), IntColumn({{}}), IntColumn({{}, {}, {}})}) {
+        const Rows r = RunGuard(none, t);
+        ASSERT_EQ(r.size(), 1U);
+        EXPECT_TRUE(r[0][0].IsNull());
+    }
+    // one row, wherever it sits among empty chunks, NULL or not
+    const Rows one = RunGuard(IntColumn({{}, {42}, {}}), t);
+    ASSERT_EQ(one.size(), 1U);
+    EXPECT_EQ(one[0][0], Value::Integer(42));
+    const Rows null_row = RunGuard(IntColumn({{std::nullopt}}), t);
+    ASSERT_EQ(null_row.size(), 1U);
+    EXPECT_TRUE(null_row[0][0].IsNull());
+}
+
+TEST(Operators, ScalarGuardRejectsASecondRow) {
+    const std::vector<LogicalType> t = {LogicalType::Integer()};
+    const auto message = [&](const Data& d) {
+        try {
+            RunGuard(d, t);
+        } catch (const Error& e) {
+            EXPECT_EQ(e.code(), ErrorCode::Execution);
+            return std::string(e.what());
+        }
+        ADD_FAILURE() << "expected an error";
+        return std::string();
+    };
+    for (const Data& many :
+         {IntColumn({{1, 2}}), IntColumn({{1}, {2}}), IntColumn({{1}, {}, {std::nullopt}}),
+          IntColumn({{std::nullopt, std::nullopt}})}) {
+        EXPECT_NE(message(many).find("More than one row"), std::string::npos);
+    }
+}
+
+TEST(Operators, ScalarGuardKeepsEveryColumnOfItsRow) {
+    const std::vector<LogicalType> t = {LogicalType::Integer(), LogicalType::Varchar(),
+                                        LogicalType::Double(), LogicalType::Date()};
+    Rng rng(5);
+    for (int round = 0; round < 50; round++) {
+        Data d;
+        d.chunks.push_back(test::RandomVariedChunk(rng, t, 1, Gen(0.3)));
+        d.rows = RowsOf(d.chunks.back());
+        const Rows got = RunGuard(d, t);
+        ASSERT_EQ(got.size(), 1U);
+        for (size_t c = 0; c < t.size(); c++) {
+            ASSERT_TRUE(test::CompareWithNulls(got[0][c], d.rows[0][c]) == 0)
+                << "round " << round << " col " << c;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------- values /

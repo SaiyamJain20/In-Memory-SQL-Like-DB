@@ -1,0 +1,228 @@
+# WITH (common table expressions): chaining, shadowing, column aliases, use inside subqueries and
+# derived tables, repeated references. Expected results come from DuckDB.
+
+statement ok
+CREATE TABLE emp (id INTEGER NOT NULL, name VARCHAR, dept INTEGER, salary DOUBLE);
+
+statement ok
+INSERT INTO emp VALUES (1, 'alice', 10, 5000.5), (2, 'bob', 10, 4200.0), (3, 'carol', 20, 6100.25),
+ (4, 'dave', 20, 3900.0), (5, 'erin', 30, 4800.75), (6, 'frank', NULL, 3500.0), (7, 'grace', 10, NULL);
+
+statement ok
+CREATE TABLE dept (id INTEGER, dname VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES (10, 'eng'), (20, 'ops'), (30, 'sales'), (40, 'hr');
+
+query IT
+WITH x AS (SELECT id, name FROM emp WHERE id < 4) SELECT * FROM x ORDER BY id;
+----
+1	alice
+2	bob
+3	carol
+
+# a CTE is an ordinary relation: filters, aggregates, joins
+query IR
+WITH totals AS (SELECT dept, sum(salary) AS total FROM emp GROUP BY dept)
+SELECT dept, total FROM totals WHERE total > 5000 ORDER BY dept;
+----
+10	9200.5
+20	10000.25
+
+query TR
+WITH totals AS (SELECT dept, sum(salary) AS total FROM emp GROUP BY dept)
+SELECT d.dname, t.total FROM totals t JOIN dept d ON d.id = t.dept ORDER BY d.dname;
+----
+eng	9200.5
+ops	10000.25
+sales	4800.75
+
+# later CTEs see earlier ones
+query IR
+WITH a AS (SELECT dept, salary FROM emp WHERE salary IS NOT NULL),
+     b AS (SELECT dept, avg(salary) AS m FROM a GROUP BY dept),
+     c AS (SELECT dept, m FROM b WHERE m > 4000)
+SELECT * FROM c ORDER BY dept;
+----
+10	4600.25
+20	5000.125
+30	4800.75
+
+# referenced twice
+query TT rowsort
+WITH x AS (SELECT id, name, dept FROM emp)
+SELECT p.name, q.name FROM x p JOIN x q ON p.dept = q.dept AND p.id < q.id;
+----
+alice	bob
+alice	grace
+bob	grace
+carol	dave
+
+query I
+WITH x AS (SELECT id FROM emp WHERE id < 4) SELECT count(*) FROM x a, x b;
+----
+9
+
+# column aliases
+query IT
+WITH x(i, n) AS (SELECT id, name FROM emp WHERE id <= 2) SELECT i, n FROM x ORDER BY i;
+----
+1	alice
+2	bob
+
+query I
+WITH x(i) AS (SELECT id, name FROM emp WHERE id <= 2) SELECT i FROM x ORDER BY i;
+----
+1
+2
+
+# names are case-insensitive
+query I
+WITH Xy AS (SELECT 1 AS One) SELECT xY.oNe FROM XY;
+----
+1
+
+# a CTE shadows a base table of the same name
+query I
+WITH emp AS (SELECT 1 AS id) SELECT count(*) FROM emp;
+----
+1
+
+query I
+WITH emp AS (SELECT id FROM emp WHERE id > 3) SELECT count(*) FROM emp;
+----
+4
+
+# an inner WITH shadows an outer one, and does not leak out
+query I
+WITH x AS (SELECT 1 AS v) SELECT (WITH x AS (SELECT 2 AS v) SELECT max(v) FROM x) + (SELECT max(v) FROM x);
+----
+3
+
+query I
+WITH x AS (SELECT 1 AS v) SELECT v FROM (WITH x AS (SELECT 5 AS v) SELECT v FROM x) t;
+----
+5
+
+# used inside subqueries
+query T
+WITH rich AS (SELECT id FROM emp WHERE salary > 4500)
+SELECT name FROM emp WHERE id IN (SELECT id FROM rich) ORDER BY id;
+----
+alice
+carol
+erin
+
+query T
+WITH rich AS (SELECT id FROM emp WHERE salary > 4500)
+SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM rich r WHERE r.id = e.id) ORDER BY id;
+----
+bob
+dave
+frank
+grace
+
+query TR
+WITH avg_by_dept AS (SELECT dept, avg(salary) AS m FROM emp GROUP BY dept)
+SELECT name, salary FROM emp e WHERE salary > (SELECT max(m) FROM avg_by_dept a WHERE a.dept = e.dept) ORDER BY id;
+----
+alice	5000.5
+carol	6100.25
+
+query TR
+WITH t AS (SELECT dept, salary FROM emp)
+SELECT name, (SELECT max(salary) FROM t WHERE t.dept = e.dept) FROM emp e ORDER BY id;
+----
+alice	5000.5
+bob	5000.5
+carol	6100.25
+dave	6100.25
+erin	4800.75
+frank	NULL
+grace	5000.5
+
+# a CTE defined in a subquery, over a CTE of the outer query
+query I
+WITH x AS (SELECT id FROM emp WHERE dept = 10)
+SELECT count(*) FROM emp WHERE id IN (WITH y AS (SELECT id FROM x WHERE id > 1) SELECT id FROM y);
+----
+2
+
+# a CTE in a derived table and in an INSERT ... SELECT
+query I
+SELECT count(*) FROM (WITH x AS (SELECT * FROM emp WHERE dept = 20) SELECT * FROM x) t;
+----
+2
+
+statement ok
+CREATE TABLE dup (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO dup WITH x AS (SELECT id, name FROM emp WHERE id > 5) SELECT * FROM x;
+
+query IT
+SELECT id, name FROM dup ORDER BY id;
+----
+6	frank
+7	grace
+
+# ORDER BY / LIMIT / DISTINCT inside and outside
+query T
+WITH x AS (SELECT name FROM emp ORDER BY salary DESC NULLS LAST LIMIT 3) SELECT name FROM x ORDER BY name;
+----
+alice
+carol
+erin
+
+query I
+WITH x AS (SELECT DISTINCT dept FROM emp) SELECT count(*) FROM x;
+----
+4
+
+query T
+WITH x AS (SELECT name, salary FROM emp) SELECT name FROM x ORDER BY salary DESC NULLS LAST, name LIMIT 2 OFFSET 1;
+----
+alice
+erin
+
+# a CTE with expressions, a constant, and an empty result
+query II
+WITH x AS (SELECT 1 AS a, 2 AS b) SELECT a + b, a * b FROM x;
+----
+3	2
+
+query I
+WITH x AS (SELECT id FROM emp WHERE id > 100) SELECT count(*) FROM x;
+----
+0
+
+query IT
+WITH x AS (SELECT id, name FROM emp WHERE id > 100) SELECT * FROM x;
+----
+
+# CTE referenced from a join with a left outer join (NULL-extended rows)
+query TT rowsort
+WITH busy AS (SELECT dept FROM emp GROUP BY dept HAVING count(*) > 1)
+SELECT d.dname, b.dept FROM dept d LEFT JOIN busy b ON b.dept = d.id;
+----
+eng	10
+hr	NULL
+ops	20
+sales	NULL
+
+# name resolution errors
+statement error
+WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT * FROM a;
+
+statement error
+WITH x AS (SELECT 1) SELECT * FROM y;
+
+statement error
+WITH x AS (SELECT 1), x AS (SELECT 2) SELECT * FROM x;
+
+statement error
+WITH x AS (SELECT 1 AS v) SELECT nope FROM x;
+
+# a CTE does not outlive its statement
+statement error
+SELECT * FROM x;

@@ -29,10 +29,10 @@ bool AddSumInt64Scalar(const int64_t* data, idx_t n, int64_t* sum) {
     return true;
 }
 
-double SumDoubleScalar(const double* data, idx_t n) {
-    double sum = 0;
+CompensatedSum SumDoubleScalar(const double* data, idx_t n) {
+    CompensatedSum sum;
     for (idx_t i = 0; i < n; i++) {
-        sum += data[i];
+        sum.Add(data[i]);
     }
     return sum;
 }
@@ -92,18 +92,37 @@ __attribute__((target("avx2"))) bool AddSumInt64Avx2(const int64_t* data, idx_t 
     return true;
 }
 
-__attribute__((target("avx2"))) double SumDoubleAvx2(const double* data, idx_t n) {
-    __m256d a0 = _mm256_setzero_pd(), a1 = _mm256_setzero_pd();
+// Two accumulators of four lanes, each a (hi, lo) pair: hi' = hi + x, and the rounding error of
+// that addition (TwoSum) goes to lo. The lanes are merged in a fixed order at the end.
+__attribute__((target("avx2"))) CompensatedSum SumDoubleAvx2(const double* data, idx_t n) {
+    __m256d hi0 = _mm256_setzero_pd(), lo0 = _mm256_setzero_pd();
+    __m256d hi1 = _mm256_setzero_pd(), lo1 = _mm256_setzero_pd();
     idx_t i = 0;
     for (; i + 8 <= n; i += 8) {
-        a0 = _mm256_add_pd(a0, _mm256_loadu_pd(data + i));
-        a1 = _mm256_add_pd(a1, _mm256_loadu_pd(data + i + 4));
+        const __m256d x0 = _mm256_loadu_pd(data + i);
+        const __m256d x1 = _mm256_loadu_pd(data + i + 4);
+        const __m256d s0 = _mm256_add_pd(hi0, x0);
+        const __m256d s1 = _mm256_add_pd(hi1, x1);
+        const __m256d b0 = _mm256_sub_pd(s0, hi0);
+        const __m256d b1 = _mm256_sub_pd(s1, hi1);
+        lo0 = _mm256_add_pd(
+            lo0, _mm256_add_pd(_mm256_sub_pd(hi0, _mm256_sub_pd(s0, b0)), _mm256_sub_pd(x0, b0)));
+        lo1 = _mm256_add_pd(
+            lo1, _mm256_add_pd(_mm256_sub_pd(hi1, _mm256_sub_pd(s1, b1)), _mm256_sub_pd(x1, b1)));
+        hi0 = s0;
+        hi1 = s1;
     }
-    alignas(32) double lanes[4];
-    _mm256_store_pd(lanes, _mm256_add_pd(a0, a1));
-    double sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    alignas(32) double his[8], los[8];
+    _mm256_store_pd(his, hi0);
+    _mm256_store_pd(his + 4, hi1);
+    _mm256_store_pd(los, lo0);
+    _mm256_store_pd(los + 4, lo1);
+    CompensatedSum sum;
+    for (int lane = 0; lane < 8; lane++) {
+        sum.Add(CompensatedSum{his[lane], los[lane]});
+    }
     for (; i < n; i++) {
-        sum += data[i];
+        sum.Add(data[i]);
     }
     return sum;
 }
@@ -179,8 +198,12 @@ bool AddSumInt64(const int64_t* data, idx_t n, int64_t* sum) {
     return UseAvx2() ? AddSumInt64Avx2(data, n, sum) : AddSumInt64Scalar(data, n, sum);
 }
 
-double SumDouble(const double* data, idx_t n) {
+CompensatedSum SumDoubleCompensated(const double* data, idx_t n) {
     return UseAvx2() ? SumDoubleAvx2(data, n) : SumDoubleScalar(data, n);
+}
+
+double SumDouble(const double* data, idx_t n) {
+    return SumDoubleCompensated(data, n).Value();
 }
 
 void MinMaxInt32(const int32_t* data, idx_t n, int32_t* min, int32_t* max) {

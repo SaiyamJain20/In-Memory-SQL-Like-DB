@@ -23,6 +23,11 @@ if [[ ! -f data/tpch-sf0.01/manifest.json ]]; then
   echo "generating TPC-H SF0.01 data and DuckDB reference answers..."
   .venv/bin/python tools/tpch_data.py --sf 0.01 >/dev/null 2>&1 || fail "TPC-H data missing (needs .venv with duckdb: see CLAUDE.md)"
 fi
+# Random queries with DuckDB's answers (the small seeds; the big-table ones are for manual campaigns).
+# Always regenerated: the generator is part of what is being verified.
+rm -rf data/sqlfuzz
+.venv/bin/python tools/fuzz_sql.py --seeds 1-4 --queries 300 >/dev/null 2>&1 || fail "random SQL generation (tools/fuzz_sql.py)"
+export CDB_REQUIRE_SQLFUZZ=1
 
 tools/check_format.sh >/dev/null 2>&1 || { tools/check_format.sh 2>&1 | head -20; fail "format"; }
 echo "format        OK"

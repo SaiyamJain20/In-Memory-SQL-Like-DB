@@ -1,9 +1,11 @@
 #include "storage/column_stats.h"
 
 #include "common/assert.h"
+#include "execution/hashing.h" // the hash functions of the hash tables: one definition of "equal"
 #include "types/string_t.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace cdb {
 
@@ -161,6 +163,71 @@ ColumnStats ComputeColumnStats(LogicalType type, const uint8_t* data, const Vali
     }
     }
     return st;
+}
+
+namespace {
+
+template <class T, class H>
+void HashRows(HyperLogLog& sketch, const T* v, const ValidityMask& validity, idx_t count, H hash) {
+    if (validity.AllValid()) {
+        for (idx_t i = 0; i < count; i++) {
+            sketch.Add(hash(v[i]));
+        }
+        return;
+    }
+    for (idx_t i = 0; i < count; i++) {
+        if (validity.IsValid(i)) {
+            sketch.Add(hash(v[i]));
+        }
+    }
+}
+
+} // namespace
+
+void AddToDistinctSketch(HyperLogLog& sketch, LogicalType type, const uint8_t* data,
+                         const ValidityMask& validity, idx_t count) {
+    switch (type.id()) {
+    case TypeId::Boolean:
+        HashRows(sketch, reinterpret_cast<const bool*>(data), validity, count,
+                 [](bool b) { return HashInt64(b ? 1 : 0); });
+        break;
+    case TypeId::Integer:
+    case TypeId::Date:
+        HashRows(sketch, reinterpret_cast<const int32_t*>(data), validity, count, [](int32_t x) {
+            return HashInt64(static_cast<uint64_t>(static_cast<int64_t>(x)));
+        });
+        break;
+    case TypeId::BigInt:
+        HashRows(sketch, reinterpret_cast<const int64_t*>(data), validity, count,
+                 [](int64_t x) { return HashInt64(static_cast<uint64_t>(x)); });
+        break;
+    case TypeId::Double:
+        HashRows(sketch, reinterpret_cast<const double*>(data), validity, count, [](double d) {
+            if (d == 0.0) {
+                d = 0.0; // -0.0 and 0.0 are one value
+            }
+            uint64_t bits;
+            if (std::isnan(d)) {
+                bits = 0x7ff8000000000000ULL; // every NaN is one value
+            } else {
+                std::memcpy(&bits, &d, sizeof(bits));
+            }
+            return HashInt64(bits);
+        });
+        break;
+    case TypeId::Varchar:
+        HashRows(sketch, reinterpret_cast<const string_t*>(data), validity, count,
+                 [](const string_t& s) { return HashBytes(s.data(), s.size()); });
+        break;
+    }
+}
+
+std::shared_ptr<const HyperLogLog> ComputeDistinctSketch(LogicalType type, const uint8_t* data,
+                                                         const ValidityMask& validity,
+                                                         idx_t count) {
+    auto sketch = std::make_shared<HyperLogLog>();
+    AddToDistinctSketch(*sketch, type, data, validity, count);
+    return sketch;
 }
 
 } // namespace cdb

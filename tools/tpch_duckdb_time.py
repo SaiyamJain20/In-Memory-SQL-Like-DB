@@ -15,7 +15,7 @@ import time
 import duckdb
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SUPPORTED = [1, 3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 19]
+SUPPORTED = list(range(1, 23))
 
 
 def main():

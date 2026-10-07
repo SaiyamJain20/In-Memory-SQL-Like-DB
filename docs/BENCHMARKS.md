@@ -425,3 +425,231 @@ An fsynced commit costs ~0.5 ms on this disk, which is almost all of the differe
   cache and fsync, not by serialising.
 - At SF0.1 (16 threads): `COPY` 0.50 s in memory, 0.71 s persistent; checkpoint 0.25 s (60.8 MB); reopen 0.04 s (vs 0.50 s to
   reload the CSV); log replay 0.29 s (104 MB).
+
+
+---
+
+## Phase 8 - statistics, subqueries and the cost-based optimizer
+
+All 22 TPC-H queries run now (the 10 that need subqueries or `WITH` were added by this phase), and every one is checked against
+DuckDB at SF0.01 (in the gate, from memory, a checkpoint and a log), SF0.1 and SF1. Same machine as above (Ryzen 7 6800H, GCC 13.3
+`-O3`), a desktop session running (load average 0.8-3.3 during the runs). Every cell is the minimum of 5 runs after one cold run. All the
+engines of one table ran in the same sitting (cdb, DuckDB, the baseline build, one after the other), so the ratios between columns are
+comparable; differences under ~10% between two sittings are noise. DuckDB is 1.5.6 on its own `dbgen` data, `tools/tpch_duckdb_time.py`.
+
+Reproduce:
+```
+cmake --preset release && cmake --build --preset release
+.venv/bin/python tools/tpch_data.py --sf 1                       # and --sf 0.1
+for t in 1 16; do build/release/bench/cdb_tpch --sf 1 --threads $t --runs 5 > out/cdb_t$t.txt; done
+for t in 1 16; do .venv/bin/python tools/tpch_duckdb_time.py --sf 1 --threads $t --runs 5 > out/duck_t$t.txt; done
+.venv/bin/python tools/bench_table.py out/cdb_t1.txt out/cdb_t16.txt out/duck_t1.txt out/duck_t16.txt [before_t1.txt before_t16.txt]
+.venv/bin/python tools/optimizer_ablation.py --sf 0.01 --limit 45   # optimizer on / off
+.venv/bin/python tools/stats_accuracy.py ndv --sf 1                 # sketches vs exact distinct counts
+.venv/bin/python tools/stats_accuracy.py estimates --sf 1           # estimated vs actual rows, every operator
+```
+
+### TPC-H SF1 (6,001,215 lineitem rows), all 22 queries, ms
+"before" is the build of commit `97ae719` (this phase's first commit: every query runs, but the join order is Phase 7's rule-based
+one - no statistics, no cost model, no `EXPLAIN ANALYZE`, no deterministic sums), built from a separate worktree and run in the same
+sitting; `before / now` above 1 means the final build is faster.
+
+| Query | cdb 1 thr | cdb 16 thr | speedup | DuckDB 1 thr | DuckDB 16 thr | cdb / DuckDB @1 | cdb / DuckDB @16 | before 1 thr | before 16 thr | 1 thr: before / now |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 282.4 | 35.8 | 7.9x | 180.0 | 27.1 | 1.57x | 1.32x | 214.9 | 34.5 | 0.76x |
+| Q2 | 35.2 | 11.9 | 3.0x | 11.1 | 10.6 | 3.17x | 1.12x | 70.9 | 20.3 | 2.01x |
+| Q3 | 77.6 | 14.1 | 5.5x | 47.6 | 16.2 | 1.63x | 0.87x | 105.2 | 22.4 | 1.36x |
+| Q4 | 142.2 | 79.1 | 1.8x | 54.2 | 17.2 | 2.62x | 4.60x | 145.2 | 75.8 | 1.02x |
+| Q5 | 154.3 | 27.0 | 5.7x | 51.7 | 15.4 | 2.98x | 1.75x | 198.8 | 31.8 | 1.29x |
+| Q6 | 36.4 | 5.7 | 6.4x | 20.0 | 4.5 | 1.82x | 1.27x | 38.7 | 5.5 | 1.06x |
+| Q7 | 107.7 | 20.2 | 5.3x | 50.4 | 18.4 | 2.14x | 1.10x | 418.9 | 88.3 | 3.89x |
+| Q8 | 95.6 | 16.5 | 5.8x | 30.5 | 14.0 | 3.13x | 1.18x | 230.5 | 42.1 | 2.41x |
+| Q9 | 1145.8 | 192.6 | 5.9x | 199.3 | 59.4 | 5.75x | 3.24x | 1220.9 | 226.6 | 1.07x |
+| Q10 | 171.9 | 37.2 | 4.6x | 133.3 | 36.9 | 1.29x | 1.01x | 200.6 | 42.1 | 1.17x |
+| Q11 | 22.7 | 4.8 | 4.7x | 10.2 | 6.2 | 2.23x | 0.77x | 50.0 | 9.5 | 2.20x |
+| Q12 | 113.1 | 16.7 | 6.8x | 86.1 | 15.3 | 1.31x | 1.09x | 115.1 | 16.7 | 1.02x |
+| Q13 | 599.8 | 109.5 | 5.5x | 136.5 | 38.4 | 4.39x | 2.85x | 599.8 | 92.4 | 1.00x |
+| Q14 | 28.5 | 6.0 | 4.8x | 29.6 | 10.4 | 0.96x | 0.58x | 44.3 | 7.4 | 1.55x |
+| Q15 | 51.8 | 12.9 | 4.0x | 21.3 | 8.6 | 2.43x | 1.50x | 54.5 | 11.8 | 1.05x |
+| Q16 | 43.6 | 19.7 | 2.2x | 35.7 | 30.2 | 1.22x | 0.65x | 38.3 | 18.4 | 0.88x |
+| Q17 | 288.2 | 132.2 | 2.2x | 27.8 | 11.2 | 10.37x | 11.80x | 269.4 | 125.3 | 0.93x |
+| Q18 | 260.8 | 50.2 | 5.2x | 257.9 | 52.8 | 1.01x | 0.95x | 854.5 | 135.1 | 3.28x |
+| Q19 | 152.2 | 21.0 | 7.2x | 146.7 | 28.4 | 1.04x | 0.74x | 153.6 | 22.4 | 1.01x |
+| Q20 | 198.3 | 41.2 | 4.8x | 42.6 | 13.5 | 4.65x | 3.05x | 193.8 | 39.6 | 0.98x |
+| Q21 | 451.9 | 210.4 | 2.1x | 162.4 | 53.6 | 2.78x | 3.93x | 663.4 | 241.0 | 1.47x |
+| Q22 | 74.5 | 20.7 | 3.6x | 22.0 | 18.0 | 3.39x | 1.15x | 75.5 | 22.6 | 1.01x |
+| **geometric mean** |  |  | **4.4x** |  |  | **2.31x** | **1.51x** |  |  | **1.33x** |
+
+the 12 queries of the earlier tables: speedup 5.88x, cdb / DuckDB at 1 thread 2.00x, at 16 threads 1.25x
+
+- **The cost-based join order is what moved the multi-join queries:** Q7 3.9x, Q18 3.3x, Q8 2.4x, Q11 2.2x, Q2 2.0x, Q14 1.6x, Q21 1.5x
+  faster on one thread than the same engine with the rule-based order (the search finds bushy plans for Q7 / Q8 / Q2, and the HAVING
+  subquery of Q18 - 57 orders - is applied to `orders` instead of after the join of everything; `EXPLAIN ANALYZE` showed that). Queries
+  with one table and no subquery do not move (Q6 1.06x, Q12 1.02x, Q13 1.00x).
+- **Q1 is 31% slower than before** (214.9 -> 282.4 ms at one thread; 34.5 -> 35.8 at 16; ADR 0010 measured +23% in isolation): its six
+  `SUM` / `AVG` of doubles now use compensated (double-double) accumulation so that the result does not depend on the number of threads
+  (found by Q15, which returned no row at 16 threads when a sum differed in its last bits between two evaluations; ADR 0010 section 6).
+  Q6 (ungrouped, vectorized) does not pay. DuckDB also uses Kahan summation for `SUM(DOUBLE)`.
+- Q16 (38.3 -> 43.6 ms) and Q17 (269.4 -> 288.2 ms) are 14% and 7% slower than the baseline at one thread; not investigated (Q17's grouped
+  `avg` is compensated now, a candidate for it). **Q22 was 30% slower until the last commit of the phase** (a separate measurement:
+  93.5-96.3 ms against 72.7-73.4 for the baseline: the NOT EXISTS sank below the join with the scalar subquery and probed 42,000 rows
+  instead of 19,000); it is 74.5 vs 75.5 ms in this table.
+- **Where the engine is still far from DuckDB** (one thread): Q17 10.4x, Q9 5.8x, Q20 4.7x, Q13 4.4x, Q22 3.4x, Q2 3.2x, Q8 3.1x.
+  Q17, Q20 and Q2 decorrelate into an aggregate over the whole inner table (Q17: `lineitem` grouped by `l_partkey`, 6 M rows) *before*
+  the join with the few parts that survive. DuckDB's plan for Q17 (`EXPLAIN`, checked) joins `lineitem` with the distinct keys of the
+  qualifying parts first and aggregates only those rows; Q20 and Q2 have the same correlated-aggregate shape. This optimizer does not
+  reduce the inner table by the outer keys. Q4, Q21 and Q22 build the hash table of the subquery side (`lineitem`, `orders`) where
+  building the small outer side and probing with the big one (a reverse semi / anti join) would very likely be cheaper (not
+  implemented, so not measured); Q4 and Q21 also scale worst with threads (1.8x and 2.1x at 16), not investigated. Recorded in PROGRESS
+  as known gaps.
+- Q18 (1.01x), Q19 (1.04x), Q14 (0.96x), Q10 (1.29x) and Q12 (1.31x) are within 1.3x of DuckDB on one thread, Q3 is faster at 16 threads
+  (0.87x), as are Q11, Q14, Q16, Q18 and Q19.
+
+### TPC-H SF0.1 (600,572 lineitem rows), all 22 queries, ms
+
+| Query | cdb 1 thr | cdb 16 thr | speedup | DuckDB 1 thr | DuckDB 16 thr | cdb / DuckDB @1 | cdb / DuckDB @16 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 28.6 | 4.4 | 6.5x | 19.7 | 6.2 | 1.45x | 0.71x |
+| Q2 | 3.6 | 4.2 | 0.9x | 4.6 | 5.6 | 0.78x | 0.75x |
+| Q3 | 7.1 | 2.0 | 3.5x | 5.2 | 4.6 | 1.37x | 0.43x |
+| Q4 | 7.9 | 2.9 | 2.7x | 5.7 | 6.2 | 1.39x | 0.47x |
+| Q5 | 13.6 | 3.7 | 3.7x | 6.1 | 5.2 | 2.23x | 0.71x |
+| Q6 | 3.7 | 0.7 | 5.3x | 2.3 | 1.2 | 1.61x | 0.58x |
+| Q7 | 9.9 | 3.6 | 2.8x | 7.7 | 6.6 | 1.29x | 0.55x |
+| Q8 | 9.0 | 2.2 | 4.1x | 6.5 | 5.8 | 1.38x | 0.38x |
+| Q9 | 46.5 | 11.0 | 4.2x | 19.5 | 12.3 | 2.38x | 0.89x |
+| Q10 | 12.0 | 6.4 | 1.9x | 18.7 | 12.1 | 0.64x | 0.53x |
+| Q11 | 2.6 | 1.1 | 2.4x | 6.2 | 6.8 | 0.42x | 0.16x |
+| Q12 | 11.0 | 2.1 | 5.2x | 10.0 | 5.8 | 1.10x | 0.36x |
+| Q13 | 36.8 | 8.0 | 4.6x | 11.4 | 13.2 | 3.23x | 0.61x |
+| Q14 | 2.5 | 0.8 | 3.1x | 3.2 | 2.7 | 0.78x | 0.30x |
+| Q15 | 4.3 | 1.2 | 3.6x | 2.8 | 2.3 | 1.54x | 0.52x |
+| Q16 | 3.9 | 2.5 | 1.6x | 5.6 | 7.8 | 0.70x | 0.32x |
+| Q17 | 18.7 | 6.1 | 3.1x | 4.7 | 4.1 | 3.98x | 1.49x |
+| Q18 | 16.8 | 4.7 | 3.6x | 12.0 | 9.4 | 1.40x | 0.50x |
+| Q19 | 10.5 | 3.6 | 2.9x | 16.2 | 6.5 | 0.65x | 0.55x |
+| Q20 | 9.8 | 4.0 | 2.5x | 6.7 | 5.5 | 1.46x | 0.73x |
+| Q21 | 31.4 | 10.5 | 3.0x | 18.4 | 14.6 | 1.71x | 0.72x |
+| Q22 | 4.6 | 2.4 | 1.9x | 4.0 | 5.2 | 1.15x | 0.46x |
+| **geometric mean** |  |  | **3.0x** |  |  | **1.29x** | **0.53x** |
+
+the 12 queries of the earlier tables: speedup 3.79x, cdb / DuckDB at 1 thread 1.34x, at 16 threads 0.53x
+
+### The optimizer on and off (SF0.01, one thread, ms)
+`cdb_tpch --no-optimizer` runs the plan exactly as the binder built it: comma joins are cross products with every predicate on top,
+subqueries are whatever they unnested into. Each unoptimized run had a 45 s wall-clock limit (`tools/optimizer_ablation.py`;
+"on" is the minimum of 3 runs, "off" one run).
+
+| Query | optimizer on (ms) | optimizer off (ms) |
+|---|---:|---:|
+| Q1 | 4.0 | 3.3 |
+| Q2 | 1.3 | > 45 s |
+| Q3 | 0.7 | > 45 s |
+| Q4 | 0.5 | 5.7 |
+| Q5 | 1.2 | > 45 s |
+| Q6 | 0.3 | 0.6 |
+| Q7 | 1.1 | > 45 s |
+| Q8 | 1.6 | > 45 s |
+| Q9 | 4.8 | > 45 s |
+| Q10 | 1.8 | > 45 s |
+| Q11 | 0.4 | 1304.5 |
+| Q12 | 1.2 | > 45 s |
+| Q13 | 2.5 | 6.0 |
+| Q14 | 0.3 | 8235.1 |
+| Q15 | 0.5 | 1.4 |
+| Q16 | 0.6 | 1150.5 |
+| Q17 | 1.0 | 12319.6 |
+| Q18 | 1.7 | > 45 s |
+| Q19 | 1.4 | 8906.2 |
+| Q20 | 1.0 | 2.5 |
+| Q21 | 1.8 | > 45 s |
+| Q22 | 0.6 | 3.1 |
+
+10 of the 22 queries (Q2, Q3, Q5, Q7, Q8, Q9, Q10, Q12, Q18, Q21) do not finish in 45 s without the optimizer, at SF0.01 (they are
+cross products of `lineitem` with `orders` and the other tables). The 12 that do finish are 2x to 27,000x faster with it, except Q1
+(Q14: 0.3 vs 8,235 ms, Q17: 1.0 vs 12,320 ms, Q19: 1.4 vs 8,906 ms, Q11: 0.4 vs 1,305 ms, Q16: 0.6 vs 1,151 ms), where the optimized plan
+is the slower one (4.0 vs 3.3 ms; not investigated, the difference is 0.7 ms).
+
+### Estimated vs actual rows (SF1, `tools/stats_accuracy.py estimates`)
+`EXPLAIN ANALYZE` of the 22 queries on one thread; the q-error of an estimate is `max(est / actual, actual / est)` with both clamped to at
+least 1 (1.0 exact, 2.0 off by a factor of two either way). 293 operators:
+
+```
+operator kind   count   median  90th pct      max
+SCAN               87     1.00      1.00      1.0
+FILTER             44     1.06      3.75   8928.7
+JOIN               65     1.14     10.09   8928.7
+AGGREGATE          29     1.06   1196.57  35094.8
+other              68     1.59   1196.57  35094.8
+all               293     1.01     15.16  35094.8
+```
+Per query (operators, median, max q-error):
+```
+query   operators  median q-error  max q-error
+Q1              5            1.50          1.5
+Q2             26            1.00        460.0
+Q3             12            1.01         39.8
+Q4              8            1.00          1.9
+Q5             17            1.00         20.7
+Q6              4            1.00          1.5
+Q7             17            1.05          3.0
+Q8             23            1.09          3.0
+Q9             17            1.14          7.5
+Q10            13            1.01          2.0
+Q11            18            1.00         10.1
+Q12             7            1.00          1.1
+Q13             9            1.50       2374.8
+Q14             7            1.00          1.1
+Q15            15            1.00          1.0
+Q16            11            1.35        500.0
+Q17            11            1.00          3.5
+Q18            15         5013.55      35094.8
+Q19             7            1.00          2.0
+Q20            19            1.60          9.4
+Q21            19            1.05       4141.0
+Q22            13            1.31       1196.6
+```
+- Scans are exact (every segment has statistics); the **median operator is within 1.01x**, the 90th percentile 15x. Joins: median 1.14x,
+  90th percentile 10x.
+- **The worst estimates:** Q18's `HAVING sum(l_quantity) > 300` keeps 57 of 1.5 M orders; a range against an
+  aggregate's value has no statistics and is estimated at a third (q-error 35,000 on the aggregate and everything above it). Q21's anti join
+  has a residual (`l3.l_suppkey <> l1.l_suppkey`) that the estimator judges likely to be satisfied by one of several partners (est 0, actual
+  4,141). The next three queries by worst operator are Q13 (2,375x), Q16 (500x) and Q2 (460x). Q18 runs as fast as DuckDB on one thread
+  despite this; whether better estimates there would change any plan was not checked. These are where a histogram or a sample of the
+  data would help; not done.
+- Fixing the key-domain estimate of semi / anti joins at the end of the phase moved Q22's anti join from est 0 to 8,376 (actual 6,384) and
+  brought the joins' 90th-percentile q-error from 20.7 to 10.1.
+
+### HyperLogLog sketches (SF1, `tools/stats_accuracy.py ndv`)
+Per-segment sketches of 4,096 one-byte registers, merged per table (standard error 1.6%), against DuckDB's exact `count(DISTINCT)`:
+```
+61 columns: median |error| 0.02%, max 4.00%; columns with >= 1000 distinct values (35): median 0.52%, max 3.20%
+customer.c_custkey        150000    150000    +0.0%
+lineitem.l_orderkey      1500000   1526808    +1.8%
+lineitem.l_shipdate         2526      2452    -2.9%
+lineitem.l_suppkey         10000     10052    +0.5%
+orders.o_orderdate          2406      2334    -3.0%
+part.p_brand                  25        24    -4.0%
+partsupp.ps_suppkey        10000     10052    +0.5%
+```
+Linear counting is used up to 2.7 x 4,096 distinct values and the harmonic mean above (the raw estimator is biased +2.6% to +6% in that
+range: `l_suppkey`, 10,000 exact, was +4.6% before the switch, now +0.5%). The -3% on the TPC-H date columns is a property of the hash on that
+set of consecutive day numbers (a Python replica of the hash gives -2.8%), not a bias of the estimator.
+
+### What the statistics and the profile cost
+| | Before | Now | Note |
+|---|---:|---:|---|
+| `lineitem` SF1 load, 1 thread | 5.49 s | 5.86 s | +7%: a sketch per column per row group, computed from the raw values at seal time |
+| `lineitem` SF1 load, 16 threads | 0.92 s | 0.96 s | +4% |
+| stored data / peak RSS after load, 1 thread | 612.2 MB / 719 MB | 612.2 MB / 726 MB | a sketch is 4 KiB per column segment in memory (49 row groups x 16 columns = 3.2 MB for `lineitem`); the stored-data figure does not count them |
+| checkpoint of SF1 (`cdb_persist`) | 503.9 MB (Phase 7) | 505.9 MB | format version 2: +2 MB |
+
+`EXPLAIN ANALYZE` against the same statement, SF1 one thread, minimum of 7: Q1 291.0 vs 291.0 ms, Q3 82.7 vs 81.3, Q6 38.6 vs 39.7, Q9
+1138.2 vs 1200.2 (+5%), Q13 602.2 vs 595.5, Q18 290.5 vs 276.9: **at most ~5%**, the rest noise (relaxed atomic counters per operator and
+one timer pair per call; a null-pointer check when it is off).
+
+Persistence re-measured with the checkpoint format v2 (`cdb_persist --sf 1`, one run each, load average 1.6): reopen from the
+checkpoint 0.15 s at 16 threads (0.27 s at one) against 1.75 s (8.33 s) to `COPY` the CSV; `CHECKPOINT` 0.51 s (0.66 s); replaying the
+1,041 MB log 3.48 s (3.33 s). A single-row `INSERT`: 1,820 statements/s with an fsync each (mean 550 us, p99 0.79 ms, the same as Phase 7),
+32,400 without, and 123,000 in memory (8 us; Phase 7 measured 26 us in a noisier window, and `Table::Merge` no longer seals a
+short row group per statement, so this number is not comparable to that one).

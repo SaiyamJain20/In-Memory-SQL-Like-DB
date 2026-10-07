@@ -30,6 +30,10 @@ Database::Database(size_t threads) {
     SetThreads(threads);
 }
 
+Database::Database(DatabaseOptions options) : row_group_size_(options.row_group_size) {
+    SetThreads(options.threads.value_or(DefaultThreads()));
+}
+
 Database::Database(const std::string& path, DatabaseOptions options)
     : row_group_size_(options.row_group_size) {
     SetThreads(options.threads.value_or(DefaultThreads()));

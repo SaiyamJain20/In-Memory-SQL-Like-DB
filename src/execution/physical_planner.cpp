@@ -1,5 +1,7 @@
 #include "execution/physical_planner.h"
 
+#include "execution/scalar_guard.h"
+
 #include "execution/basic_operators.h"
 #include "execution/hash_aggregate.h"
 #include "execution/hash_join.h"
@@ -77,13 +79,13 @@ class Builder {
                 }
                 rows.push_back(std::move(r));
             }
-            current.source = &plan_.Make<PhysicalValues>(op.types, std::move(rows));
+            current.source = &MakeFor<PhysicalValues>(op, op.types, std::move(rows));
             return;
         }
         case LogicalKind::Filter:
             Build(*op.children[0], current);
-            current.operators.push_back(&plan_.Make<PhysicalFilter>(
-                op.types, static_cast<const LogicalFilter&>(op).predicate->Clone()));
+            current.operators.push_back(&MakeFor<PhysicalFilter>(
+                op, op.types, static_cast<const LogicalFilter&>(op).predicate->Clone()));
             return;
         case LogicalKind::Projection: {
             Build(*op.children[0], current);
@@ -92,7 +94,7 @@ class Builder {
                 exprs.push_back(e->Clone());
             }
             current.operators.push_back(
-                &plan_.Make<PhysicalProjection>(op.types, std::move(exprs)));
+                &MakeFor<PhysicalProjection>(op, op.types, std::move(exprs)));
             return;
         }
         case LogicalKind::Limit:
@@ -101,7 +103,7 @@ class Builder {
         case LogicalKind::Order: {
             const auto& o = static_cast<const LogicalOrder&>(op);
             Breaker(*op.children[0], current,
-                    plan_.Make<PhysicalOrder>(op.types, CloneKeys(o.keys)));
+                    MakeFor<PhysicalOrder>(op, op.types, CloneKeys(o.keys)));
             return;
         }
         case LogicalKind::Distinct: {
@@ -110,8 +112,8 @@ class Builder {
                 groups.push_back(BoundExpr::ColumnRef(c, op.types[c], op.names[c]));
             }
             Breaker(*op.children[0], current,
-                    plan_.Make<PhysicalHashAggregate>(op.types, std::move(groups),
-                                                      std::vector<BoundExprPtr>{}));
+                    MakeFor<PhysicalHashAggregate>(op, op.types, std::move(groups),
+                                                   std::vector<BoundExprPtr>{}));
             return;
         }
         case LogicalKind::Aggregate: {
@@ -125,11 +127,14 @@ class Builder {
             }
             Breaker(
                 *op.children[0], current,
-                plan_.Make<PhysicalHashAggregate>(op.types, std::move(groups), std::move(aggs)));
+                MakeFor<PhysicalHashAggregate>(op, op.types, std::move(groups), std::move(aggs)));
             return;
         }
         case LogicalKind::Join:
             BuildJoin(static_cast<const LogicalJoin&>(op), current);
+            return;
+        case LogicalKind::ScalarGuard:
+            Breaker(*op.children[0], current, MakeFor<PhysicalScalarGuard>(op, op.types));
             return;
         default:
             throw Error(ErrorCode::Internal, "cannot plan operator: " + op.Describe());
@@ -142,6 +147,13 @@ class Builder {
     }
 
   private:
+    // Plans an operator and remembers which logical operator it came from.
+    template <class T, class... Args> T& MakeFor(const LogicalOperator& logical, Args&&... args) {
+        T& op = plan_.Make<T>(std::forward<Args>(args)...);
+        plan_.origins.push_back({&logical, &op});
+        return op;
+    }
+
     static std::vector<SortKey> CloneKeys(const std::vector<SortKey>& keys) {
         std::vector<SortKey> out;
         for (const SortKey& k : keys) {
@@ -166,22 +178,23 @@ class Builder {
         if (!snap) {
             snap = get.table->Snapshot();
         }
-        current.source = &plan_.Make<PhysicalTableScan>(get.table->name(), snap, get.column_ids,
-                                                        get.filters, get.types);
+        current.source = &MakeFor<PhysicalTableScan>(get, get.table->name(), snap, get.column_ids,
+                                                     get.filters, get.types);
     }
 
     void BuildLimit(const LogicalLimit& limit, Pipeline& current) {
         const LogicalOperator& child = *limit.children[0];
         if (limit.limit && child.kind == LogicalKind::Order) {
             const auto& order = static_cast<const LogicalOrder&>(child);
-            Breaker(*child.children[0], current,
-                    plan_.Make<PhysicalTopN>(child.types, CloneKeys(order.keys), *limit.limit,
-                                             limit.offset));
+            PhysicalOperator& top_n = MakeFor<PhysicalTopN>(
+                limit, child.types, CloneKeys(order.keys), *limit.limit, limit.offset);
+            plan_.origins.push_back({&child, &top_n}); // the ORDER BY under the LIMIT is part of it
+            Breaker(*child.children[0], current, top_n);
             return;
         }
         Build(child, current);
         current.operators.push_back(
-            &plan_.Make<PhysicalLimit>(limit.types, limit.limit, limit.offset));
+            &MakeFor<PhysicalLimit>(limit, limit.types, limit.limit, limit.offset));
     }
 
     void BuildJoin(const LogicalJoin& join, Pipeline& current) {
@@ -193,15 +206,31 @@ class Builder {
         }
         const bool swap = join.join_type == JoinType::Right;
         JoinSplit split = SplitCondition(join.condition.get(), lw);
-        const PhysicalJoinType type =
-            join.join_type == JoinType::Inner || join.join_type == JoinType::Cross
-                ? PhysicalJoinType::Inner
-                : PhysicalJoinType::Left;
+        PhysicalJoinType type = PhysicalJoinType::Left;
+        switch (join.join_type) {
+        case JoinType::Inner:
+        case JoinType::Cross:
+            type = PhysicalJoinType::Inner;
+            break;
+        case JoinType::Semi:
+            type = PhysicalJoinType::Semi;
+            break;
+        case JoinType::Anti:
+            type = PhysicalJoinType::Anti;
+            break;
+        case JoinType::AntiNullAware:
+            type = PhysicalJoinType::AntiNullAware;
+            break;
+        default:
+            break; // Left / Right
+        }
 
         const LogicalOperator& probe = swap ? right : left;
         const LogicalOperator& build = swap ? left : right;
         std::vector<LogicalType> out_types = probe.types;
-        out_types.insert(out_types.end(), build.types.begin(), build.types.end());
+        if (!IsFilterJoin(join.join_type)) { // semi and anti joins keep the probe columns only
+            out_types.insert(out_types.end(), build.types.begin(), build.types.end());
+        }
         BoundExprPtr residual = std::move(split.residual);
         std::vector<BoundExprPtr> probe_keys = std::move(swap ? split.right_keys : split.left_keys);
         std::vector<BoundExprPtr> build_keys = std::move(swap ? split.left_keys : split.right_keys);
@@ -211,9 +240,9 @@ class Builder {
         }
 
         Build(probe, current);
-        auto& op = plan_.Make<PhysicalHashJoin>(out_types, type, probe.types, build.types,
-                                                std::move(probe_keys), std::move(build_keys),
-                                                std::move(residual));
+        auto& op = MakeFor<PhysicalHashJoin>(join, out_types, type, probe.types, build.types,
+                                             std::move(probe_keys), std::move(build_keys),
+                                             std::move(residual));
         Pipeline b;
         Build(build, b);
         b.sink = &op;

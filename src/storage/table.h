@@ -14,6 +14,8 @@
 
 namespace cdb {
 
+struct TableStatistics;
+
 // A pruning hint pushed into a scan: `column <op> constant`. Row groups whose zone map proves no
 // row can match are skipped entirely. Rows inside the groups that ARE scanned are not filtered;
 // the Filter operator still applies the real predicate.
@@ -190,12 +192,20 @@ class Table {
 
     std::shared_ptr<const TableSnapshot> Snapshot() const;
 
+    // Zone maps and distinct-value estimates of the whole table (storage/table_statistics.h),
+    // computed on first use after a change and then shared. Never blocks writers while computing.
+    std::shared_ptr<const TableStatistics> Statistics() const;
+
     TableScan Scan(std::vector<idx_t> column_ids, std::vector<TableFilter> filters = {}) const {
         return TableScan(Snapshot(), std::move(column_ids), std::move(filters));
     }
 
   private:
     void CheckChunkShape(const DataChunk& chunk) const; // aborts on a column count / type mismatch
+    // Appends the (validated) chunk to the open tail, sealing it when it fills; needs the exclusive
+    // lock.
+    void AppendLocked(const DataChunk& chunk);
+    std::shared_ptr<const TableSnapshot> SnapshotLocked() const; // needs a lock on mutex_
 
     std::string name_;
     std::vector<ColumnDefinition> schema_;
@@ -204,10 +214,16 @@ class Table {
     mutable std::shared_mutex mutex_;
     std::vector<std::shared_ptr<const RowGroup>> sealed_;
     std::unique_ptr<RowGroupBuilder> open_;
+    uint64_t version_ = 0; // bumped by every change; guarded by mutex_
 
     // Frozen copy of `open_`, reused by successive Snapshot() calls until the next Append.
     mutable std::mutex tail_mutex_;
     mutable std::shared_ptr<const RowGroup> tail_cache_;
+
+    // Statistics of the table as of `stats_version_`.
+    mutable std::mutex stats_mutex_;
+    mutable std::shared_ptr<const TableStatistics> stats_cache_;
+    mutable uint64_t stats_version_ = 0;
 };
 
 } // namespace cdb

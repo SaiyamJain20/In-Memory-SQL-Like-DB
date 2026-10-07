@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace cdb {
@@ -333,6 +334,20 @@ TEST(ChunkIo, ARowCountAboveTheVectorSizeIsRejected) {
     DataChunk out;
     BinaryReader r(w.buffer().data(), w.buffer().size(), "chunk");
     ExpectCorruption([&] { ReadChunk(r, {LogicalType::Integer()}, out); }, "oversized chunk");
+
+    // the same with every byte the rows would need present: only the count is wrong
+    for (const uint32_t rows : {kVectorSize + 1, 2 * kVectorSize}) {
+        BinaryWriter full;
+        full.U32(rows);
+        full.U8(0); // no NULLs
+        for (uint32_t i = 0; i < rows; i++) {
+            full.U32(i);
+        }
+        DataChunk chunk;
+        BinaryReader reader(full.buffer().data(), full.buffer().size(), "chunk");
+        ExpectCorruption([&] { ReadChunk(reader, {LogicalType::Integer()}, chunk); },
+                         "a chunk of " + std::to_string(rows) + " rows, all its bytes present");
+    }
 }
 
 TEST(ChunkIo, EveryTruncationIsRejectedAndEveryByteChangeIsSafe) {
@@ -540,6 +555,107 @@ TEST(SegmentIo, EveryTruncationOfASegmentIsRejected) {
     }
 }
 
+// The statistics are written before the validity bits, and a reader that trusted them would hand
+// zone-map pruning and NULL-fraction estimates a number the data contradicts.
+TEST(SegmentIo, ANullCountThatTheValidityBitsContradictIsRejectedInEveryFormat) {
+    size_t checked = 0, encoded_checked = 0;
+    for (const auto& [name, seg] : SmallSegments()) {
+        const idx_t nulls = seg->stats().null_count;
+        if (nulls == 0 || nulls == seg->count()) {
+            continue; // one more or less than all or none would trip another check first
+        }
+        const std::vector<uint8_t> bytes = Serialize(*seg);
+        constexpr size_t kNullCountAt = 1 + 1 + 4; // type, encoded flag, row count
+        uint32_t written;
+        std::memcpy(&written, bytes.data() + kNullCountAt, sizeof(written));
+        ASSERT_EQ(written, nulls) << name;
+        for (const uint32_t wrong :
+             {static_cast<uint32_t>(nulls - 1), static_cast<uint32_t>(nulls + 1)}) {
+            std::vector<uint8_t> lie = bytes;
+            std::memcpy(lie.data() + kNullCountAt, &wrong, sizeof(wrong));
+            try {
+                Deserialize(lie, seg->type(), seg->count());
+                ADD_FAILURE() << name << ": accepted a null count of " << wrong << " for " << nulls;
+            } catch (const Error& e) {
+                EXPECT_EQ(e.code(), ErrorCode::Corruption) << name;
+                EXPECT_NE(std::string(e.what()).find("validity bits hold"), std::string::npos)
+                    << name << ": " << e.what();
+            }
+        }
+        checked++;
+        encoded_checked += seg->encoded() ? 1 : 0;
+    }
+    EXPECT_GE(checked, 6U);
+    EXPECT_GE(encoded_checked, 3U) << "the encoded path has its own check";
+}
+
+// Encoded columns are validated as they are read: a decoder that indexes with what it read would
+// walk out of its arrays. These craft the payloads by hand, valid in every other respect.
+TEST(EncodingIo, RunEndsThatDoNotIncreaseAreRejected) {
+    const auto rle = [](const std::vector<uint32_t>& ends) {
+        BinaryWriter w;
+        w.U8(static_cast<uint8_t>(EncodingKind::Rle));
+        w.U32(static_cast<uint32_t>(ends.size()));
+        for (size_t i = 0; i < ends.size(); i++) {
+            w.I64(static_cast<int64_t>(i));
+        }
+        for (const uint32_t e : ends) {
+            w.U32(e);
+        }
+        w.U32(1); // one vector of 10 rows
+        w.U32(0); // it starts in run 0
+        return w.Take();
+    };
+    const auto read = [&](const std::vector<uint32_t>& ends) {
+        const std::vector<uint8_t> bytes = rle(ends);
+        BinaryReader r(bytes.data(), bytes.size(), "rle");
+        DeserializeEncodedColumn(r, LogicalType::Integer(), 10);
+        r.ExpectEnd();
+    };
+    EXPECT_NO_THROW(read({5, 8, 10})) << "the hand-built payload itself is valid";
+    EXPECT_NO_THROW(read({10}));
+    ExpectCorruption([&] { read({5, 3, 10}); }, "a run end that goes back");
+    ExpectCorruption([&] { read({5, 5, 10}); }, "a run end that repeats");
+    ExpectCorruption([&] { read({6, 4, 3, 10}); }, "ends that decrease");
+    ExpectCorruption([&] { read({5, 12, 10}); }, "a run end beyond the rows");
+    ExpectCorruption([&] { read({5, 8, 9}); }, "runs that stop short of the rows");
+}
+
+TEST(EncodingIo, ADictionaryCodeBeyondTheDictionaryIsRejected) {
+    // 60 rows of three distinct strings: a dictionary of 3 entries and codes of 2 bits (0..2), so
+    // the fourth value, 3, fits the width and is not an entry
+    std::vector<Value> values;
+    for (int i = 0; i < 60; i++) {
+        values.push_back(Value::Varchar(std::string(1, static_cast<char>('a' + i % 3))));
+    }
+    const auto raw = MakeRawSegment(LogicalType::Varchar(), values);
+    const auto encoded = EncodeSegment(*raw, EncodingChoice::Dictionary);
+    ASSERT_NE(encoded, nullptr);
+    ASSERT_EQ(encoded->kind(), EncodingKind::Dictionary);
+    const std::vector<uint8_t> bytes = Serialize(*WithEncoding(*raw, encoded));
+    EXPECT_NO_THROW(Deserialize(bytes, LogicalType::Varchar(), 60));
+    // the packed codes are the last thing in the segment, behind their u32 byte count
+    size_t payload = 0;
+    for (size_t size = 1; size <= 64; size++) {
+        uint32_t stored;
+        std::memcpy(&stored, bytes.data() + bytes.size() - size - 4, sizeof(stored));
+        if (stored == size) {
+            ASSERT_EQ(payload, 0U) << "ambiguous payload size";
+            payload = size;
+        }
+    }
+    ASSERT_GT(payload, 0U);
+    std::vector<uint8_t> bad = bytes;
+    bad[bytes.size() - payload] = 0xFF; // the first four codes are 3
+    try {
+        Deserialize(bad, LogicalType::Varchar(), 60);
+        ADD_FAILURE() << "a code of 3 in a dictionary of 3 was accepted";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Corruption);
+        EXPECT_NE(std::string(e.what()).find("dictionary code"), std::string::npos) << e.what();
+    }
+}
+
 TEST(SegmentIo, ChangingAnyByteToAnyValueNeverMakesTheSegmentUnsafeToScan) {
     // Without a checksum at this level some changes are simply different data; what must hold is
     // that anything accepted can be scanned end to end (run under ASan/UBSan: no out-of-bounds
@@ -584,6 +700,7 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
     w.U32(4);
     w.U32(0); // null_count
     w.U8(0);  // no bounds
+    w.U8(0);  // no distinct-value sketch
     w.U8(1);  // has nulls
     w.U8(0b0101);
     for (int i = 0; i < 2; i++) {
@@ -603,6 +720,7 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
     minmax.U8(1);
     minmax.U32(9); // min
     minmax.U32(3); // max < min
+    minmax.U8(0);  // no distinct-value sketch
     minmax.U8(0);
     minmax.U32(5);
     ExpectCorruption(
@@ -611,6 +729,152 @@ TEST(SegmentIo, AHostileStatisticsBlockIsRejected) {
             ReadSegment(r, LogicalType::Integer(), 1);
         },
         "minimum above maximum");
+}
+
+// ---------------------------------------------------------------------------------- sketches
+
+TEST(SegmentIo, TheDistinctSketchRoundTripsInBothFormsAndAnAbsentOneStaysAbsent) {
+    Rng rng(31);
+    // a low-cardinality column is stored sparsely, a high-cardinality one densely
+    const auto few =
+        MakeRawSegment(LogicalType::Integer(),
+                       MakeColumn(LogicalType::Integer(), Shape::SmallDomain, 3000, 0.1, rng));
+    const auto many = MakeRawSegment(
+        LogicalType::BigInt(), MakeColumn(LogicalType::BigInt(), Shape::Random, 3000, 0.1, rng));
+    for (const auto& seg : {few, many}) {
+        ASSERT_NE(seg->stats().distinct, nullptr) << "a sealed segment carries a sketch";
+        const auto back = Deserialize(Serialize(*seg), seg->type(), seg->count());
+        ASSERT_NE(back->stats().distinct, nullptr);
+        EXPECT_TRUE(*back->stats().distinct == *seg->stats().distinct);
+    }
+    EXPECT_LT(few->stats().distinct->NonZeroRegisters() * 3 + 2, HyperLogLog::kRegisters);
+    EXPECT_GE(many->stats().distinct->NonZeroRegisters() * 3 + 2, HyperLogLog::kRegisters);
+    EXPECT_LT(Serialize(*few).size(), Serialize(*many).size() / 2) << "the sparse form is smaller";
+
+    // an encoded segment keeps the sketch of its rows
+    const auto raw =
+        MakeRawSegment(LogicalType::Varchar(),
+                       MakeColumn(LogicalType::Varchar(), Shape::SmallDomain, 200, 0.0, rng));
+    const auto encoded = WithEncoding(*raw, EncodeSegment(*raw, EncodingChoice::Dictionary));
+    const auto encoded_back = Deserialize(Serialize(*encoded), LogicalType::Varchar(), 200);
+    ASSERT_NE(encoded_back->stats().distinct, nullptr);
+    EXPECT_TRUE(*encoded_back->stats().distinct == *raw->stats().distinct);
+
+    // the frozen tail of a builder has none, and still has none after a round trip
+    ColumnBuilder builder(LogicalType::Integer(), kVectorSize);
+    Vector src(LogicalType::Integer(), kVectorSize);
+    src.SetValue(0, Value::Integer(7));
+    builder.Append(src, 0, 1);
+    const auto tail = builder.Snapshot();
+    EXPECT_EQ(tail->stats().distinct, nullptr);
+    const auto tail_back = Deserialize(Serialize(*tail), LogicalType::Integer(), 1);
+    EXPECT_EQ(tail_back->stats().distinct, nullptr);
+}
+
+namespace {
+
+// A raw INTEGER segment block up to its distinct-value sketch (the rest is not reached by the
+// hostile cases below).
+BinaryWriter SketchBlock(idx_t count, idx_t null_count) {
+    BinaryWriter w;
+    w.U8(static_cast<uint8_t>(TypeId::Integer));
+    w.U8(0);
+    w.U32(static_cast<uint32_t>(count));
+    w.U32(static_cast<uint32_t>(null_count));
+    w.U8(0); // no bounds
+    return w;
+}
+
+void ExpectSketchRejected(const BinaryWriter& w, idx_t count, const std::string& what,
+                          const std::string& message_part) {
+    try {
+        BinaryReader r(w.buffer().data(), w.buffer().size(), "segment");
+        ReadSegment(r, LogicalType::Integer(), count);
+        ADD_FAILURE() << what << ": accepted";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.code(), ErrorCode::Corruption) << what;
+        EXPECT_NE(std::string(e.what()).find(message_part), std::string::npos)
+            << what << ": " << e.what();
+    }
+}
+
+} // namespace
+
+TEST(SegmentIo, AHostileDistinctSketchIsRejectedForTheRightReason) {
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(3); // no such form
+        ExpectSketchRejected(w, 4, "unknown form", "sketch form");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // sparse
+        w.U8(200);
+        w.U8(0); // 200 entries claimed, none present
+        ExpectSketchRejected(w, 4, "count beyond the data", "registers in");
+    }
+    for (const auto& [index, value, name] :
+         {std::tuple<int, int, const char*>{4096, 3, "index out of range"},
+          {7, 0, "a zero register"},
+          {7, 200, "a register above the maximum"}}) {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1);
+        w.U8(1);
+        w.U8(0);
+        w.U8(static_cast<uint8_t>(index & 0xff));
+        w.U8(static_cast<uint8_t>(index >> 8));
+        w.U8(static_cast<uint8_t>(value));
+        ExpectSketchRejected(w, 4, name, "sketch");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // sparse with indexes that do not increase
+        w.U8(2);
+        w.U8(0);
+        for (const int index : {9, 9}) {
+            w.U8(static_cast<uint8_t>(index));
+            w.U8(0);
+            w.U8(2);
+        }
+        ExpectSketchRejected(w, 4, "repeated index", "malformed sparse");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(2); // dense with a register above the maximum
+        std::vector<uint8_t> registers(HyperLogLog::kRegisters, 1);
+        registers[17] = HyperLogLog::kMaxRegister + 1;
+        w.Bytes(registers.data(), registers.size());
+        ExpectSketchRejected(w, 4, "dense out of range", "out-of-range register");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(2); // dense, but cut short
+        const std::vector<uint8_t> registers(100, 1);
+        w.Bytes(registers.data(), registers.size());
+        ExpectCorruption(
+            [&] {
+                BinaryReader r(w.buffer().data(), w.buffer().size(), "segment");
+                ReadSegment(r, LogicalType::Integer(), 4);
+            },
+            "a truncated dense sketch");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 0);
+        w.U8(1); // an empty sketch for a segment that has values
+        w.U8(0);
+        w.U8(0);
+        ExpectSketchRejected(w, 4, "empty sketch, values present", "disagrees");
+    }
+    {
+        BinaryWriter w = SketchBlock(4, 4);
+        w.U8(1); // a sketch with a value for a segment of only NULLs
+        w.U8(1);
+        w.U8(0);
+        w.U8(5);
+        w.U8(0);
+        w.U8(2);
+        ExpectSketchRejected(w, 4, "values in an all-NULL segment", "disagrees");
+    }
 }
 
 } // namespace cdb

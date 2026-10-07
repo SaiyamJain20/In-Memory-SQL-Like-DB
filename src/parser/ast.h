@@ -230,7 +230,13 @@ struct BaseTableRef : TableRef {
     std::string ToString() const override;
 };
 
-enum class JoinType : uint8_t { Inner, Left, Right, Full, Cross };
+// Semi, Anti and AntiNullAware are never written in SQL: the binder produces them when it unnests
+// [NOT] EXISTS and [NOT] IN subqueries. They output the left columns only.
+enum class JoinType : uint8_t { Inner, Left, Right, Full, Cross, Semi, Anti, AntiNullAware };
+
+constexpr bool IsFilterJoin(JoinType t) noexcept {
+    return t == JoinType::Semi || t == JoinType::Anti || t == JoinType::AntiNullAware;
+}
 
 struct JoinRef : TableRef {
     JoinType type;
@@ -288,7 +294,17 @@ struct OrderItem {
     NullOrder nulls = NullOrder::Default;
 };
 
+// WITH name [(column, ...)] AS (SELECT ...): a non-recursive common table expression. It behaves as
+// a view that exists for the one statement: each reference to `name` in the WITH-bearing SELECT
+// (and in the CTEs after it) is the query itself.
+struct CommonTableExpression {
+    std::string name;
+    std::vector<std::string> columns; // optional renaming of the output columns
+    std::shared_ptr<SelectStatement> select;
+};
+
 struct SelectStatement : Statement {
+    std::vector<CommonTableExpression> ctes; // WITH ... (empty if none)
     bool distinct = false;
     std::vector<SelectItem> items;
     TableRefPtr from; // may be null: SELECT 1

@@ -1,9 +1,11 @@
 #pragma once
 
 #include "common/types.h"
+#include "storage/hyperloglog.h"
 #include "types/value.h"
 #include "vector/validity_mask.h"
 
+#include <memory>
 #include <optional>
 
 namespace cdb {
@@ -26,6 +28,10 @@ struct ColumnStats {
     idx_t null_count = 0;
     std::optional<Value> min;
     std::optional<Value> max;
+    // A sketch of the distinct non-NULL values, for estimating how many a column has. Present on
+    // sealed segments; null for the frozen copy of an open tail (computed on demand when the
+    // optimizer asks for table statistics).
+    std::shared_ptr<const HyperLogLog> distinct;
 
     bool AllNull() const noexcept { return null_count == count; }
 
@@ -39,8 +45,17 @@ struct ColumnStats {
     bool CanSkipIsNotNull() const noexcept { return null_count == count; }
 };
 
-// Computes statistics over the first `count` rows of a contiguous element array.
+// Computes statistics over the first `count` rows of a contiguous element array (not the distinct
+// sketch: see ComputeDistinctSketch).
 ColumnStats ComputeColumnStats(LogicalType type, const uint8_t* data, const ValidityMask& validity,
                                idx_t count);
+
+// Shows the non-NULL values among the first `count` rows of a contiguous element array to
+// `sketch`. Equal values hash equally (-0.0 and 0.0, every NaN), so a value counts once.
+void AddToDistinctSketch(HyperLogLog& sketch, LogicalType type, const uint8_t* data,
+                         const ValidityMask& validity, idx_t count);
+
+std::shared_ptr<const HyperLogLog> ComputeDistinctSketch(LogicalType type, const uint8_t* data,
+                                                         const ValidityMask& validity, idx_t count);
 
 } // namespace cdb

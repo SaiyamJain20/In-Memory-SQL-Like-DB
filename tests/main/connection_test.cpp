@@ -222,21 +222,50 @@ TEST(Connection, CopyFailuresAreAtomicAndNameTheProblem) {
 
 // ------------------------------------------------------------------ EXPLAIN / SELECT
 
+namespace {
+// An EXPLAIN line without the row estimate that ends it.
+std::string Shape(const std::string& line) {
+    std::string shape;
+    return test::StripEstimate(line, &shape) ? shape : line;
+}
+} // namespace
+
 TEST(Connection, ExplainReturnsThePlanAsRows) {
     Session s;
     s.Ok("CREATE TABLE t (a INT, b INT)");
     QueryResult r = s.Ok("EXPLAIN SELECT a FROM t WHERE b > 1 ORDER BY a LIMIT 3");
     EXPECT_EQ(r.names(), std::vector<std::string>{"explain_value"});
     ASSERT_EQ(r.RowCount(), 5u);
-    EXPECT_EQ(r.GetValue(0, 0).GetVarchar(), "LIMIT 3");
-    EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "  ORDER BY a ASC NULLS LAST");
+    EXPECT_EQ(Shape(r.GetValue(0, 0).GetVarchar()), "LIMIT 3");
+    EXPECT_EQ(Shape(r.GetValue(0, 1).GetVarchar()), "  ORDER BY a ASC NULLS LAST");
     // EXPLAIN shows the optimized plan: the filter sits on the scan, which also gets a zone-map
     // pruning hint, and LIMIT is directly above ORDER BY (so it executes as a top-N).
-    EXPECT_EQ(r.GetValue(0, 3).GetVarchar(), "      FILTER (b > 1)");
-    EXPECT_EQ(r.GetValue(0, 4).GetVarchar(), "        SCAN t [a, b] prune(b > 1)");
-    QueryResult a = s.Q("EXPLAIN ANALYZE SELECT 1");
-    EXPECT_FALSE(a.ok());
-    EXPECT_EQ(a.error_code(), ErrorCode::NotImplemented);
+    EXPECT_EQ(Shape(r.GetValue(0, 3).GetVarchar()), "      FILTER (b > 1)");
+    EXPECT_EQ(Shape(r.GetValue(0, 4).GetVarchar()), "        SCAN t [a, b] prune(b > 1)");
+    // every operator carries its estimate
+    for (idx_t i = 0; i < r.RowCount(); i++) {
+        const std::string line = r.GetValue(0, i).GetVarchar();
+        EXPECT_NE(Shape(line), line) << line;
+    }
+}
+
+TEST(Connection, ExplainAnalyzeRunsTheQueryAndReportsWhatEachOperatorDid) {
+    Session s;
+    s.Ok("CREATE TABLE t (a INT)");
+    s.Ok("INSERT INTO t VALUES (1), (2), (3)");
+    const QueryResult r = s.Ok("EXPLAIN ANALYZE SELECT a FROM t WHERE a > 1");
+    ASSERT_GE(r.RowCount(), 5u);
+    std::string text;
+    for (idx_t i = 0; i < r.RowCount(); i++) {
+        text += r.GetValue(0, i).GetVarchar() + "\n";
+    }
+    EXPECT_NE(text.find("actual 2 rows"), std::string::npos) << text;
+    EXPECT_NE(text.find("Execution:"), std::string::npos) << text;
+    // only queries are run for their plan
+    const QueryResult bad = s.Q("EXPLAIN ANALYZE INSERT INTO t VALUES (9)");
+    EXPECT_FALSE(bad.ok());
+    EXPECT_EQ(bad.error_code(), ErrorCode::NotImplemented);
+    EXPECT_EQ(s.Ok("SELECT count(*) FROM t").GetValue(0, 0).GetBigInt(), 3);
 }
 
 TEST(Connection, ConstantSelectsRunThroughTheScalarEvaluator) {
@@ -325,7 +354,7 @@ TEST(Connection, LaterStatementsSeeEarlierDdl) {
     Session s;
     QueryResult r = s.Q("CREATE TABLE t (a INT); EXPLAIN SELECT a FROM t");
     EXPECT_TRUE(r.ok()) << r.error_message();
-    EXPECT_EQ(r.GetValue(0, 1).GetVarchar(), "  SCAN t [a]");
+    EXPECT_EQ(Shape(r.GetValue(0, 1).GetVarchar()), "  SCAN t [a]");
 }
 
 TEST(Connection, ResultRenderingCanTruncateLongResults) {

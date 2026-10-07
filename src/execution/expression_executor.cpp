@@ -1264,6 +1264,9 @@ void EvalInto(ExprNode& n, const Input& in, Vector& out) {
         return;
     case BoundKind::Aggregate:
         Internal("aggregates are evaluated by the aggregate operator");
+    case BoundKind::OuterColumn:
+    case BoundKind::SubqueryValue:
+        Internal("an unresolved subquery reference reached the executor");
     }
 }
 

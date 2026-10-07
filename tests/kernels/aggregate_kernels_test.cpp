@@ -1,3 +1,4 @@
+#include "common/compensated_sum.h"
 #include "kernels/aggregate.h"
 
 #include "kernel_test_util.h"
@@ -217,6 +218,102 @@ TEST(AggregateKernels, DoubleSumIsCloseToSequentialAndPropagatesNonFinites) {
             ASSERT_TRUE(std::isnan(kernels::SumDouble(bad.data(), n)));
         }
     }
+}
+
+// The sum of doubles is the exact sum rounded once, whatever the SIMD lanes, the order or the
+// grouping: the property that lets a parallel SUM agree with itself (TPC-H Q15 compares an
+// aggregate with a recomputation of it). The reference adds in 113-bit arithmetic, whose error
+// (2^-113 per addition) is far below one rounding step of a double.
+TEST(AggregateKernels, DoubleSumIsTheCorrectlyRoundedSumInAnyOrderAndWithEveryBackend) {
+    Rng rng(17);
+    uint64_t trials = 0;
+    for (const idx_t n : Lengths()) {
+        if (n == 0) {
+            continue;
+        }
+        std::vector<double> data(n);
+        for (auto& x : data) {
+            // magnitudes over ten orders (1e-5 .. 1e5), both signs, 40-odd significant bits
+            const double mantissa =
+                1.0 + static_cast<double>(RandBelow(rng, 1ULL << 40)) / (1ULL << 40);
+            const double scale = std::ldexp(mantissa, static_cast<int>(RandBelow(rng, 34)) - 17);
+            x = RandBelow(rng, 2) ? scale : -scale;
+        }
+        __float128 exact = 0;
+        for (const double x : data) {
+            exact += x;
+        }
+        const double want = static_cast<double>(exact);
+        std::vector<double> shuffled = data;
+        for (int round = 0; round < 6; round++) {
+            for (size_t i = shuffled.size(); i > 1; i--) {
+                std::swap(shuffled[i - 1], shuffled[RandBelow(rng, i)]);
+            }
+            for (const bool simd : {false, true}) {
+                if (simd && !kernels::CpuHasAvx2()) {
+                    continue;
+                }
+                const test::ScopedSimd mode(simd);
+                const double got = kernels::SumDouble(shuffled.data(), n);
+                ASSERT_EQ(got, want) << "n " << n << " simd " << simd << " round " << round;
+                trials++;
+            }
+        }
+    }
+    EXPECT_GT(trials, 100U);
+}
+
+TEST(AggregateKernels, CompensatedSumsCombineInAnyGrouping) {
+    // splitting the input in two and adding the two partial sums gives the same double as one pass
+    Rng rng(18);
+    for (int round = 0; round < 200; round++) {
+        const idx_t n = 2 + static_cast<idx_t>(RandBelow(rng, 5000));
+        std::vector<double> data(n);
+        for (auto& x : data) {
+            x = static_cast<double>(static_cast<int64_t>(RandBelow(rng, 1ULL << 50)) -
+                                    (1LL << 49)) /
+                static_cast<double>(1 + RandBelow(rng, 1000));
+        }
+        const double whole = kernels::SumDouble(data.data(), n);
+        const idx_t cut = 1 + static_cast<idx_t>(RandBelow(rng, n - 1));
+        CompensatedSum parts;
+        parts.Add(kernels::SumDoubleCompensated(data.data(), cut));
+        parts.Add(kernels::SumDoubleCompensated(data.data() + cut, n - cut));
+        ASSERT_EQ(parts.Value(), whole) << "n " << n << " cut " << cut;
+    }
+}
+
+TEST(CompensatedSum, SpecialValuesPropagateLikePlainAdditionAndCancellationIsKept) {
+    CompensatedSum a;
+    a.Add(1e100);
+    a.Add(1.0);
+    a.Add(-1e100);
+    EXPECT_EQ(a.Value(), 1.0) << "a plain sum would lose the 1";
+    CompensatedSum inf;
+    inf.Add(1.0);
+    inf.Add(std::numeric_limits<double>::infinity());
+    inf.Add(2.0);
+    EXPECT_EQ(inf.Value(), std::numeric_limits<double>::infinity());
+    inf.Add(-std::numeric_limits<double>::infinity());
+    EXPECT_TRUE(std::isnan(inf.Value()));
+    CompensatedSum nan;
+    nan.Add(std::numeric_limits<double>::quiet_NaN());
+    nan.Add(5.0);
+    EXPECT_TRUE(std::isnan(nan.Value()));
+    CompensatedSum overflow;
+    overflow.Add(std::numeric_limits<double>::max());
+    overflow.Add(std::numeric_limits<double>::max());
+    EXPECT_EQ(overflow.Value(), std::numeric_limits<double>::infinity());
+    CompensatedSum empty;
+    EXPECT_EQ(empty.Value(), 0.0);
+    CompensatedSum two;
+    two.Add(0.1);
+    two.Add(0.2);
+    EXPECT_EQ(two.Value(), 0.1 + 0.2) << "a plain sum of two numbers is already correctly rounded";
+    CompensatedSum merged;
+    merged.Add(two);
+    merged.Add(two);
+    EXPECT_EQ(merged.Value(), (0.1 + 0.2) * 2);
 }
 
 } // namespace cdb

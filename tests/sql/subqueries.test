@@ -1,0 +1,932 @@
+# Subqueries: scalar (uncorrelated and correlated), EXISTS / NOT EXISTS, IN / NOT IN, nested ones,
+# their interaction with joins, NULLs and empty inputs. Expected results come from DuckDB.
+
+statement ok
+CREATE TABLE emp (id INTEGER NOT NULL, name VARCHAR, dept INTEGER, salary DOUBLE, boss INTEGER);
+
+statement ok
+INSERT INTO emp VALUES
+ (1, 'alice', 10, 5000.5, NULL),
+ (2, 'bob', 10, 4200.0, 1),
+ (3, 'carol', 20, 6100.25, 1),
+ (4, 'dave', 20, 3900.0, 3),
+ (5, 'erin', 30, 4800.75, 3),
+ (6, 'frank', NULL, 3500.0, 2),
+ (7, 'grace', 10, 5000.5, 1),
+ (8, 'heidi', 40, NULL, NULL),
+ (9, 'ivan', 20, 4200.0, 3),
+ (10, 'judy', 30, NULL, 5),
+ (11, 'mallory', 70, 7000.0, NULL);
+
+statement ok
+CREATE TABLE dept (id INTEGER, dname VARCHAR);
+
+statement ok
+INSERT INTO dept VALUES (10, 'eng'), (20, 'ops'), (30, 'sales'), (40, 'hr'), (50, 'legal'), (NULL, 'ghost');
+
+statement ok
+CREATE TABLE proj (pid INTEGER, owner INTEGER, dept INTEGER, budget DOUBLE);
+
+statement ok
+INSERT INTO proj VALUES (1, 1, 10, 100.5), (2, 1, 10, 50.25), (3, 3, 20, 75.0), (4, 99, 20, 10.0),
+ (5, NULL, 30, 5.5), (6, 7, 10, 200.0), (7, 3, 20, 300.0), (8, 5, NULL, 1.0);
+
+statement ok
+CREATE TABLE a (x INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1), (1), (2), (3), (NULL);
+
+statement ok
+CREATE TABLE b (y INTEGER);
+
+statement ok
+INSERT INTO b VALUES (1), (2), (2), (NULL);
+
+statement ok
+CREATE TABLE c (z INTEGER);
+
+statement ok
+INSERT INTO c VALUES (1), (2), (4);
+
+statement ok
+CREATE TABLE nothing (n INTEGER, s VARCHAR);
+
+# ------------------------------------------------------------------ uncorrelated scalar subqueries
+
+query TR rowsort
+SELECT name, salary FROM emp WHERE salary > (SELECT avg(salary) FROM emp);
+----
+alice	5000.5
+carol	6100.25
+grace	5000.5
+mallory	7000.0
+
+query IR
+SELECT id, salary - (SELECT min(salary) FROM emp) AS above_min FROM emp ORDER BY id;
+----
+1	1500.5
+2	700.0
+3	2600.25
+4	400.0
+5	1300.75
+6	0.0
+7	1500.5
+8	NULL
+9	700.0
+10	NULL
+11	3500.0
+
+query I
+SELECT (SELECT count(*) FROM emp);
+----
+11
+
+query IIII
+SELECT (SELECT count(*) FROM nothing), (SELECT count(n) FROM nothing), (SELECT sum(n) FROM nothing), (SELECT max(n) FROM nothing);
+----
+0	0	NULL	NULL
+
+query T
+SELECT dname FROM dept WHERE id = (SELECT max(id) FROM dept);
+----
+legal
+
+query IT
+SELECT id, (SELECT dname FROM dept WHERE id = 10) AS d FROM emp ORDER BY id LIMIT 3;
+----
+1	eng
+2	eng
+3	eng
+
+# a one-row subquery that is not an aggregate: its value, or NULL when it returns no row
+query IT
+SELECT (SELECT id FROM dept WHERE dname = 'hr'), (SELECT dname FROM dept WHERE dname = 'nope');
+----
+40	NULL
+
+query TI
+SELECT name, (SELECT n FROM nothing) FROM emp WHERE id <= 2 ORDER BY id;
+----
+alice	NULL
+bob	NULL
+
+# comparing with a NULL scalar keeps nothing
+query T
+SELECT name FROM emp WHERE salary > (SELECT max(n) FROM nothing);
+----
+
+query I
+SELECT count(*) FROM emp WHERE (salary > (SELECT max(n) FROM nothing)) IS NULL;
+----
+11
+
+query IR
+SELECT id, salary * (SELECT 2) + (SELECT avg(budget) FROM proj) AS v FROM emp WHERE id < 4 ORDER BY id;
+----
+1	10093.78125
+2	8492.78125
+3	12293.28125
+
+query RR
+SELECT (SELECT min(budget) FROM proj), (SELECT max(budget) FROM proj) - (SELECT min(budget) FROM proj);
+----
+1.0	299.0
+
+# a scalar subquery inside a scalar subquery
+query T
+SELECT name FROM emp WHERE id = (SELECT max(id) FROM emp WHERE salary < (SELECT avg(salary) FROM emp));
+----
+ivan
+
+# in HAVING, ORDER BY and with GROUP BY
+query IIR
+SELECT dept, count(*), sum(salary) FROM emp GROUP BY dept HAVING sum(salary) > (SELECT avg(salary) FROM emp) ORDER BY dept;
+----
+10	3	14201.0
+20	3	14200.25
+70	1	7000.0
+
+query IR
+SELECT dept, sum(salary) - (SELECT sum(budget) FROM proj) AS d FROM emp GROUP BY dept ORDER BY dept;
+----
+10	13458.75
+20	13458.0
+30	4058.5
+40	NULL
+70	6257.75
+NULL	2757.75
+
+query T
+SELECT name FROM emp ORDER BY salary - (SELECT avg(salary) FROM emp) DESC NULLS LAST, id LIMIT 3;
+----
+mallory
+carol
+alice
+
+# CASE / COALESCE around a subquery
+query IT
+SELECT id, CASE WHEN salary > (SELECT avg(salary) FROM emp) THEN 'high' ELSE 'low' END FROM emp ORDER BY id;
+----
+1	high
+2	low
+3	high
+4	low
+5	low
+6	low
+7	high
+8	low
+9	low
+10	low
+11	high
+
+query IR
+SELECT id, coalesce(salary, (SELECT avg(salary) FROM emp)) FROM emp WHERE salary IS NULL ORDER BY id;
+----
+8	4855.777777777777
+10	4855.777777777777
+
+# the same subquery twice, over a join
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE e.salary > (SELECT avg(salary) FROM emp) AND d.id < (SELECT max(id) FROM dept);
+----
+alice	eng
+carol	ops
+grace	eng
+
+# a subquery over an aggregate with GROUP BY returns several rows: an error in both engines
+statement error
+SELECT (SELECT dept FROM emp GROUP BY dept);
+
+statement error
+SELECT name FROM emp WHERE salary = (SELECT salary FROM emp);
+
+statement error
+SELECT name FROM emp WHERE id = (SELECT id, dept FROM emp WHERE id = 1);
+
+# ------------------------------------------------------------------ correlated scalar subqueries
+
+query TR rowsort
+SELECT name, salary FROM emp e WHERE salary > (SELECT avg(salary) FROM emp WHERE dept = e.dept);
+----
+alice	5000.5
+carol	6100.25
+grace	5000.5
+
+query IR
+SELECT id, (SELECT max(salary) FROM emp i WHERE i.dept = o.dept) AS dept_max FROM emp o ORDER BY id;
+----
+1	5000.5
+2	5000.5
+3	6100.25
+4	6100.25
+5	4800.75
+6	NULL
+7	5000.5
+8	NULL
+9	6100.25
+10	4800.75
+11	7000.0
+
+# the count bug: an outer row without a group still gets 0
+query TI
+SELECT name, (SELECT count(*) FROM proj WHERE owner = emp.id) AS n FROM emp ORDER BY id;
+----
+alice	2
+bob	0
+carol	2
+dave	0
+erin	1
+frank	0
+grace	1
+heidi	0
+ivan	0
+judy	0
+mallory	0
+
+query TI
+SELECT name, (SELECT count(budget) FROM proj WHERE owner = emp.id AND budget > 60) AS n FROM emp ORDER BY id;
+----
+alice	1
+bob	0
+carol	2
+dave	0
+erin	0
+frank	0
+grace	1
+heidi	0
+ivan	0
+judy	0
+mallory	0
+
+query T
+SELECT name FROM emp WHERE (SELECT count(*) FROM proj WHERE owner = emp.id) = 0 ORDER BY id;
+----
+bob
+dave
+frank
+heidi
+ivan
+judy
+mallory
+
+# sum / min / max / avg of no rows are NULL, not 0
+query TRRR
+SELECT name, (SELECT sum(budget) FROM proj WHERE owner = emp.id), (SELECT min(budget) FROM proj WHERE owner = emp.id), (SELECT avg(budget) FROM proj WHERE owner = emp.id) FROM emp ORDER BY id;
+----
+alice	150.75	50.25	75.375
+bob	NULL	NULL	NULL
+carol	375.0	75.0	187.5
+dave	NULL	NULL	NULL
+erin	1.0	1.0	1.0
+frank	NULL	NULL	NULL
+grace	200.0	200.0	200.0
+heidi	NULL	NULL	NULL
+ivan	NULL	NULL	NULL
+judy	NULL	NULL	NULL
+mallory	NULL	NULL	NULL
+
+# an expression over the aggregate, and a default through it: count(*) + 1
+query TI
+SELECT name, (SELECT count(*) + 1 FROM proj WHERE owner = emp.id) FROM emp ORDER BY id;
+----
+alice	3
+bob	1
+carol	3
+dave	1
+erin	2
+frank	1
+grace	2
+heidi	1
+ivan	1
+judy	1
+mallory	1
+
+query TR
+SELECT name, (SELECT 2 * max(budget) FROM proj WHERE owner = emp.id) FROM emp ORDER BY id;
+----
+alice	201.0
+bob	NULL
+carol	600.0
+dave	NULL
+erin	2.0
+frank	NULL
+grace	400.0
+heidi	NULL
+ivan	NULL
+judy	NULL
+mallory	NULL
+
+query TR
+SELECT name, (SELECT coalesce(sum(budget), 0.0) FROM proj WHERE owner = emp.id) FROM emp ORDER BY id;
+----
+alice	150.75
+bob	0.0
+carol	375.0
+dave	0.0
+erin	1.0
+frank	0.0
+grace	200.0
+heidi	0.0
+ivan	0.0
+judy	0.0
+mallory	0.0
+
+# two correlation keys
+query TR
+SELECT name, (SELECT sum(budget) FROM proj WHERE owner = emp.id AND dept = emp.dept) FROM emp ORDER BY id;
+----
+alice	150.75
+bob	NULL
+carol	375.0
+dave	NULL
+erin	NULL
+frank	NULL
+grace	200.0
+heidi	NULL
+ivan	NULL
+judy	NULL
+mallory	NULL
+
+# a NULL correlation key never matches (an outer NULL dept has no group)
+query IR
+SELECT id, (SELECT count(*) FROM proj WHERE dept = emp.dept) FROM emp ORDER BY id;
+----
+1	3
+2	3
+3	3
+4	3
+5	1
+6	0
+7	3
+8	0
+9	3
+10	1
+11	0
+
+# an inner filter that does not mention the outer query
+query TR
+SELECT name, (SELECT max(budget) FROM proj WHERE owner = emp.id AND budget < 100) FROM emp ORDER BY id;
+----
+alice	50.25
+bob	NULL
+carol	75.0
+dave	NULL
+erin	1.0
+frank	NULL
+grace	NULL
+heidi	NULL
+ivan	NULL
+judy	NULL
+mallory	NULL
+
+# unqualified names resolve to the innermost query first
+query IR
+SELECT pid, (SELECT max(salary) FROM emp WHERE emp.dept = proj.dept) FROM proj ORDER BY pid;
+----
+1	5000.5
+2	5000.5
+3	6100.25
+4	6100.25
+5	4800.75
+6	5000.5
+7	6100.25
+8	NULL
+
+# the outer query's table is aliased, the inner one is the same table
+query TT rowsort
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.boss = b.id WHERE a.salary < (SELECT max(salary) FROM emp c WHERE c.dept = a.dept);
+----
+bob	alice
+dave	carol
+ivan	carol
+
+# correlated scalar subquery on the inner side of a join
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON d.id = e.dept WHERE e.salary = (SELECT max(salary) FROM emp i WHERE i.dept = d.id);
+----
+alice	eng
+carol	ops
+erin	sales
+grace	eng
+
+# correlated scalar subquery in the select list with another subquery
+query TIR
+SELECT name, (SELECT count(*) FROM proj WHERE owner = emp.id), (SELECT avg(salary) FROM emp) FROM emp WHERE id < 4 ORDER BY id;
+----
+alice	2	4855.777777777777
+bob	0	4855.777777777777
+carol	2	4855.777777777777
+
+# comparison of two correlated subqueries
+query T
+SELECT name FROM emp WHERE (SELECT count(*) FROM proj WHERE owner = emp.id) > (SELECT count(*) FROM emp i WHERE i.boss = emp.id) ORDER BY id;
+----
+grace
+
+# ------------------------------------------------------------------ EXISTS / NOT EXISTS
+
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) ORDER BY id;
+----
+alice
+carol
+erin
+grace
+
+query T
+SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) ORDER BY id;
+----
+bob
+dave
+frank
+heidi
+ivan
+judy
+mallory
+
+# several matching inner rows do not duplicate the outer row
+query IT
+SELECT id, name FROM emp e WHERE EXISTS (SELECT * FROM proj p WHERE p.dept = e.dept) ORDER BY id;
+----
+1	alice
+2	bob
+3	carol
+4	dave
+5	erin
+7	grace
+9	ivan
+10	judy
+
+# a NULL outer key: EXISTS drops the row, NOT EXISTS keeps it
+query IT
+SELECT id, name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.dept = e.dept) ORDER BY id;
+----
+6	frank
+8	heidi
+11	mallory
+
+# residual (non-equality) correlation
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.budget > e.salary / 50) ORDER BY id;
+----
+alice
+carol
+grace
+
+query T
+SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.budget > e.salary / 50) ORDER BY id;
+----
+bob
+dave
+erin
+frank
+heidi
+ivan
+judy
+mallory
+
+# only a non-equality correlation: no hash keys at all
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.budget > e.salary / 20) ORDER BY id;
+----
+alice
+bob
+dave
+erin
+frank
+grace
+ivan
+
+query T
+SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.budget > e.salary / 20) ORDER BY id;
+----
+carol
+heidi
+judy
+mallory
+
+# two equality keys plus an inner filter
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.dept = e.dept AND p.budget < 150) ORDER BY id;
+----
+alice
+carol
+
+# uncorrelated EXISTS is a constant
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT 1 FROM proj WHERE budget > 250);
+----
+11
+
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT 1 FROM proj WHERE budget > 1000);
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT 1 FROM proj WHERE budget > 1000);
+----
+11
+
+query I
+SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT 1 FROM proj WHERE budget > 250);
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT 1 FROM nothing);
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT 1 FROM nothing);
+----
+11
+
+# an aggregate in the select list makes the subquery return a row whatever its WHERE lets through:
+# EXISTS is TRUE, even over an empty table
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT count(*) FROM nothing);
+----
+11
+
+query I
+SELECT count(*) FROM emp WHERE NOT EXISTS (SELECT max(n) FROM nothing);
+----
+0
+
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT sum(budget) FROM proj WHERE budget > 1000);
+----
+11
+
+# EXISTS over an empty table, correlated
+query T
+SELECT name FROM emp e WHERE NOT EXISTS (SELECT 1 FROM nothing n WHERE n.n = e.id) ORDER BY id LIMIT 3;
+----
+alice
+bob
+carol
+
+query I
+SELECT count(*) FROM emp e WHERE EXISTS (SELECT 1 FROM nothing n WHERE n.n = e.id);
+----
+0
+
+# EXISTS combined with ordinary conjuncts
+query T
+SELECT name FROM emp e WHERE salary > 4000 AND EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) AND NOT EXISTS (SELECT 1 FROM emp s WHERE s.boss = e.id AND s.salary > 4500) ORDER BY id;
+----
+erin
+grace
+
+# EXISTS with grouping or a limit inside, uncorrelated
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT dept FROM emp GROUP BY dept HAVING count(*) > 2);
+----
+11
+
+query I
+SELECT count(*) FROM emp WHERE EXISTS (SELECT 1 FROM proj LIMIT 1);
+----
+11
+
+# above an aggregation and through a join
+query II
+SELECT dept, count(*) FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) GROUP BY dept ORDER BY dept;
+----
+10	2
+20	1
+30	1
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id);
+----
+alice	eng
+carol	ops
+erin	sales
+grace	eng
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.dept = d.id);
+----
+heidi	hr
+
+# the subquery refers to both sides of the join
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.dept = d.id);
+----
+alice	eng
+carol	ops
+grace	eng
+
+# on the preserved and on the null-supplying side of an outer join
+query TT rowsort
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id);
+----
+alice	eng
+carol	ops
+erin	sales
+grace	eng
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE EXISTS (SELECT 1 FROM proj p WHERE p.dept = d.id);
+----
+alice	eng
+bob	eng
+carol	ops
+dave	ops
+erin	sales
+grace	eng
+ivan	ops
+judy	sales
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE NOT EXISTS (SELECT 1 FROM proj p WHERE p.dept = d.id);
+----
+frank	NULL
+heidi	hr
+mallory	NULL
+
+# EXISTS on a derived table
+query T
+SELECT name FROM (SELECT * FROM emp WHERE salary IS NOT NULL) e WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = e.dept AND d.dname <> 'eng') ORDER BY id;
+----
+carol
+dave
+erin
+ivan
+
+# ------------------------------------------------------------------ IN / NOT IN
+
+query I
+SELECT x FROM a WHERE x IN (SELECT y FROM b) ORDER BY x;
+----
+1
+1
+2
+
+# duplicates in the subquery do not duplicate outer rows
+query I
+SELECT count(*) FROM a WHERE x IN (SELECT y FROM b);
+----
+3
+
+# NOT IN with a NULL on the right: nothing is certainly "not in"
+query I
+SELECT x FROM a WHERE x NOT IN (SELECT y FROM b) ORDER BY x;
+----
+
+# NOT IN without NULLs on the right: a NULL on the left is unknown and dropped
+query I
+SELECT x FROM a WHERE x NOT IN (SELECT z FROM c) ORDER BY x;
+----
+3
+
+query I
+SELECT x FROM a WHERE x IN (SELECT z FROM c) ORDER BY x;
+----
+1
+1
+2
+
+# an empty subquery: IN is false, NOT IN is true - even for a NULL on the left
+query I
+SELECT count(*) FROM a WHERE x IN (SELECT n FROM nothing);
+----
+0
+
+query I
+SELECT count(*) FROM a WHERE x NOT IN (SELECT n FROM nothing);
+----
+5
+
+# NULLs filtered out of the subquery make NOT IN usable again
+query I
+SELECT x FROM a WHERE x NOT IN (SELECT y FROM b WHERE y IS NOT NULL) ORDER BY x;
+----
+3
+
+# a subquery that is only NULLs
+query I
+SELECT count(*) FROM a WHERE x NOT IN (SELECT y FROM b WHERE y IS NULL);
+----
+0
+
+query I
+SELECT count(*) FROM a WHERE x IN (SELECT y FROM b WHERE y IS NULL);
+----
+0
+
+# correlated IN (a correlated NOT IN is not supported yet: see the binder tests)
+query T
+SELECT name FROM emp e WHERE e.id IN (SELECT owner FROM proj p WHERE p.dept = e.dept) ORDER BY id;
+----
+alice
+carol
+grace
+
+# IN against an expression, a derived table, an aggregate and a join
+query T
+SELECT name FROM emp WHERE dept + 0 IN (SELECT id FROM dept WHERE dname LIKE '%s') ORDER BY id;
+----
+carol
+dave
+erin
+ivan
+judy
+
+query T
+SELECT name FROM emp WHERE dept IN (SELECT dept FROM emp GROUP BY dept HAVING count(*) >= 3) ORDER BY id;
+----
+alice
+bob
+carol
+dave
+grace
+ivan
+
+query T
+SELECT name FROM emp WHERE id IN (SELECT p.owner FROM proj p JOIN dept d ON p.dept = d.id WHERE d.dname = 'eng') ORDER BY id;
+----
+alice
+grace
+
+query T
+SELECT name FROM emp WHERE boss IN (SELECT id FROM emp WHERE salary > 5000) ORDER BY id;
+----
+bob
+carol
+dave
+erin
+grace
+ivan
+
+query T
+SELECT name FROM emp WHERE boss NOT IN (SELECT id FROM emp WHERE salary > 5000) ORDER BY id;
+----
+frank
+judy
+
+# IN in a join query, on either side of the join
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE e.id IN (SELECT owner FROM proj);
+----
+alice	eng
+carol	ops
+erin	sales
+grace	eng
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e JOIN dept d ON e.dept = d.id WHERE d.id NOT IN (SELECT dept FROM proj WHERE dept IS NOT NULL);
+----
+heidi	hr
+
+query TT rowsort
+SELECT e.name, d.dname FROM emp e LEFT JOIN dept d ON e.dept = d.id WHERE e.dept IN (SELECT dept FROM proj);
+----
+alice	eng
+bob	eng
+carol	ops
+dave	ops
+erin	sales
+grace	eng
+ivan	ops
+judy	sales
+
+# VARCHAR and DOUBLE keys
+query T
+SELECT dname FROM dept WHERE dname IN (SELECT lower(dname) FROM dept WHERE id < 40) AND dname IN ('eng', 'hr', 'ops') ORDER BY dname;
+----
+eng
+ops
+
+query T
+SELECT name FROM emp WHERE salary IN (SELECT salary FROM emp WHERE dept = 20) ORDER BY id;
+----
+bob
+carol
+dave
+ivan
+
+# ------------------------------------------------------------------ nesting
+
+# EXISTS in a subquery of IN
+query T
+SELECT name FROM emp WHERE id IN (SELECT owner FROM proj p WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = p.dept AND d.dname = 'eng')) ORDER BY id;
+----
+alice
+grace
+
+# a scalar subquery inside an EXISTS subquery
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.budget > (SELECT avg(budget) FROM proj)) ORDER BY id;
+----
+alice
+carol
+grace
+
+# a correlated scalar subquery inside a correlated EXISTS (two levels of correlation)
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.budget >= (SELECT max(budget) FROM proj q WHERE q.dept = p.dept)) ORDER BY id;
+----
+carol
+grace
+
+# NOT EXISTS inside NOT EXISTS: owners all of whose projects are cheap
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) AND NOT EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id AND p.budget > 100) ORDER BY id;
+----
+erin
+
+# subqueries over derived tables with subqueries
+query T
+SELECT name FROM emp WHERE dept IN (SELECT id FROM dept WHERE id IN (SELECT dept FROM proj)) ORDER BY id;
+----
+alice
+bob
+carol
+dave
+erin
+grace
+ivan
+judy
+
+query I
+SELECT count(*) FROM (SELECT * FROM emp WHERE salary > (SELECT avg(salary) FROM emp)) t;
+----
+4
+
+query T
+SELECT t.name FROM (SELECT name, (SELECT count(*) FROM proj WHERE owner = emp.id) AS n FROM emp) t WHERE t.n > 1 ORDER BY t.name;
+----
+alice
+carol
+
+# a subquery in the select list of a subquery
+query I
+SELECT count(*) FROM emp WHERE id IN (SELECT (SELECT max(owner) FROM proj) - 1);
+----
+0
+
+# aggregation over a semi-joined input
+query RI
+SELECT avg(salary), count(*) FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.dept = e.dept);
+----
+4743.142857142857	8
+
+query IR
+SELECT dept, max(salary) FROM emp WHERE dept IN (SELECT dept FROM proj) AND salary > (SELECT min(salary) FROM emp) GROUP BY dept ORDER BY dept;
+----
+10	5000.5
+20	6100.25
+30	4800.75
+
+# DISTINCT, ORDER BY and LIMIT above subqueries
+query I
+SELECT DISTINCT dept FROM emp WHERE id IN (SELECT owner FROM proj) ORDER BY dept NULLS LAST;
+----
+10
+20
+30
+
+query T
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM proj p WHERE p.owner = e.id) ORDER BY salary DESC NULLS LAST, id LIMIT 2;
+----
+carol
+alice
+
+# an INSERT ... SELECT with a subquery
+statement ok
+CREATE TABLE rich (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO rich SELECT id, name FROM emp WHERE salary > (SELECT avg(salary) FROM emp) AND EXISTS (SELECT 1 FROM proj WHERE owner = emp.id);
+
+query IT
+SELECT id, name FROM rich ORDER BY id;
+----
+1	alice
+3	carol
+7	grace
+
+# an empty outer table
+query I
+SELECT count(*) FROM nothing WHERE n IN (SELECT id FROM emp);
+----
+0
+
+query I
+SELECT count(*) FROM nothing WHERE n NOT IN (SELECT id FROM emp);
+----
+0
+
+query I
+SELECT count(*) FROM nothing WHERE EXISTS (SELECT 1 FROM emp);
+----
+0
+
+query I
+SELECT (SELECT max(salary) FROM emp WHERE dept = n.n) FROM nothing n;
+----

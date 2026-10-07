@@ -391,6 +391,9 @@ Value EvaluateScalar(const BoundExpr& e, std::span<const Value> row) {
     }
     case BoundKind::Aggregate:
         throw Error(ErrorCode::Internal, "aggregate expressions cannot be evaluated row-at-a-time");
+    case BoundKind::OuterColumn:
+    case BoundKind::SubqueryValue:
+        throw Error(ErrorCode::Internal, "an unresolved subquery reference cannot be evaluated");
     }
     CDB_UNREACHABLE("EvaluateScalar");
 }

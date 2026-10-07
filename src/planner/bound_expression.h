@@ -24,7 +24,14 @@ enum class BoundKind : uint8_t {
     Case,
     InList,
     IsNull,
-    Aggregate
+    Aggregate,
+    // Only inside the binder: a column of the *enclosing* query block, referenced from a subquery
+    // (ordinal into the enclosing block's input row). Decorrelation turns every one into a join
+    // condition or an ordinary ColumnRef before the plan leaves the binder.
+    OuterColumn,
+    // Only inside the binder: the value of the n-th scalar subquery of the current block, replaced
+    // by a ColumnRef once the subquery's plan is attached as a join.
+    SubqueryValue,
 };
 
 enum class OperatorKind : uint8_t {
@@ -105,6 +112,8 @@ struct BoundExpr {
     // children = [value, item1, item2, ...]
     static BoundExprPtr InList(BoundExprPtr value, std::vector<BoundExprPtr> items, bool negated);
     static BoundExprPtr IsNull(BoundExprPtr child, bool negated);
+    static BoundExprPtr OuterColumn(idx_t ordinal, LogicalType type, std::string name = "");
+    static BoundExprPtr SubqueryValue(idx_t index, LogicalType type);
     static BoundExprPtr Aggregate(AggregateKind kind, std::vector<BoundExprPtr> args, bool distinct,
                                   LogicalType type);
 
@@ -116,6 +125,9 @@ struct BoundExpr {
     std::string ToString() const;
     // True if the tree contains no column references or aggregates.
     bool IsConstantTree() const;
+    // True if the tree contains an OuterColumn (it is correlated with an enclosing query block).
+    bool ContainsOuterColumn() const;
+    bool ContainsSubqueryValue() const;
     bool ContainsAggregate() const;
     void ForEach(const std::function<void(const BoundExpr&)>& fn) const;
 };

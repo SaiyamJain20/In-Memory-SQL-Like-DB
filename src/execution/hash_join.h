@@ -9,7 +9,11 @@ enum class PhysicalJoinType : uint8_t {
     Inner,
     Left, // every left row; unmatched ones get NULLs for the right columns
     Semi, // left rows that have at least one match; only the left columns
-    Anti  // left rows that have no match; only the left columns
+    Anti, // left rows that have no match; only the left columns
+    // `x NOT IN (SELECT y ...)` with SQL's NULL rules, one key: a left row survives iff the build
+    // side is empty, or its key is not NULL, nothing matches it and the build side has no NULL key
+    // (a NULL among the y makes "x <> y" unknown for every x that matches none of the others).
+    AntiNullAware,
 };
 
 // Equi-join (and, with no keys, nested-loop join) of a streaming left/probe side and a right/build

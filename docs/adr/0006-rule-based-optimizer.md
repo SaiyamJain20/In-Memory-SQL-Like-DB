@@ -1,6 +1,6 @@
 # ADR 0006 — A small rule-based logical optimizer before statistics exist
 
-- **Status:** accepted (cost-based join ordering is Phase 8)
+- **Status:** accepted; the join-ordering rule (item 2) is superseded by [ADR 0010](0010-statistics-subqueries-and-cost-based-joins.md) (statistics and cost-based ordering, Phase 8)
 - **Date:** 2026-10-06
 
 ## Context

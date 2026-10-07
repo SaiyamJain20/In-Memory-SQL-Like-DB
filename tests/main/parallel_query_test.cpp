@@ -11,7 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <random>
 #include <thread>
 
 namespace cdb {
@@ -107,6 +110,98 @@ TEST(ParallelQuery, TheSameQueriesGiveTheSameAnswersOnOneAndFourThreads) {
         ASSERT_TRUE(a.ok()) << sql << ": " << a.error_message();
         ASSERT_TRUE(b.ok()) << sql << ": " << b.error_message();
         EXPECT_EQ(b.ToString(), a.ToString()) << sql;
+    }
+}
+
+// SUM and AVG of a DOUBLE column are the exact sum rounded once, so they do not depend on how many
+// threads added what in which order. Values here are not exactly representable (random 53-bit
+// fractions over several magnitudes), so a plain parallel sum would differ in the last bits.
+TEST(ParallelQuery, FloatingPointSumsAndAveragesAreBitIdenticalOnAnyNumberOfThreads) {
+    std::vector<std::vector<std::string>> answers; // per configuration: every cell of every query
+    const char* const queries[] = {
+        "SELECT sum(x), avg(x), sum(y), avg(y), count(*) FROM f",
+        "SELECT g, sum(x), avg(x), sum(x * y) FROM f GROUP BY g ORDER BY g",
+        "SELECT id % 997 AS k, sum(x), avg(y) FROM f GROUP BY k ORDER BY k",
+        "SELECT g, sum(x) FROM f WHERE y > 0 GROUP BY g HAVING sum(x) > 0 ORDER BY g",
+    };
+    for (const size_t threads : {size_t{1}, size_t{2}, size_t{3}, size_t{5}, size_t{8}}) {
+        for (const bool one_vector_morsels : {true, false}) {
+            Database db(threads);
+            Connection conn(db);
+            ForceParallelPaths force(one_vector_morsels);
+            MustSucceed(conn, "CREATE TABLE f (id BIGINT, g INTEGER, x DOUBLE, y DOUBLE)");
+            std::mt19937_64 rng(5);
+            std::string values;
+            for (int i = 0; i < 30000; i++) {
+                const double magnitude = std::ldexp(1.0, static_cast<int>(rng() % 24) - 8);
+                const double x =
+                    (static_cast<double>(rng() >> 11) / 9007199254740992.0 - 0.5) * magnitude;
+                const double y =
+                    (static_cast<double>(rng() >> 11) / 9007199254740992.0 - 0.3) * 1000.0;
+                char buffer[96];
+                std::snprintf(buffer, sizeof(buffer), "(%d, %d, %.17g, %.17g)", i, i % 7, x, y);
+                values += (i ? "," : "") + std::string(buffer);
+            }
+            MustSucceed(conn, "INSERT INTO f VALUES " + values);
+            std::vector<std::string> cells;
+            for (const char* sql : queries) {
+                const QueryResult r = conn.Query(sql);
+                ASSERT_TRUE(r.ok()) << sql << ": " << r.error_message();
+                for (idx_t row = 0; row < r.RowCount(); row++) {
+                    for (idx_t c = 0; c < r.ColumnCount(); c++) {
+                        const Value v = r.GetValue(c, row);
+                        if (v.type().id() == TypeId::Double) {
+                            uint64_t bits;
+                            const double d = v.GetDouble();
+                            std::memcpy(&bits, &d, sizeof(bits)); // every bit, not a rounded text
+                            cells.push_back(std::to_string(bits));
+                        } else {
+                            cells.push_back(v.ToString());
+                        }
+                    }
+                }
+            }
+            answers.push_back(std::move(cells));
+        }
+    }
+    ASSERT_GT(answers.size(), 5U);
+    for (size_t i = 1; i < answers.size(); i++) {
+        ASSERT_EQ(answers[i].size(), answers[0].size());
+        for (size_t c = 0; c < answers[0].size(); c++) {
+            ASSERT_EQ(answers[i][c], answers[0][c]) << "configuration " << i << ", cell " << c;
+        }
+    }
+}
+
+// The same aggregate computed twice in one query: the engine inlines a CTE per reference, and the
+// two evaluations must agree to the bit (TPC-H Q15: `total_revenue = (SELECT max(total_revenue)
+// ...)`).
+TEST(ParallelQuery, ARecomputedAggregateEqualsItselfOnEveryThreadCount) {
+    for (const size_t threads : {size_t{2}, size_t{4}, size_t{8}}) {
+        Database db(threads);
+        Connection conn(db);
+        const ForceParallelPaths force;
+        MustSucceed(conn, "CREATE TABLE f (id BIGINT, g INTEGER, x DOUBLE)");
+        std::mt19937_64 rng(11);
+        std::string values;
+        for (int i = 0; i < 40000; i++) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "(%d, %d, %.17g)", i, i % 5000,
+                          (static_cast<double>(rng() >> 11) / 9007199254740992.0) * 1000.0);
+            values += (i ? "," : "") + std::string(buffer);
+        }
+        MustSucceed(conn, "INSERT INTO f VALUES " + values);
+        const QueryResult differing =
+            conn.Query("WITH a AS (SELECT g, sum(x) AS s FROM f GROUP BY g) "
+                       "SELECT count(*) FROM a, (SELECT g, sum(x) AS s FROM f GROUP BY g) b "
+                       "WHERE a.g = b.g AND a.s <> b.s");
+        ASSERT_TRUE(differing.ok()) << differing.error_message();
+        EXPECT_EQ(differing.GetValue(0, 0).GetBigInt(), 0) << threads << " threads";
+        const QueryResult top =
+            conn.Query("WITH r AS (SELECT g, sum(x) AS total FROM f GROUP BY g) "
+                       "SELECT g FROM r WHERE total = (SELECT max(total) FROM r)");
+        ASSERT_TRUE(top.ok()) << top.error_message();
+        EXPECT_EQ(top.RowCount(), 1U) << threads << " threads: Q15's shape finds its maximum";
     }
 }
 

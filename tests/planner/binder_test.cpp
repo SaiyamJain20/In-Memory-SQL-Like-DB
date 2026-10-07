@@ -513,20 +513,158 @@ TEST(BinderDml, CopyRequiresAnExistingTable) {
 
 // ------------------------------------------------------------------ not implemented
 
-TEST(BinderNotImplemented, SubqueriesPointAtTheOffendingExpression) {
+TEST(BinderNotImplemented, UnsupportedSubqueryShapesPointAtTheOffendingExpression) {
     Env env;
-    const std::string sql = "SELECT a FROM t WHERE a IN (SELECT a FROM u)";
-    auto e = env.Error_(sql);
-    EXPECT_EQ(e.code, ErrorCode::NotImplemented);
-    EXPECT_EQ(e.pos, At(sql, "IN"));
-    EXPECT_EQ(env.Error_("SELECT (SELECT 1)").code, ErrorCode::NotImplemented);
-    EXPECT_EQ(env.Error_("SELECT a FROM t WHERE EXISTS (SELECT 1)").code,
+    struct Case {
+        const char* sql;
+        const char* anchor; // the error points here
+        const char* fragment;
+    };
+    const Case cases[] = {
+        // a correlated scalar subquery needs a join below the aggregation it would feed
+        {"SELECT a, (SELECT max(u.a) FROM u WHERE u.a = t.a) FROM t GROUP BY a", "(SELECT max(u.a)",
+         "only supported in the WHERE clause"},
+        {"SELECT sum(a), (SELECT max(u.a) FROM u WHERE u.a = t.a) FROM t", "(SELECT max(u.a)",
+         "only supported in the WHERE clause"},
+        // only equality correlation can become a join key
+        {"SELECT a FROM t WHERE a > (SELECT max(u.a) FROM u WHERE u.a < t.a)", "(SELECT max(u.a)",
+         "only equality correlation"},
+        // a correlated scalar subquery must be one aggregate
+        {"SELECT a FROM t WHERE a > (SELECT u.a FROM u WHERE u.a = t.a)", "(SELECT u.a",
+         "must be an aggregate"},
+        {"SELECT a FROM t WHERE a > (SELECT max(u.a) FROM u WHERE u.a = t.a LIMIT 1)",
+         "(SELECT max(u.a)", "without GROUP BY"},
+        // IN / EXISTS only as AND-ed WHERE conjuncts
+        {"SELECT a FROM t WHERE a IN (SELECT a FROM u) OR b = 1", "IN", "AND-ed conditions"},
+        {"SELECT a IN (SELECT a FROM u) FROM t", "IN", "AND-ed conditions"},
+        // an aggregate select list makes a correlated EXISTS always TRUE: not a semi join
+        {"SELECT a FROM t WHERE EXISTS (SELECT count(*) FROM u WHERE u.a = t.a)", "EXISTS",
+         "aggregate in its select list"},
+        // NOT IN with a correlated subquery needs a per-group null-aware anti join
+        {"SELECT a FROM t WHERE a NOT IN (SELECT u.a FROM u WHERE u.x = t.s)", "NOT IN",
+         "use NOT EXISTS"},
+        // a subquery has no place in a join condition
+        {"SELECT t.a FROM t JOIN u ON t.a = (SELECT 1)", "(SELECT 1)", "not supported in this"},
+    };
+    for (const Case& c : cases) {
+        const auto e = env.Error_(c.sql);
+        EXPECT_EQ(e.code, ErrorCode::NotImplemented) << c.sql << " -> " << e.message;
+        EXPECT_EQ(e.pos, At(c.sql, c.anchor)) << c.sql;
+        EXPECT_NE(e.message.find(c.fragment), std::string::npos) << c.sql << " -> " << e.message;
+    }
+    EXPECT_EQ(env.Error_("WITH RECURSIVE x AS (SELECT 1) SELECT * FROM x").code,
               ErrorCode::NotImplemented);
+}
+
+// ------------------------------------------------------------------ WITH and subqueries
+
+TEST(BinderCte, PlansInlineTheirDefinitionAndHonourColumnNames) {
+    Env env;
+    // (the bound plan, before the optimizer prunes the scan to the columns that are used)
+    EXPECT_EQ(env.Plan("WITH x AS (SELECT a FROM u) SELECT * FROM x"), "PROJECT [a]\n"
+                                                                       "  PROJECT [a]\n"
+                                                                       "    SCAN u [a, x]\n");
+    EXPECT_EQ(env.Plan("WITH x(p, q) AS (SELECT a, x FROM u) SELECT p, q FROM x WHERE p > 1"),
+              "PROJECT [p, q]\n"
+              "  FILTER (p > 1)\n"
+              "    PROJECT [a AS p, x AS q]\n"
+              "      SCAN u [a, x]\n");
+    // fewer names than columns rename only the first ones
+    EXPECT_EQ(env.conn.Plan("WITH x(p) AS (SELECT a, x FROM u) SELECT * FROM x")->names,
+              (std::vector<std::string>{"p", "x"}));
+}
+
+TEST(BinderCte, ScopingAndNameErrors) {
+    Env env;
+    // inner WITH shadows the outer one and leaves it intact afterwards
+    EXPECT_EQ(env.conn
+                  .Plan("WITH x AS (SELECT 1 AS v) SELECT (WITH x AS (SELECT 2 AS v) "
+                        "SELECT max(v) FROM x) + (SELECT max(v) FROM x)")
+                  ->ColumnCount(),
+              1u);
+    // a CTE shadows a table, and is gone with its statement
+    EXPECT_EQ(env.conn.Plan("WITH t AS (SELECT 1 AS only) SELECT * FROM t")->names,
+              (std::vector<std::string>{"only"}));
+    EXPECT_EQ(env.conn.Plan("SELECT * FROM t")->ColumnCount(), 6u);
+    EXPECT_EQ(env.Error_("WITH x AS (SELECT 1) SELECT 1; SELECT * FROM x").code, ErrorCode::Syntax);
+
+    auto e = env.Error_("WITH x(p, q, r) AS (SELECT a, x FROM u) SELECT * FROM x");
+    EXPECT_EQ(e.code, ErrorCode::Binder);
+    EXPECT_NE(e.message.find("has 2 columns but more column names were given"), std::string::npos)
+        << e.message;
+    e = env.Error_("WITH x AS (SELECT 1), X AS (SELECT 2) SELECT * FROM x");
+    EXPECT_EQ(e.code, ErrorCode::Binder) << "names are case-insensitive: " << e.message;
+    EXPECT_NE(e.message.find("specified more than once"), std::string::npos);
+    // a CTE does not see the ones defined after it, nor itself
+    const std::string fwd = "WITH a AS (SELECT * FROM b), b AS (SELECT 1) SELECT * FROM a";
+    e = env.Error_(fwd);
+    EXPECT_EQ(e.code, ErrorCode::Catalog);
+    EXPECT_EQ(e.pos, At(fwd, "b)"));
+    EXPECT_EQ(env.Error_("WITH a AS (SELECT * FROM a) SELECT * FROM a").code, ErrorCode::Catalog);
+}
+
+TEST(BinderSubquery, ErrorsAreReportedAtTheRightExpression) {
+    Env env;
+    struct Case {
+        const char* sql;
+        const char* anchor;
+        ErrorCode code;
+        const char* fragment;
+    };
+    const Case cases[] = {
+        {"SELECT a FROM t WHERE a IN (SELECT a, x FROM u)", "IN", ErrorCode::Binder,
+         "must return one column, not 2"},
+        {"SELECT a FROM t WHERE a IN (SELECT x FROM u)", "IN", ErrorCode::Type, "cannot compare"},
+        {"SELECT a FROM t WHERE s IN (SELECT a FROM u)", "IN", ErrorCode::Type, "cannot compare"},
+        {"SELECT a FROM t WHERE a = (SELECT a, x FROM u)", "(SELECT", ErrorCode::Binder,
+         "must return one column, not 2"},
+        {"SELECT a FROM t WHERE EXISTS (SELECT nope FROM u)", "nope", ErrorCode::Binder,
+         "Referenced column \"nope\" not found"},
+        {"SELECT a FROM t WHERE a = (SELECT a FROM nope)", "nope", ErrorCode::Catalog,
+         "does not exist"},
+        // a qualified name that is unknown in the subquery is reported there, not in the outer
+        // query
+        {"SELECT (SELECT u.nope FROM u WHERE u.a = t.a) FROM t", "u.nope", ErrorCode::Binder,
+         "Referenced column \"nope\" not found in table \"u\""},
+        {"SELECT a FROM t WHERE a > (SELECT max(a) FROM u WHERE u.a = t.nope)", "t.nope",
+         ErrorCode::Binder, "not found in table \"t\""},
+        {"SELECT a FROM t WHERE a > (SELECT max(u.x) FROM u)", "> (SELECT", ErrorCode::Type,
+         "No function matches"},
+        {"SELECT a FROM t WHERE a > (SELECT sum(s) FROM t)", "sum(s)", ErrorCode::Type,
+         "requires a numeric argument"},
+        // two query levels up
+        {"SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE EXISTS (SELECT 1 FROM nn WHERE "
+         "nn.id = t.a))",
+         "t.a", ErrorCode::NotImplemented, "two query levels up"},
+    };
+    for (const Case& c : cases) {
+        const auto e = env.Error_(c.sql);
+        EXPECT_EQ(e.code, c.code) << c.sql << " -> " << e.message;
+        EXPECT_EQ(e.pos, At(c.sql, c.anchor)) << c.sql << " -> " << e.message;
+        EXPECT_NE(e.message.find(c.fragment), std::string::npos) << c.sql << " -> " << e.message;
+    }
+}
+
+TEST(BinderSubquery, OuterNamesResolveToTheInnermostBlockFirst) {
+    Env env;
+    // both tables have `a`: unqualified inside the subquery means the subquery's own table
+    const std::string plan =
+        env.Plan("SELECT t.a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE a = 1)");
+    EXPECT_NE(plan.find("FILTER (a = 1)"), std::string::npos) << plan;
+    EXPECT_EQ(plan.find("JOIN SEMI ON"), std::string::npos) << "uncorrelated: no join keys";
+    // qualified: the outer column
+    EXPECT_NE(env.Plan("SELECT t.a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a)")
+                  .find("JOIN SEMI ON (a = a)"),
+              std::string::npos);
+    // an alias hides the table name
+    EXPECT_EQ(
+        env.Error_("SELECT a FROM t AS o WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a)").code,
+        ErrorCode::Binder);
 }
 
 // ------------------------------------------------------------------ TPC-H
 
-TEST(BinderTpch, TwelveOfTwentyTwoQueriesBindAndTheRestNeedSubqueries) {
+TEST(BinderTpch, AllTwentyTwoQueriesBind) {
     Env env;
     std::ifstream schema(std::string(CDB_SOURCE_DIR) + "/bench/tpch/schema.sql");
     std::stringstream ss;
@@ -535,27 +673,20 @@ TEST(BinderTpch, TwelveOfTwentyTwoQueriesBindAndTheRestNeedSubqueries) {
         ASSERT_TRUE(r.ok()) << r.error_message();
     ASSERT_EQ(env.db.catalog().ListTables().size(), 8u + 3u); // 8 TPC-H tables + t, u, nn
 
-    std::vector<int> bound, unsupported;
     for (int q = 1; q <= 22; q++) {
         char name[16];
         std::snprintf(name, sizeof(name), "q%02d.sql", q);
         std::ifstream in(std::string(CDB_SOURCE_DIR) + "/bench/tpch/queries/" + name);
         std::stringstream text;
         text << in.rdbuf();
+        ASSERT_FALSE(text.str().empty()) << name;
         try {
             auto plan = env.conn.Plan(text.str());
             EXPECT_GT(plan->ColumnCount(), 0u) << name;
-            bound.push_back(q);
         } catch (const Error& e) {
-            ASSERT_EQ(e.code(), ErrorCode::NotImplemented)
-                << name << ": " << FormatErrorWithContext(text.str(), e);
-            ASSERT_TRUE(e.position().has_value()) << name;
-            unsupported.push_back(q);
+            ADD_FAILURE() << name << ": " << FormatErrorWithContext(text.str(), e);
         }
     }
-    // Everything without a subquery or CTE binds; the others fail precisely on that construct.
-    EXPECT_EQ(bound, (std::vector<int>{1, 3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 19}));
-    EXPECT_EQ(unsupported, (std::vector<int>{2, 4, 11, 15, 16, 17, 18, 20, 21, 22}));
 
     // spot checks of the bound output schemas
     auto q1 = env.conn.Plan(

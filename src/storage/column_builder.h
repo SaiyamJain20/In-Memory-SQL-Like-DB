@@ -30,6 +30,7 @@ class ColumnBuilder {
 
   private:
     void Reserve(idx_t rows);
+    std::shared_ptr<ColumnSegment> SnapshotSegment(bool with_distinct_sketch) const;
 
     LogicalType type_;
     idx_t max_rows_;

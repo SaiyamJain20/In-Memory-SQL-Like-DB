@@ -1033,6 +1033,39 @@ TEST(ParallelExecution, JoinWithEmptyAndAllNullBuildSides) {
     }
 }
 
+// The parallel build splits the buckets into partitions: 4 per thread, rounded up to a power of
+// two (64 for 16 threads), and a build of a handful of rows has 16 buckets. A partition is then
+// less than one bucket wide, and the shift that maps a bucket to its partition had a negative
+// amount (found by UBSan on a scalar subquery's one-row build, forced parallel by one-row
+// morsels; the hardware shifts modulo 64, so the result was right anyway and only a sanitizer
+// build sees it).
+TEST(ParallelExecution, HashJoinBuildsOfAFewRowsOnManyThreads) {
+    Rng rng(14);
+    const ScopedMinJoinRows build(1);
+    const Data left = MakeData(rng, kLeftTypes, 8, JoinGen(6), 150, false);
+    for (const size_t rows : {1, 2, 3, 7, 8, 9, 16, 17, 40}) {
+        Data right;
+        right.chunks.push_back(test::RandomVariedChunk(rng, kRightTypes, rows, JoinGen(6)));
+        right.rows = RowsOf(right.chunks.back());
+        for (const size_t key_count : {size_t{1}, size_t{2}}) {
+            for (const PhysicalJoinType type : {PhysicalJoinType::Inner, PhysicalJoinType::Left,
+                                                PhysicalJoinType::Semi, PhysicalJoinType::Anti}) {
+                const Rows want = ReferenceJoin(left.rows, right.rows, key_count, type);
+                for (const size_t threads : {size_t{2}, size_t{4}, size_t{8}, size_t{16}}) {
+                    ExpectSameRows(RunParallelJoin(left, right, key_count, type, threads), want,
+                                   "build rows " + std::to_string(rows) + " keys " +
+                                       std::to_string(key_count) + " type " +
+                                       std::to_string(static_cast<int>(type)) + " threads " +
+                                       std::to_string(threads));
+                    if (::testing::Test::HasFailure()) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(ParallelExecution, TheSameJoinRunRepeatedlyGivesTheSameRows) {
     Rng rng(13);
     const Data left = MakeData(rng, kLeftTypes, 20, JoinGen(400), 150, false);
