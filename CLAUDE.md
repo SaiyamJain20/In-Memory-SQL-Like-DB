@@ -24,6 +24,9 @@ cmake --preset fuzz && cmake --build --preset fuzz && tools/run_fuzz.sh parser 6
 .venv/bin/python tools/tpch_data.py --sf 0.01    # TPC-H data + DuckDB answers (the gate needs SF0.01; also --sf 0.1 / 1)
 CDB_TPCH_SF=1 CDB_REQUIRE_TPCH=1 build/release/tests/cdb_tests --gtest_filter='*TpchDifferential*'   # SF1 by hand
 build/release/bench/cdb_tpch --sf 1                  # TPC-H timings; tools/tpch_duckdb_time.py --sf 1 --threads 1 for DuckDB
+python3 tools/bench_table.py a1.txt a16.txt d1.txt d16.txt   # the TPC-H comparison tables of BENCHMARKS from saved runs
+.venv/bin/python tools/optimizer_ablation.py --sf 0.01   # every TPC-H query with the optimizer on and off (45 s limit)
+.venv/bin/python tools/stats_accuracy.py ndv --sf 1      # sketch distinct counts vs DuckDB; `estimates`: estimated vs actual rows
 .venv/bin/python tools/gen_slt.py tests/sql/*.test   # refresh expected results of the SQL suite from DuckDB
 .venv/bin/python tools/fuzz_sql.py --seeds 1-4        # random queries + DuckDB answers -> data/sqlfuzz (the gate does this)
 .venv/bin/python tools/fuzz_sql.py --seeds 100-300 --out build/sqlfuzz   # a big campaign; run it with

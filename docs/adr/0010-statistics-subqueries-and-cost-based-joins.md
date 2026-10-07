@@ -44,7 +44,11 @@ column form an **interval** (P(< b) - P(< a)), not two independent shares; `AND`
 inclusion-exclusion; `IN`, `LIKE`, `IS NULL`; filters narrow the bounds and distinct counts they
 constrain; joins by containment (`1 / max(distinct)` per key, a composite key capped by the larger
 input's rows); semi / anti joins from the fraction of left keys that have a partner; aggregates from
-the product of the group columns' distinct counts. Estimates are per operator, memoised per plan.
+the product of the group columns' distinct counts. A semi / anti join's coverage is measured against the left key's **domain** (its
+distinct count in its table, which no predicate narrows), not against the distinct values the filtered left rows still hold: a filter
+that keeps half of the customers leaves half the keys, but the keys that remain are a sample of all of them, and the share an orders
+table covers is the same (TPC-H Q22's anti join was estimated at 0 rows, was 14,000, and was therefore pushed down the plan; now
+8,376 against 6,384). Estimates are per operator, memoised per plan.
 
 ### 4. Join ordering (`planner/join_order`)
 The optimizer flattens a tree of inner / cross joins into relations (with their own filters pushed
@@ -57,6 +61,12 @@ are comparable. The smaller input of every join is the build side (the larger pr
 predicate can join is never combined with another by a join some predicate could have made, so a
 connected query never gets a cross product; sets that need one are the only ones allowed it. Ties go
 to the relation written first (within rounding), so estimation noise decides nothing.
+
+A semi / anti join that keeps clearly fewer than all of its left rows (estimated <= 90%) sinks below an inner join to the side it
+mentions; one that removes almost nothing stays above (Q21), and **so does one whose inner join has a one-row input**, the value of a
+scalar subquery: that join is a comparison per row, the semi / anti join a hash probe per row, so the cheap one goes first (Q22: the
+NOT EXISTS probed 42,000 customers instead of the 19,000 above the average balance, 30% slower than before the optimizer). The join
+cost function does not model the cost of a probe by the size of the table probed, which is why this is a rule and not a comparison.
 
 ### 5. EXPLAIN / EXPLAIN ANALYZE
 `EXPLAIN` prints the optimized plan with `(~N rows)` per operator. `EXPLAIN ANALYZE <select>` runs it
@@ -79,7 +89,8 @@ one thread: Q1 (six such aggregates over 6 M rows, 4 groups) +23%, Q18 +11%, Q6 
 none; DuckDB also uses compensated (Kahan) summation for `SUM(DOUBLE)`.
 
 ## Verification
-- The 22 TPC-H queries match DuckDB (SF0.01 on memory / checkpoint / log in the gate; SF0.1 and SF1 by hand).
+- The 22 TPC-H queries match DuckDB (SF0.01 on memory / checkpoint / log in the gate; SF0.1 and SF1 by hand, verified at the end of
+  the phase, `CDB_TPCH_SF=1 CDB_REQUIRE_TPCH=1`).
 - Subquery SQL files (102 + CTE queries, DuckDB-generated expected results) run in memory and across a
   power cut after every statement; operators are checked against a three-valued `NOT IN` reference.
 - **Random differential fuzzing** (`tools/fuzz_sql.py`): random schemas and queries (joins of every
@@ -88,7 +99,7 @@ none; DuckDB also uses compensated (Kahan) summation for `SUM(DOUBLE)`.
   thousands are manual. It found a bug in the new join-tree rebuild (a predicate with no columns).
 - The join search is checked against an explicit enumeration of all trees on random graphs; the
   estimator against true counts on random tables; the optimizer on vs off on thousands of random
-  queries with subquery conjuncts; 48 mutants for the new code.
+  queries with subquery conjuncts; 66 mutants for the new code, all killed (the full run of 319 mutants takes ~10 hours).
 
 ## Consequences
 - Estimates only have to rank plans, and are wrong where independence is: correlated predicates, a
@@ -96,6 +107,9 @@ none; DuckDB also uses compensated (Kahan) summation for `SUM(DOUBLE)`.
   `EXPLAIN ANALYZE` shows where. Histograms are future work.
 - A semi / anti join always builds the subquery side. When the outer side is much smaller (TPC-H Q4)
   the opposite build (a "right semi" join with match flags on the build side) would win; not done.
+- A decorrelated aggregate runs over its whole inner table before the join with the outer rows that survive (TPC-H Q17: `lineitem`
+  grouped by part, 6 M rows, for the few hundred parts that pass). DuckDB joins the inner table with the distinct outer keys first
+  (checked in its `EXPLAIN`); doing the same here is the largest gap to it (Q17 10x, Q20 and Q2 3-5x on one thread).
 - `INTERVAL` arithmetic is still constant-date only; `UPDATE` / `DELETE` and persistent statistics
   beyond the sketches are not there.
 - Bushy plans can build on a join result; a plan's hash tables are still all in memory (no spilling).

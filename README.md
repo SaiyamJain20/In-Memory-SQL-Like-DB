@@ -4,25 +4,26 @@ A from-scratch analytical query engine in the style of DuckDB / ClickHouse / Vel
 storage, vector-at-a-time execution, morsel-driven parallelism, SIMD kernels, and a cost-based
 optimizer — built to be small enough to read end to end, and verified against DuckDB on TPC-H.
 
-> **Status: early development (Phases 0–7 of 9 complete).** The engine runs SQL end to end: a
-> hand-written parser and binder, a rule-based optimizer, a push-based vectorized executor
-> (hash aggregation, hash joins, sort/top-N) over compressed columnar storage (bit-packing, RLE,
-> dictionaries, lossless scaled doubles) with zone-map pruning and AVX2 kernels behind runtime CPU
-> dispatch, and morsel-driven parallelism across a thread pool (parallel scans, partitioned
-> aggregation, parallel join build, parallel merge sort, parallel CSV loading; TSan-clean).
-> It runs the 12 TPC-H queries that need no subqueries and **matches DuckDB's answers on all of
-> them at SF0.01, SF0.1 and SF1**; the whole test suite passes unchanged with SIMD or compression
-> switched off, and again in a stress mode that runs every query on 4 threads with one-vector
-> morsels. On one thread the SF1 geometric mean is 2.6x DuckDB's time; at 16 threads
-> (8 cores) the engine is **5.5x faster than on one thread** (Q1 6.4x, Q6 5.8x) and 1.7x DuckDB's
-> time at the same thread count; the 8x target was not met. `DISTINCT` aggregates do not scale yet.
-> A database can live in a directory (`cdb_shell --db DIR`): a write-ahead log with fsync'd commits,
-> checkpoints of the encoded segments, and recovery that survives a crash at every write / fsync /
-> rename boundary (tested by deterministic crash injection, `kill -9` and fuzzing); reopening a
-> TPC-H SF1 database from a checkpoint takes 0.16 s. A durable single-row commit costs ~0.5 ms
-> (one fsync, no group commit yet). Subqueries and statistics (Phase 8) are still ahead. Every number is in
-> [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and command; see the
-> [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
+> **Status: early development (Phases 0–8 of 9 complete).** The engine runs SQL end to end: a
+> hand-written parser and binder (subqueries and `WITH` are unnested into joins), a cost-based
+> optimizer (per-segment HyperLogLog statistics, a cardinality estimator, bushy join ordering by
+> dynamic programming, `EXPLAIN` / `EXPLAIN ANALYZE` with estimated vs actual rows), a push-based
+> vectorized executor (hash aggregation, hash joins, sort/top-N) over compressed columnar storage
+> (bit-packing, RLE, dictionaries, lossless scaled doubles) with zone-map pruning and AVX2 kernels
+> behind runtime CPU dispatch, and morsel-driven parallelism across a thread pool (TSan-clean).
+> It runs **all 22 TPC-H queries and matches DuckDB's answers on every one at SF0.01, SF0.1 and
+> SF1**, and 18,000 random queries (joins, aggregates, CTEs, every subquery shape) match DuckDB with
+> the optimizer on and off; the whole test suite also passes with SIMD or compression switched off,
+> and in a stress mode that runs every query on 4 threads with one-vector morsels. At SF1 the
+> geometric mean over the 22 queries is **2.3x DuckDB's time on one thread and 1.5x at 16 threads**
+> (8 cores; 4.4x faster than on one thread); the worst gap is Q17 (10x: it does not yet reduce a
+> decorrelated aggregate by the outer keys). A database can live in a directory
+> (`cdb_shell --db DIR`): a write-ahead log with fsync'd commits, checkpoints of the encoded
+> segments, and recovery that survives a crash at every write / fsync / rename boundary (tested by
+> deterministic crash injection, `kill -9` and fuzzing); reopening a TPC-H SF1 database from a
+> checkpoint takes 0.15 s. A durable single-row commit costs ~0.5 ms (one fsync, no group commit
+> yet). Every number is in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and
+> command; see the [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 ## Try it
 ```bash
@@ -32,6 +33,7 @@ cdb> CREATE TABLE t (a INTEGER, b VARCHAR);
 cdb> INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'x');
 cdb> SELECT b, count(*), sum(a) FROM t GROUP BY b ORDER BY b;
 cdb> EXPLAIN SELECT b FROM t WHERE a > 1 ORDER BY b LIMIT 2;
+cdb> EXPLAIN ANALYZE SELECT b, count(*) FROM t WHERE a IN (SELECT a FROM t WHERE a > 1) GROUP BY b;
 ```
 TPC-H: `python3 -m venv .venv && .venv/bin/pip install -r tools/requirements-dev.txt`, then
 `.venv/bin/python tools/tpch_data.py --sf 1` and `build/release/bench/cdb_tpch --sf 1`
