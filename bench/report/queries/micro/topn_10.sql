@@ -1,0 +1,1 @@
+SELECT id, v FROM t ORDER BY v DESC, id LIMIT 10

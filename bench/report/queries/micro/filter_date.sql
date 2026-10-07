@@ -1,0 +1,1 @@
+SELECT count(*) FROM t WHERE d >= DATE '2018-01-01' AND d < DATE '2019-01-01'

@@ -1,0 +1,1 @@
+SELECT count(DISTINCT k100k) FROM t

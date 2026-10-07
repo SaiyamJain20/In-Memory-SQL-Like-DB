@@ -1,0 +1,492 @@
+{
+ "cdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "ok",
+   "detail": ""
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "duckdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "ok",
+   "detail": ""
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "datafusion": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "ok",
+   "detail": ""
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "chdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "ok",
+   "detail": ""
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "polars": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "ok",
+   "detail": ""
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ }
+}

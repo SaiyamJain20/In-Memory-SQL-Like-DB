@@ -1,0 +1,492 @@
+{
+ "cdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "mismatch",
+   "detail": "row 0: ['1546365', '1000'] vs ['9003632', '1000.0']"
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "duckdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "mismatch",
+   "detail": "row 0: ['9110590', '1000.0'] vs ['9003632', '1000.0']"
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "datafusion": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "mismatch",
+   "detail": "row 0: ['7644225', '1000.0'] vs ['9003632', '1000.0']"
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "chdb": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "mismatch",
+   "detail": "row 0: ['953586', '1000.0'] vs ['9003632', '1000.0']"
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "polars": {
+  "scan_count": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_sum": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_minmax": {
+   "status": "ok",
+   "detail": ""
+  },
+  "scan_expr": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_1pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_10pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_50pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_90pct": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_and": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_str_eq": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_like": {
+   "status": "ok",
+   "detail": ""
+  },
+  "filter_date": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_2keys": {
+   "status": "ok",
+   "detail": ""
+  },
+  "agg_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "distinct_str": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_100k": {
+   "status": "ok",
+   "detail": ""
+  },
+  "join_1m": {
+   "status": "ok",
+   "detail": ""
+  },
+  "topn_10": {
+   "status": "mismatch",
+   "detail": "row 0: ['4033262', '1000.0'] vs ['9003632', '1000.0']"
+  },
+  "sort_5m": {
+   "status": "ok",
+   "detail": ""
+  }
+ }
+}

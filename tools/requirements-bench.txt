@@ -1,0 +1,16 @@
+# Engines and tools of the cross-engine comparison (bench/report, docs/REPORT.md). Install into a
+# separate environment so that the pinned development tools stay as they are:
+#   python3 -m venv .venv-bench && .venv-bench/bin/pip install -r tools/requirements-bench.txt
+# Versions are the ones every number in the report was measured with.
+duckdb==1.5.6          # the reference engine and the oracle (same pin as requirements-dev.txt)
+datafusion==54.1.0     # Apache DataFusion (Rust, Arrow)
+chdb==4.4.0            # embedded ClickHouse (server version 26.9.2.1)
+chdb-core==26.9.0
+polars==2.0.0
+polars-runtime-32==2.0.0
+pyarrow==25.0.1
+pandas==3.0.6
+numpy==2.5.3
+matplotlib==3.11.2
+psutil==7.2.2
+# SQLite is the Python standard library's sqlite3, linked against SQLite 3.53.4 on the reference machine.

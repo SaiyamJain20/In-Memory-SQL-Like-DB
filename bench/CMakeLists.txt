@@ -23,3 +23,7 @@ target_link_libraries(cdb_tpch PRIVATE cdb)
 add_executable(cdb_persist persist/persist_bench.cpp)
 target_compile_definitions(cdb_persist PRIVATE CDB_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(cdb_persist PRIVATE cdb)
+
+# The cdb side of the cross-engine comparison harness (bench/report): a line-protocol worker.
+add_executable(cdb_report_worker report/cdb_worker.cpp)
+target_link_libraries(cdb_report_worker PRIVATE cdb)

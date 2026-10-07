@@ -1,0 +1,212 @@
+{
+ "cdb": {
+  "g1_sum_v1_by_id1": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g2_sum_v1_by_id1_id2": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g3_sum_v1_mean_v3_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g4_mean_v1v2v3_by_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g5_sum_v1v2v3_by_id6": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g6_median_sd_by_id4_id5": {
+   "status": "n/a",
+   "detail": "the engine has no such function"
+  },
+  "g7_range_v1v2_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g8_top2_v3_by_id6": {
+   "status": "n/a",
+   "detail": "the engine has no such function"
+  },
+  "g9_corr_by_id2_id4": {
+   "status": "n/a",
+   "detail": "the engine has no such function"
+  },
+  "g10_sum_v3_count_by_id1_6": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "duckdb": {
+  "g1_sum_v1_by_id1": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g2_sum_v1_by_id1_id2": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g3_sum_v1_mean_v3_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g4_mean_v1v2v3_by_id4": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g5_sum_v1v2v3_by_id6": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g6_median_sd_by_id4_id5": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g7_range_v1v2_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g8_top2_v3_by_id6": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g9_corr_by_id2_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g10_sum_v3_count_by_id1_6": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "datafusion": {
+  "g1_sum_v1_by_id1": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g2_sum_v1_by_id1_id2": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g3_sum_v1_mean_v3_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g4_mean_v1v2v3_by_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 1"
+  },
+  "g5_sum_v1v2v3_by_id6": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g6_median_sd_by_id4_id5": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g7_range_v1v2_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g8_top2_v3_by_id6": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g9_corr_by_id2_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g10_sum_v3_count_by_id1_6": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "chdb": {
+  "g1_sum_v1_by_id1": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g2_sum_v1_by_id1_id2": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g3_sum_v1_mean_v3_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g4_mean_v1v2v3_by_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g5_sum_v1v2v3_by_id6": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g6_median_sd_by_id4_id5": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g7_range_v1v2_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g8_top2_v3_by_id6": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g9_corr_by_id2_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g10_sum_v3_count_by_id1_6": {
+   "status": "ok",
+   "detail": ""
+  }
+ },
+ "polars": {
+  "g1_sum_v1_by_id1": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g2_sum_v1_by_id1_id2": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g3_sum_v1_mean_v3_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g4_mean_v1v2v3_by_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g5_sum_v1v2v3_by_id6": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g6_median_sd_by_id4_id5": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g7_range_v1v2_by_id3": {
+   "status": "ok",
+   "detail": ""
+  },
+  "g8_top2_v3_by_id6": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g9_corr_by_id2_id4": {
+   "status": "ok-tie-order",
+   "detail": "first difference at row 0"
+  },
+  "g10_sum_v3_count_by_id1_6": {
+   "status": "ok",
+   "detail": ""
+  }
+ }
+}
