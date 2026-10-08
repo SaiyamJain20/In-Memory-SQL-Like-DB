@@ -9,13 +9,13 @@ standard alternatives", so the comparison set is chosen by *role*, not by availa
 |---|---|---|
 | **DuckDB** 1.5.6 | the reference | Same design family (embedded, columnar, vectorized, push-based, morsel-driven) and the correctness oracle of the whole project; every other number is read against it. |
 | **Apache DataFusion** 54.1.0 | the closest architectural peer | Rust, Apache Arrow memory, a vectorized engine with its own optimizer, used as the SQL layer of many systems; the other widely used open-source embeddable columnar SQL engine. |
-| **ClickHouse** 26.9.2.1 (embedded as chDB 4.4.0) | the industry reference for vectorized columnar analytics | The system ClickBench and most analytical-database comparisons are built around; chDB runs the unmodified ClickHouse engine in-process, so it can be driven exactly like the others. |
+| **ClickHouse** 26.9.2.1 (embedded as chDB 4.4.0) | the industry reference for vectorized columnar analytics | The system whose authors created ClickBench, the widely used analytical benchmark; chDB runs the unmodified ClickHouse engine in-process, so it can be driven exactly like the others. |
 | **Polars** 2.0.0 | the DataFrame reference | The high-performance single-node DataFrame engine, benchmarked on TPC-H (`polars-benchmark`) and the H2O.ai benchmark; its queries are written against its lazy API rather than in SQL, which makes it a different kind of peer (§3.3). |
 | **SQLite** 3.53.4 | the row-store baseline | The most deployed embedded database: B-tree row storage and a row-at-a-time bytecode interpreter. It shows what columnar + vectorized execution buys, and is the natural peer for durable commit latency. |
 
 Not included, and why: PostgreSQL (needs a server install and root, which this machine does not give), Velox and Umbra / HyPer
 (libraries or research systems that cannot be installed and driven like the others here), MonetDB (no maintained embedded
-build). The TPC-H and H2O.ai benchmarks are the standard workloads for exactly this set of engines.
+build). TPC-H and the H2O.ai benchmarks are the standard workloads for this family of engines (SQLite excepted).
 
 ### 3.2 Design axes
 
@@ -48,11 +48,12 @@ thread counts actually used, resident memory and the timings (chapters 5 and 6).
   its page cache is warm).
 * **SQLite** runs the same text rewritten mechanically for its dialect (`bench/report/make_sqlite_queries.py`: dates as ISO
   text, `strftime` and `substr` for `EXTRACT` and `SUBSTRING`, Q13's derived-table column list) and, as it is a
-  row store without a statistics-driven join order, with the standard TPC-H primary- and foreign-key indexes (listed in
+  row store that relies on indexes, with the standard TPC-H primary- and foreign-key indexes (listed in
   `py_worker.py`) and `ANALYZE`; without indexes most queries would not finish.
 * **Polars** runs the 22 DataFrame-API queries of `pola-rs/polars-benchmark` (Apache 2.0) with three mechanical changes that
   do not change the work (the tables come from memory, `.round(2)` formatting is removed so the answers compare exactly with
   the answer files, Q11's threshold fraction is the SQL text's constant). For the micro-benchmark and H2O-style workloads,
-  which have no published Polars versions, Polars' own SQL interface runs the same SQL as the others. So the Polars rows
-  measure Polars' hand-tuned DataFrame queries against everyone else's SQL: a favourable comparison for Polars by
+  for which there are no DataFrame versions in this harness, Polars' own SQL interface runs the same SQL as the others (the
+  H2O.ai project publishes DataFrame versions of its questions for Polars; they were not used). So the Polars rows
+  measure Polars' hand-tuned DataFrame queries against everyone else's SQL: a comparison that is likely favourable to Polars by
   construction, and said so wherever it matters.

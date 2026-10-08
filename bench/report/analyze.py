@@ -261,6 +261,7 @@ def chart_scaling(plt, path, by_threads, engines, title):
         ax.set_xticklabels([str(t) for t in ts])
         ax.set_xlabel("threads")
     ax1.set_yscale("log")
+    plain_log_axis(ax1, "y", [20, 30, 50, 70, 100, 150])
     ax1.set_ylabel("geometric-mean query time (ms)")
     ax2.set_ylabel("speedup over one thread")
     ax1.legend(frameon=False, fontsize=8)
@@ -580,7 +581,7 @@ def optimizer_section(res, plt, out):
     num("cout_queries_cdb_larger", sum(1 for r in ratios if r > 1.05))
     # chart: q-error per kind
     fig, ax = plt.subplots(figsize=(6.4, 3.2))
-    kinds = ["FILTER", "JOIN", "AGGREGATE", "ALL"]
+    kinds = ["SCAN", "FILTER", "JOIN", "AGGREGATE", "ALL"]
     w = 0.34
     for k, e in enumerate(("cdb", "duckdb")):
         xs = [i + (k - 0.5) * w for i in range(len(kinds))]
@@ -589,9 +590,10 @@ def optimizer_section(res, plt, out):
         ax.bar(xs, p90, width=w * 0.9, color=A.COLORS[e], alpha=0.35, zorder=2)
         ax.bar(xs, med, width=w * 0.9, color=A.COLORS[e], zorder=3, label=f"{A.NAMES[e]} (median; lighter bar: 90th percentile)")
         for x, v in zip(xs, p90):
-            ax.text(x, v * 1.08, f"{v:.1f}", ha="center", va="bottom", fontsize=8)
+            ax.text(x, v * 1.08, f"{v:,.0f}" if v >= 100 else f"{v:.1f}", ha="center", va="bottom", fontsize=8)
     ax.set_yscale("log")
-    plain_log_axis(ax, "y", [1, 2, 5, 10, 20, 50, 100])
+    ax.set_ylim(0.9, 40000)
+    plain_log_axis(ax, "y", [1, 2, 5, 10, 100, 1000, 10000])
     ax.set_xticks(range(len(kinds)))
     ax.set_xticklabels([k.title() for k in kinds])
     ax.set_ylabel("q-error (1 = exact)")

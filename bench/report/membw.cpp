@@ -9,7 +9,9 @@
 #include <thread>
 #include <vector>
 
-static double Seconds(std::chrono::steady_clock::duration d) { return std::chrono::duration<double>(d).count(); }
+static double Seconds(std::chrono::steady_clock::duration d) {
+    return std::chrono::duration<double>(d).count();
+}
 
 static double ReadSum(const double* a, size_t n) {
     double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
@@ -39,19 +41,23 @@ int main() {
                     part[k] = ReadSum(a.data() + lo, hi - lo);
                 });
             }
-            for (auto& th : pool) th.join();
+            for (auto& th : pool)
+                th.join();
             double s = Seconds(std::chrono::steady_clock::now() - start);
-            for (double p : part) sink = sink + p;
+            for (double p : part)
+                sink = sink + p;
             best_read = std::max(best_read, static_cast<double>(n * sizeof(double)) / s / 1e9);
             pool.clear();
             start = std::chrono::steady_clock::now();
             for (unsigned k = 0; k < t; k++) {
                 pool.emplace_back([&, k] {
                     const size_t lo = n / t * k, hi = k + 1 == t ? n : n / t * (k + 1);
-                    for (size_t i = lo; i < hi; i++) b[i] = a[i];
+                    for (size_t i = lo; i < hi; i++)
+                        b[i] = a[i];
                 });
             }
-            for (auto& th : pool) th.join();
+            for (auto& th : pool)
+                th.join();
             s = Seconds(std::chrono::steady_clock::now() - start);
             best_copy = std::max(best_copy, static_cast<double>(2 * n * sizeof(double)) / s / 1e9);
         }

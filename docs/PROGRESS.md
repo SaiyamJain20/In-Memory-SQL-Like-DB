@@ -703,3 +703,53 @@ engine code; the regression of the *older* mutants (Phases 1-6) is re-run in ful
 smoke job) on `c57bda8`, the last commit that touches code or tests; the docs commit after it changes neither. The two earlier pushes
 that carried the Q22 fix and the HyperLogLog change failed the asan job on finding 8 above (the UBSan shift in the hash join build);
 `f6cff57` fixed it (run 37584004576, green).
+
+---
+
+## 2026-10-08 — Evaluation report: cdb against DuckDB, DataFusion, ClickHouse, Polars and SQLite
+
+**What changed** (branch `report-benchmark-analysis`; no engine code, one new benchmark target)
+- A **comparison harness** (`bench/report/`, [README](../bench/report/README.md)): one worker process per engine behind one line
+  protocol (`cdb_report_worker` in C++, `py_worker.py` for DuckDB, DataFusion, chDB (ClickHouse), Polars, SQLite), a driver that
+  verifies every answer against DuckDB's, runs *visits* in rotating-order *rounds* with control probes before and after, measures
+  the CPU the rest of the machine used meanwhile, repeats flagged visits, and records every run. Workloads: TPC-H (22 queries,
+  SF0.1 and SF1, 1 to 16 threads), 24 operator micro-benchmarks, the H2O.ai groupby and join questions (data re-created from the
+  published description), estimates vs actuals, durability.
+- A **campaign** on the machine *as it was used* (a desktop in normal use, `powersave` governor, no root): 258 visits, 1 repeated.
+  The noise floor was measured at the start, middle and end; the tie band τ is the round-to-round spread of the compared
+  statistic (12% for SF1 on one thread, 15% on 16).
+- **`docs/REPORT.md`** (chapters in `docs/report/src`, generated tables, charts and numbers in `docs/report`): how cdb works, the
+  systems compared, the tools, the method and the environment (the normal-use / noise statement is explicit), the results, the
+  analysis from callgrind profiles, the threats to validity, reproduction. Every table and number is generated from the raw
+  files (`bench/report/results/2026-10-08/`) by `analyze.py` and `make_report.py`.
+
+**Verified**
+| Check | Result |
+|---|---|
+| Every engine's answers against DuckDB's, at every timed configuration (TPC-H SF0.1 and SF1 on 1 and 16 threads, micro, H2O-style) | all match, except DataFusion and ClickHouse on TPC-H Q15 at 8 and 16 threads (a parallel float sum compared with itself; they pass on one thread) |
+| `tools/verify.sh` with the new benchmark target `cdb_report_worker` | passes: 976 / 976 / 976 / 974 / 976 (debug / asan / tsan / release / clang-18), each also in `-parallel` mode |
+| Noise: 30-50 repeats of one query per engine at the start, middle and end | single-run p10-p90 spread 2-23% on one thread, up to 47% on 16; no drift between the three |
+
+**Results** (details, intervals and caveats in the report): TPC-H SF1, geometric mean of the 22 queries relative to DuckDB:
+cdb **2.48x** on one thread [2.42, 2.57] and **1.54x** on 16; DataFusion 1.21x / 1.58x, ClickHouse 1.83x / 2.16x, Polars 1.05x / 1.00x,
+SQLite 13.6x on one thread. At SF0.1 with 16 threads cdb is the fastest engine (0.51x). cdb has the best scaling (4.7x from 1 to 16
+threads, DuckDB 2.9x) and the smallest memory (1,234 MB at SF1), and its row estimates are the most accurate (median q-error 1.01 against
+DuckDB's 4.45, with the caveat that its estimator was tuned on these queries). Its weakest suite is the H2O-style join (3.50x).
+
+**Found by the process** (the report's purpose was a measurement; these are what it measured)
+1. **Four localised inefficiencies, each attributed to a function by an instruction-level profile**: a generic per-row key comparison
+   (`KeyComparator::StoredEqualsInput`) is 13-40% of the instructions of every join and aggregate; there is no direct-addressed join
+   for dense integer keys (the 1,000-row-build join executes 5.2x DuckDB's instructions); the top-N sorts every 8,192-row batch with a
+   generic comparator (77-81% of instructions; top-10 of 10 M rows is 34x DuckDB's time); `count(*)` decodes a column (8x the instructions).
+2. **cdb burns CPU at 16 threads**: 48-56% of the CPU of Q4 and Q21 is spent outside any operator, 12.5 CPU-s per TPC-H pass against DuckDB's 4.2.
+3. **The optimizer's accurate estimates do not give the best plans**: its joins produce 4x (Q5, Q9), 19x (Q2) and 29x (Q20) DuckDB's
+   intermediate rows, because decorrelated aggregates run over the whole inner table (known gap, now quantified).
+4. **DataFusion and ClickHouse return no row for Q15 at 8 and 16 threads**: the bug cdb had until Phase 8.
+5. Harness-side findings: ClickHouse needs `join_use_nulls=1` and `aggregate_functions_null_for_empty=1` for SQL-standard answers and must not
+   trim CSV whitespace; Polars' `.round(2)` and Q11's scale-factor dependent constant had to be neutralised; the first tie band (a single-run
+   spread) was far too wide for 16 threads and was replaced by the spread of the statistic actually compared.
+
+**Known gaps / limits** (report chapter 8): one machine and a noisy one; SF3 not run (the desktop left too little memory); no hardware
+counters (`perf` is not installable without root), so profiles are instruction counts and a simulated cache; PostgreSQL not compared (no root);
+H2O-style data re-created, not the original generator; defaults, not tuning (ClickHouse in particular); Polars queries are DataFrame code, not SQL;
+the author built one of the systems (mitigations listed). None of the inefficiencies was fixed: they are the next measured targets.

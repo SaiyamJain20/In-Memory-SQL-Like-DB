@@ -12,7 +12,8 @@ memory is the peak resident set on TPC-H SF1 at one thread):
 
 {{table:headline}}
 
-**Correctness.** cdb returns the reference answer to every query of every workload at every thread count tested. DataFusion and
+**Correctness.** cdb returns the reference answer to every query it can express, in every workload and at every thread count
+tested (three of the ten H2O-style groupby questions need `median`, `corr` or window functions, which it does not have). DataFusion and
 ClickHouse do not for TPC-H Q15 at 8 and 16 threads (a parallel floating-point sum compared with itself); cdb had the same bug
 until it made its sums order-independent (§6.1).
 

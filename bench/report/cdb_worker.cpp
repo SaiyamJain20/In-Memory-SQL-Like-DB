@@ -163,9 +163,9 @@ int main() {
             const auto start = std::chrono::steady_clock::now();
             const double cpu0 = CpuMs();
             const cdb::QueryResult r = conn->Query(sql);
-            const double ms = std::chrono::duration<double, std::milli>(
-                                  std::chrono::steady_clock::now() - start)
-                                  .count();
+            const double ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                    .count();
             if (!r.ok()) {
                 Fail(r.error_message());
                 continue;

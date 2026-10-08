@@ -41,7 +41,8 @@ memory is the peak resident set on TPC-H SF1 at one thread):
 | Polars | 1.05 | 1.00 | 0.70 | 0.75 | 1.17 | 1.47 | 2,514 |
 | SQLite | 13.62 | – | – | – | – | – | 1,957 |
 
-**Correctness.** cdb returns the reference answer to every query of every workload at every thread count tested. DataFusion and
+**Correctness.** cdb returns the reference answer to every query it can express, in every workload and at every thread count
+tested (three of the ten H2O-style groupby questions need `median`, `corr` or window functions, which it does not have). DataFusion and
 ClickHouse do not for TPC-H Q15 at 8 and 16 threads (a parallel floating-point sum compared with itself); cdb had the same bug
 until it made its sums order-independent (§6.1).
 
@@ -321,13 +322,13 @@ standard alternatives", so the comparison set is chosen by *role*, not by availa
 |---|---|---|
 | **DuckDB** 1.5.6 | the reference | Same design family (embedded, columnar, vectorized, push-based, morsel-driven) and the correctness oracle of the whole project; every other number is read against it. |
 | **Apache DataFusion** 54.1.0 | the closest architectural peer | Rust, Apache Arrow memory, a vectorized engine with its own optimizer, used as the SQL layer of many systems; the other widely used open-source embeddable columnar SQL engine. |
-| **ClickHouse** 26.9.2.1 (embedded as chDB 4.4.0) | the industry reference for vectorized columnar analytics | The system ClickBench and most analytical-database comparisons are built around; chDB runs the unmodified ClickHouse engine in-process, so it can be driven exactly like the others. |
+| **ClickHouse** 26.9.2.1 (embedded as chDB 4.4.0) | the industry reference for vectorized columnar analytics | The system whose authors created ClickBench, the widely used analytical benchmark; chDB runs the unmodified ClickHouse engine in-process, so it can be driven exactly like the others. |
 | **Polars** 2.0.0 | the DataFrame reference | The high-performance single-node DataFrame engine, benchmarked on TPC-H (`polars-benchmark`) and the H2O.ai benchmark; its queries are written against its lazy API rather than in SQL, which makes it a different kind of peer (§3.3). |
 | **SQLite** 3.53.4 | the row-store baseline | The most deployed embedded database: B-tree row storage and a row-at-a-time bytecode interpreter. It shows what columnar + vectorized execution buys, and is the natural peer for durable commit latency. |
 
 Not included, and why: PostgreSQL (needs a server install and root, which this machine does not give), Velox and Umbra / HyPer
 (libraries or research systems that cannot be installed and driven like the others here), MonetDB (no maintained embedded
-build). The TPC-H and H2O.ai benchmarks are the standard workloads for exactly this set of engines.
+build). TPC-H and the H2O.ai benchmarks are the standard workloads for this family of engines (SQLite excepted).
 
 ### 3.2 Design axes
 
@@ -360,13 +361,14 @@ thread counts actually used, resident memory and the timings (chapters 5 and 6).
   its page cache is warm).
 * **SQLite** runs the same text rewritten mechanically for its dialect (`bench/report/make_sqlite_queries.py`: dates as ISO
   text, `strftime` and `substr` for `EXTRACT` and `SUBSTRING`, Q13's derived-table column list) and, as it is a
-  row store without a statistics-driven join order, with the standard TPC-H primary- and foreign-key indexes (listed in
+  row store that relies on indexes, with the standard TPC-H primary- and foreign-key indexes (listed in
   `py_worker.py`) and `ANALYZE`; without indexes most queries would not finish.
 * **Polars** runs the 22 DataFrame-API queries of `pola-rs/polars-benchmark` (Apache 2.0) with three mechanical changes that
   do not change the work (the tables come from memory, `.round(2)` formatting is removed so the answers compare exactly with
   the answer files, Q11's threshold fraction is the SQL text's constant). For the micro-benchmark and H2O-style workloads,
-  which have no published Polars versions, Polars' own SQL interface runs the same SQL as the others. So the Polars rows
-  measure Polars' hand-tuned DataFrame queries against everyone else's SQL: a favourable comparison for Polars by
+  for which there are no DataFrame versions in this harness, Polars' own SQL interface runs the same SQL as the others (the
+  H2O.ai project publishes DataFrame versions of its questions for Polars; they were not used). So the Polars rows
+  measure Polars' hand-tuned DataFrame queries against everyone else's SQL: a comparison that is likely favourable to Polars by
   construction, and said so wherever it matters.
 
 ## 4. Tools
@@ -400,7 +402,7 @@ thread counts actually used, resident memory and the timings (chapters 5 and 6).
 
 ### 4.3 The comparison harness
 
-Everything in chapter 6 comes from one harness (`bench/report/`, about 4,190 lines):
+Everything in chapter 6 comes from one harness (`bench/report/`, about 4,192 lines):
 
 * **Workers.** Each engine runs in its own process behind one line protocol (`THREADS`, `LOADSPEC`, `EXEC`, `RUN`, `DUMP`,
   `STAT`): `cdb_report_worker` (C++, links the engine) and `py_worker.py` (DuckDB, DataFusion, chDB, Polars, SQLite).
@@ -584,7 +586,7 @@ disturbed by the desktop (§5.4). τ = 12%.
 * **cdb is 2.48× DuckDB's time** [2.42, 2.57] over the 22
   queries: slower on 20, tied on 2 and faster on
   0 (the geometric mean of the times is 136.48 ms against 54.98 ms).
-  That is the same order as the 2.31× that the simpler single-engine harness of `docs/BENCHMARKS.md` measured two days earlier.
+  That is the same order as the 2.31× that the simpler single-engine harness of `docs/BENCHMARKS.md` measured the day before.
 * The other engines, against DuckDB: DataFusion 1.21×, **Polars 1.05×**
   (parity, on hand-written DataFrame queries), ClickHouse 1.83×, SQLite 13.62× (with
   indexes). **On one thread cdb is the slowest of the five columnar and DataFrame engines**: it takes
@@ -676,8 +678,8 @@ The full per-query times are in appendix A.1. Cold runs (the first execution in 
   0.71×; against Polars 1.54×.
 * The queries where cdb remains far behind at 16 threads are the same ones as on one thread (Q17 12.55×,
   Q4 4.93×, Q21 4.43×, Q9 3.24×, Q20
-  3.14×, Q13 2.80×); Q4 and Q21 are newly slow because they do not scale
-  (§7.3 shows where their CPU goes). It is faster than DuckDB on Q14 (0.51×).
+  3.14×, Q13 2.80×); Q4 and Q21 are relatively slower than on one thread
+  because they do not scale (§7.3 shows where their CPU goes). It is faster than DuckDB on Q14 (0.51×).
 
 **Scaling.** Geometric-mean time over the 22 queries, and the speedup over one thread (SF1):
 
@@ -774,12 +776,11 @@ SF3 was not run: the desktop did not leave the memory it needs.
 * **Memory.** cdb has the smallest footprint of all engines on one thread: peak 1,234 MB resident against
   DuckDB's 1,659, DataFusion's 2,242, Polars' 2,514 and ClickHouse's
   3,993 MB (SQLite 1,957), because its stored data is compressed (612 MB for a raw
-  size of 1,408 MB, 2.3×) and its scans are zero-copy. At 16 threads cdb's peak is 1,357 MB
-  (per-thread build state), still the smallest.
+  size of 1,408 MB, 2.3×) and its scans are zero-copy. At 16 threads cdb's peak is 1,357 MB, still the smallest.
 * **Loading.** cdb is the second slowest loader: 8.4 s on one thread against DuckDB's 6.6 s,
   DataFusion's 3.2, Polars' 3.4 and ClickHouse's 1.6 s (SQLite
   45.7 s, a Python loop). A `COPY` into cdb parses, encodes every segment, builds zone maps and a HyperLogLog
-  sketch, none of which the in-memory formats of DataFusion, Polars or ClickHouse's `Memory` engine pay at load time; at 16
+  sketch, none of which the in-memory formats of DataFusion, Polars or ClickHouse's `Memory` engine (as far as their documentation says) pay at load time; at 16
   threads cdb loads in 1.8 s (4.7× faster).
 
 ### 6.6 Operators

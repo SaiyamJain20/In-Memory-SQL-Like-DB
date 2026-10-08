@@ -42,7 +42,7 @@ disturbed by the desktop (§5.4). τ = {{n:tau_sf1_t1_pct}}%.
 * **cdb is {{n:sf1_t1_ratio_cdb}}× DuckDB's time** [{{n:sf1_t1_ratio_cdb_lo}}, {{n:sf1_t1_ratio_cdb_hi}}] over the 22
   queries: slower on {{n:standing_sf1_t1_duckdb_loss}}, tied on {{n:standing_sf1_t1_duckdb_tie}} and faster on
   {{n:standing_sf1_t1_duckdb_win}} (the geometric mean of the times is {{n:sf1_t1_gm_cdb}} ms against {{n:sf1_t1_gm_duckdb}} ms).
-  That is the same order as the 2.31× that the simpler single-engine harness of `docs/BENCHMARKS.md` measured two days earlier.
+  That is the same order as the 2.31× that the simpler single-engine harness of `docs/BENCHMARKS.md` measured the day before.
 * The other engines, against DuckDB: DataFusion {{n:sf1_t1_ratio_datafusion}}×, **Polars {{n:sf1_t1_ratio_polars}}×**
   (parity, on hand-written DataFrame queries), ClickHouse {{n:sf1_t1_ratio_chdb}}×, SQLite {{n:sf1_t1_ratio_sqlite}}× (with
   indexes). **On one thread cdb is the slowest of the five columnar and DataFrame engines**: it takes
@@ -90,8 +90,8 @@ The full per-query times are in appendix A.1. Cold runs (the first execution in 
   {{n:standing_sf1_t16_chdb_ratio}}×; against Polars {{n:standing_sf1_t16_polars_ratio}}×.
 * The queries where cdb remains far behind at 16 threads are the same ones as on one thread (Q17 {{n:r_tpch_sf1_t16_cdb_q17}}×,
   Q4 {{n:r_tpch_sf1_t16_cdb_q04}}×, Q21 {{n:r_tpch_sf1_t16_cdb_q21}}×, Q9 {{n:r_tpch_sf1_t16_cdb_q09}}×, Q20
-  {{n:r_tpch_sf1_t16_cdb_q20}}×, Q13 {{n:r_tpch_sf1_t16_cdb_q13}}×); Q4 and Q21 are newly slow because they do not scale
-  (§7.3 shows where their CPU goes). It is faster than DuckDB on Q14 ({{n:r_tpch_sf1_t16_cdb_q14}}×).
+  {{n:r_tpch_sf1_t16_cdb_q20}}×, Q13 {{n:r_tpch_sf1_t16_cdb_q13}}×); Q4 and Q21 are relatively slower than on one thread
+  because they do not scale (§7.3 shows where their CPU goes). It is faster than DuckDB on Q14 ({{n:r_tpch_sf1_t16_cdb_q14}}×).
 
 **Scaling.** Geometric-mean time over the 22 queries, and the speedup over one thread (SF1):
 
@@ -141,12 +141,11 @@ SF3 was not run: the desktop did not leave the memory it needs.
 * **Memory.** cdb has the smallest footprint of all engines on one thread: peak {{n:rss_cdb_t1}} MB resident against
   DuckDB's {{n:rss_duckdb_t1}}, DataFusion's {{n:rss_datafusion_t1}}, Polars' {{n:rss_polars_t1}} and ClickHouse's
   {{n:rss_chdb_t1}} MB (SQLite {{n:rss_sqlite_t1}}), because its stored data is compressed ({{n:stored_mb_sf1}} MB for a raw
-  size of 1,408 MB, {{n:stored_ratio}}×) and its scans are zero-copy. At 16 threads cdb's peak is {{n:rss_cdb_t16}} MB
-  (per-thread build state), still the smallest.
+  size of 1,408 MB, {{n:stored_ratio}}×) and its scans are zero-copy. At 16 threads cdb's peak is {{n:rss_cdb_t16}} MB, still the smallest.
 * **Loading.** cdb is the second slowest loader: {{n:load_cdb_t1}} s on one thread against DuckDB's {{n:load_duckdb_t1}} s,
   DataFusion's {{n:load_datafusion_t1}}, Polars' {{n:load_polars_t1}} and ClickHouse's {{n:load_chdb_t1}} s (SQLite
   {{n:load_sqlite_t1}} s, a Python loop). A `COPY` into cdb parses, encodes every segment, builds zone maps and a HyperLogLog
-  sketch, none of which the in-memory formats of DataFusion, Polars or ClickHouse's `Memory` engine pay at load time; at 16
+  sketch, none of which the in-memory formats of DataFusion, Polars or ClickHouse's `Memory` engine (as far as their documentation says) pay at load time; at 16
   threads cdb loads in {{n:load_cdb_t16}} s ({{n:load_ratio_cdb}}× faster).
 
 ### 6.6 Operators
