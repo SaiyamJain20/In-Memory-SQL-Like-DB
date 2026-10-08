@@ -37,6 +37,14 @@ profile and cdb's from `EXPLAIN ANALYZE`; scans differ in what they report (Duck
 filter is a separate operator), so the per-kind q-error table keeps them apart and the plan-quality comparison uses the rows
 produced by the joins (C_out), which both engines define the same way.
 
+**The estimator comparison favours cdb.** cdb's estimator was developed by running `EXPLAIN ANALYZE` on these 22 queries
+at these scale factors and fixing what it showed (§6.8); DuckDB's was not tuned to them. A fair test of estimate quality needs
+queries the estimator has not seen, which this report does not have.
+
+**Timing includes the client call.** Python engines are timed around a Python call (`fetch_arrow_table`, `collect`, ...) and cdb
+around `Connection::Query` in a C++ process; the difference is microseconds, which is negligible for queries of milliseconds and not
+for the sub-millisecond ones (`scan_count` at 0.5–1.4 ms on some engines).
+
 **No hardware counters.** `perf` is not installed and cannot be installed without root, so the explanations in chapter 7
 rest on controlled experiments and on callgrind (instruction counts and a cache simulation), not on measured cache or branch
 miss rates.

@@ -136,6 +136,23 @@ buffer pool. Chapter 6.8 measures its costs.
 
 {{include:explain_q03}}
 
+Reading the listing (numbers are those of the run above): the optimizer found a **bushy** plan whose two hash joins are built on
+the small sides, and the query compiles to four pipelines.
+
+1. `customer` is scanned (all 150,000 rows: no segment's zone map can rule out a market segment), filtered to 30,142 rows (estimated 29,982) and built into
+   a hash table: the first join's build side.
+2. `orders` is scanned, filtered to 727,305 rows (estimated 728,803), probes that table and produces 147,126 rows (estimated 219,070:
+   the one visibly wrong estimate of this plan, 1.5× too high) which become the second hash table.
+3. `lineitem` is scanned (6,001,215 rows, 16.1 ms), filtered to 3,241,776 rows (estimated 3,223,931), probes the second table
+   (37.1 ms, the largest cost of the query) and feeds the hash aggregate: 30,519 joined rows fall into 11,620 groups (the estimate of
+   462,577 groups is a large over-estimate and harmless here, nothing downstream depends on it).
+4. The aggregate is the source of the top-N sink, which `ORDER BY ... LIMIT` was turned into ("sorted as a top-N together with the
+   LIMIT above"): it keeps the ten best of 11,620 rows.
+
+Every operator in the listing works on vectors of up to 2,048 rows, and with more threads pipelines 1 to 3 are run by several threads
+over morsels of their source. DuckDB's plan for the same query produces the same number of join rows (§6.8, Q3: 177,645 for both
+engines in the SF1 comparison), so this is a query on which the two optimizers agree.
+
 ### 2.8 What cdb does not have
 
 No spill to disk (hash tables, sorts and the whole database are in memory), no window functions, `UPDATE` / `DELETE`,

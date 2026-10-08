@@ -10,9 +10,9 @@
 | OS | Linux 7.0, Ubuntu 24.04; Python 3.14.7; GCC 13.3 `-O3 -DNDEBUG` (no `-march=native`) |
 | CPU governor | `powersave`, boost enabled, **not changeable** (no root) |
 
-> **These measurements were taken on a desktop in normal use, not on an idle, isolated machine.** A browser with several
-> tabs, an editor and a coding-assistant session were running throughout, and the owner kept working while the
-> campaign ran. No cores were reserved, the governor stayed on `powersave`, and there was no control over frequency scaling:
+> **These measurements were taken on a desktop in normal use, not on an idle, isolated machine.** Two web browsers (holding
+> about 5 GB of the memory), an editor and a coding-assistant session were open, and the owner had said the machine would be
+> used normally while the campaign ran. No cores were reserved, the governor stayed on `powersave`, and there was no control over frequency scaling:
 > the mean CPU frequency during the runs was {{n:freq_mean_ghz}} GHz (per-core readings between {{n:freq_min_ghz}} and
 > {{n:freq_max_ghz}} GHz), well below the part's boost clock, and it moved with load. The rest of the machine used a median
 > of **{{n:bg_median}} cores** while a benchmark ran (90th percentile {{n:bg_p90}}, maximum {{n:bg_max}}; one core is
@@ -53,18 +53,23 @@
 
 ### 5.4 Handling the noise
 
-1. **Interleaved rounds** (§4.3). {{n:rounds_sf1}} rounds per configuration at SF1, rotating engine order.
+1. **Interleaved rounds** (§4.3). Five rounds for TPC-H at SF0.1 and SF1 on 1 and 16 threads, three for the intermediate thread
+   counts (2, 4, 8), the variants, and the micro-benchmark and H2O-style workloads; the engine order rotates every round.
 2. **Flagged visits are repeated.** A visit is flagged when either control probe is more than 15% slower than the median of
    the visits before it, or the rest of the machine used more than 2.5 cores during it; a flagged visit is run again (up to
-   twice) and all attempts are kept in the raw files. Of the visits in the campaign, {{n:visits_total}} were run,
-   {{n:visits_retried}} were repeats, and {{n:visits_flagged_final}} stayed flagged after two retries and are used as they
-   are (marked in the raw data).
-3. **The noise floor is measured, not assumed.** The same query on the same engine was repeated alone, 30–50 times, at the
-   start, in the middle and at the end of the campaign (§6.10). The spread between the 10th and 90th percentile of a single
-   run, relative to its median, is the *tie band* τ: τ = {{n:tau1_pct}}% for one thread (the 90th percentile over all engines
-   and queries tested) and {{n:tau16_pct}}% for 16 threads. A per-query ratio is called a difference only if its 95% interval
-   excludes 1 *and* it differs from 1 by more than τ; otherwise the tables mark it "≈". The medians of ≥ 5 rounds are quieter
-   than single runs, so τ is conservative.
+   twice) and all attempts are kept in the raw files. {{n:visits_total}} visits were run in all,
+   {{n:visits_retried}} of them repeats of a flagged visit, and {{n:visits_flagged_final}} remained flagged after two retries (such a
+   visit would be used as it is and marked in the raw data).
+3. **The noise floor is measured, not assumed.** Two measurements. (a) The same query on the same engine was repeated
+   alone, 30–50 times, at the start, in the middle and at the end of the campaign (§6.10): single runs of one query vary
+   between {{n:noise_spread1_min}}% and {{n:noise_spread1_max}}% (p10–p90 spread, relative to the median) at one thread, and up to
+   {{n:noise_spread16_max}}% at 16 threads for a 5–8 ms query; the 90th percentile of the spread over all engines tested is
+   {{n:single_run_spread1_pct}}% at one thread and {{n:single_run_spread16_pct}}% at 16 threads. (b) What matters is the noise of the statistic that is actually compared: a per-query ratio to DuckDB, taken
+   within a round and summarised by its median over rounds. Its round-to-round relative interquartile range, at the 90th
+   percentile over queries and engines, is the **tie band τ** of a configuration: τ = {{n:tau_sf1_t1_pct}}% for TPC-H SF1 on one
+   thread and {{n:tau_sf1_t16_pct}}% on 16 threads (every configuration's band is in appendix A.7). A per-query
+   ratio is called a difference only if its 95% interval excludes 1 *and* it differs from 1 by more than τ; otherwise
+   the tables mark it "≈".
 4. **Ratios are the claim, absolute times are context.** A reader who wants to compare with another machine should compare
    ratios.
 
