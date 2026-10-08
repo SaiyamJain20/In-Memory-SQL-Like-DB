@@ -41,16 +41,17 @@ class WorkerError(Exception):
 
 
 class Worker:
-    def __init__(self, engine, threads, sf=1.0):
+    def __init__(self, engine, threads, sf=1.0, prefix=()):
         self.engine, self.threads = engine, threads
         env = dict(os.environ, TPCH_SF=f"{sf:g}", OMP_NUM_THREADS="1", POLARS_MAX_THREADS=str(threads),
                    TOKIO_WORKER_THREADS=str(threads), RAYON_NUM_THREADS=str(threads),
                    OPENBLAS_NUM_THREADS="1")
         cmd = [CDB_WORKER] if engine == "cdb" else [PY, os.path.join(common.REPORT_DIR, "py_worker.py"),
                                                     "--engine", engine]
+        cmd = list(prefix) + cmd  # e.g. valgrind --tool=callgrind (bench/report/profile.py)
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
-        self.call("THREADS", threads, timeout=120)
+        self.call("THREADS", threads, timeout=1800 if prefix else 120)
 
     def call(self, *fields, timeout=600):
         self.p.stdin.write("\t".join(str(f) for f in fields) + "\n")

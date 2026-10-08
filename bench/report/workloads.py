@@ -38,14 +38,14 @@ def tpch(sf, query_numbers):
 
 # ---------------------------------------------------------------------------------- generic SQL sets
 
-def _spec(name, tables):
-    d = os.path.join(DATA, name)
+def _spec(name, tables, data_name=None):
+    d = os.path.join(DATA, data_name or name)
     return {"dataset": name, "tables": [
         {"name": t, "path": os.path.join(d, f"{t}.csv"), "columns": cols, "delimiter": "|", "header": False}
         for t, cols in tables]}
 
 
-def sql_workload(name, tables, catalog, unsupported=None):
+def sql_workload(name, tables, catalog, unsupported=None, data_name=None):
     """`catalog`: {query name: SQL}; `unsupported`: {engine: set of query names it cannot run}."""
     unsupported = unsupported or {}
     d = os.path.join(SQL_DIR, name)
@@ -57,7 +57,7 @@ def sql_workload(name, tables, catalog, unsupported=None):
         if q in unsupported.get(engine, ()):
             return None
         return os.path.join(d, f"{q}.sql")
-    return Workload(name, _spec(name, tables), list(catalog), resolve)
+    return Workload(name, _spec(name, tables, data_name), list(catalog), resolve)
 
 
 MICRO_TABLES = [
@@ -101,8 +101,9 @@ MICRO_QUERIES = {
 }
 
 
-def micro():
-    return sql_workload("micro", MICRO_TABLES, MICRO_QUERIES)
+def micro(data_name=None):
+    """`data_name`: another directory under data/ with the same tables (a 1,000,000-row copy for profiling)."""
+    return sql_workload("micro", MICRO_TABLES, MICRO_QUERIES, data_name=data_name)
 
 
 H2O_G1_TABLES = [("x", [("id1", "str"), ("id2", "str"), ("id3", "str"), ("id4", "i32"), ("id5", "i32"),
@@ -164,9 +165,9 @@ def get(name, **kw):
 
 # ---------------------------------------------------------------------------------- data generation
 
-def generate(name, rows):
+def generate(name, rows, out_name=None):
     import duckdb
-    d = os.path.join(DATA, name)
+    d = os.path.join(DATA, out_name or name)
     os.makedirs(d, exist_ok=True)
     con = duckdb.connect()
     con.execute("SELECT setseed(0.42)")
@@ -220,8 +221,9 @@ def main():
     g = sub.add_parser("gen")
     g.add_argument("name", choices=["micro", "h2o-g1", "h2o-j1"])
     g.add_argument("--rows", type=int, default=10_000_000)
+    g.add_argument("--out-name", default=None, help="directory under data/ (default: the workload's name)")
     args = ap.parse_args()
-    generate(args.name, args.rows)
+    generate(args.name, args.rows, args.out_name)
 
 
 if __name__ == "__main__":

@@ -117,7 +117,12 @@ class Stage:
         for (engine, rnd), v in self.chosen.items():
             for q, entry in v["queries"].items():
                 self.cells.setdefault((engine, q), Cell()).add(rnd, entry)
-        self.queries = sorted({q for (_, q) in self.cells}, key=lambda s: (len(s), s))
+        # the workload's own order (the order the queries ran in), not alphabetical
+        self.queries = []
+        for _, v in sorted(self.chosen.items()):
+            for q in v["queries"]:
+                if q not in self.queries:
+                    self.queries.append(q)
 
     def cell(self, engine, q):
         return self.cells.get((engine, q))

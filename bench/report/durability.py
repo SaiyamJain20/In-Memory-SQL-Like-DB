@@ -206,8 +206,9 @@ def cdb_run(sf, threads):
     if m:
         out["checkpoint"] = {"s": float(m[0]), "bytes": float(m[1]) * 1024 * 1024}
     m = grab(r"open \+ load all tables\s+([\d.]+) s")
-    if m:
-        out["reopen"] = {"s": float(m[0])}
+    q6 = grab(r"Q6 on the reopened database\s+([\d.]+) ms")
+    if m:  # the same quantity as the others: opening the files and answering Q6
+        out["reopen"] = {"s": float(m[0]) + (float(q6[0]) / 1000 if q6 else 0), "open_s": float(m[0])}
     m = grab(r"open \+ replay [\d.]+ MB of log\s+([\d.]+) s")
     if m:
         out["recovery by log replay"] = {"s": float(m[0])}
@@ -224,6 +225,8 @@ def main():
     args = ap.parse_args()
     result = {"sf": args.sf, "commits": args.commits, "threads": args.threads, "probe": common.control_probe(),
               "engines": {}}
+    if os.path.exists(args.out):  # re-running some engines keeps the others
+        result["engines"] = json.load(open(args.out)).get("engines", {})
     for e in args.engines.split(","):
         fn = {"sqlite": sqlite_run, "duckdb": duckdb_run, "chdb": chdb_run}.get(e)
         t = time.time()

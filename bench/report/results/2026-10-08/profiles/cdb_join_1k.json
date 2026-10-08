@@ -1,0 +1,137 @@
+{
+ "engine": "cdb",
+ "query": "join_1k",
+ "sf": 0.1,
+ "events": [
+  "Ir",
+  "Dr",
+  "Dw",
+  "I1mr",
+  "D1mr",
+  "D1mw",
+  "ILmr",
+  "DLmr",
+  "DLmw"
+ ],
+ "totals": [
+  346059909,
+  116870170,
+  39624424,
+  69854,
+  1796962,
+  1229256,
+  4102,
+  148530,
+  41790
+ ],
+ "top_functions": [
+  {
+   "ir": 155324857,
+   "pct": 44.88,
+   "dlmr": 28947,
+   "name": "???:cdb::PhysicalHashJoin::Execute(cdb::OperatorState&, cdb::DataChunk const&, cdb::DataChunk&) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB"
+  },
+  {
+   "ir": 84959965,
+   "pct": 24.55,
+   "dlmr": 27477,
+   "name": "???:cdb::KeyComparator::StoredEqualsInput(cdb::ChunkStore const&, unsigned long, unsigned long) const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-L"
+  },
+  {
+   "ir": 45036996,
+   "pct": 13.01,
+   "dlmr": 84,
+   "name": "???:cdb::ChunkStore::Gather(unsigned long, unsigned int const*, unsigned long, cdb::Vector&) const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like"
+  },
+  {
+   "ir": 8159967,
+   "pct": 2.36,
+   "dlmr": 0,
+   "name": "./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 8046599,
+   "pct": 2.33,
+   "dlmr": 29450,
+   "name": "???:cdb::(anonymous namespace)::EvalOperator(cdb::ExprNode&, cdb::(anonymous namespace)::Input const&, cdb::Vector&) [/home/saiyamjain/Desktop/Github/"
+  },
+  {
+   "ir": 7065779,
+   "pct": 2.04,
+   "dlmr": 1,
+   "name": "???:cdb::LogicalType::physical() const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench/cdb_report_worker]"
+  },
+  {
+   "ir": 7038808,
+   "pct": 2.03,
+   "dlmr": 0,
+   "name": "???:cdb::PhysicalTypeSize(cdb::PhysicalType) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench/cdb_report_worker]"
+  },
+  {
+   "ir": 6515810,
+   "pct": 1.88,
+   "dlmr": 1063,
+   "name": "???:void cdb::kernels::(anonymous namespace)::HashInt32Avx2<false>(int const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memo"
+  },
+  {
+   "ir": 4613760,
+   "pct": 1.33,
+   "dlmr": 32709,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<17u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-"
+  },
+  {
+   "ir": 4319520,
+   "pct": 1.25,
+   "dlmr": 19285,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<10u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-"
+  },
+  {
+   "ir": 2696715,
+   "pct": 0.78,
+   "dlmr": 0,
+   "name": "???:cdb::kernels::(anonymous namespace)::SumDoubleAvx2(double const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/rele"
+  },
+  {
+   "ir": 2643030,
+   "pct": 0.76,
+   "dlmr": 0,
+   "name": "???:cdb::Vector::Slice(cdb::SelectionVector const&, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench/cdb_repo"
+  },
+  {
+   "ir": 1978080,
+   "pct": 0.57,
+   "dlmr": 1,
+   "name": "???:cdb::kernels::(anonymous namespace)::OffsetsToScaledDoubleAvx2(unsigned long const*, unsigned long, long, double, double*) [/home/saiyamjain/Deskt"
+  },
+  {
+   "ir": 1974720,
+   "pct": 0.57,
+   "dlmr": 0,
+   "name": "???:cdb::kernels::OffsetsToInt32(unsigned long const*, unsigned long, unsigned long, int*) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/buil"
+  },
+  {
+   "ir": 924102,
+   "pct": 0.27,
+   "dlmr": 49,
+   "name": "./malloc/./malloc/malloc.c:_int_malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 602326,
+   "pct": 0.17,
+   "dlmr": 7,
+   "name": "./malloc/./malloc/malloc.c:_int_free [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 408339,
+   "pct": 0.12,
+   "dlmr": 72,
+   "name": "./malloc/./malloc/malloc.c:malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 367146,
+   "pct": 0.11,
+   "dlmr": 0,
+   "name": "./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_chk_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  }
+ ]
+}

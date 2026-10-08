@@ -1,0 +1,62 @@
+{
+ "1": {
+  "wall_ms": 475.4993695,
+  "process_cpu_ms": 475.3365,
+  "operator_own_cpu_ms": 453.44,
+  "explain_analyze": [
+   "LIMIT 100  (est ~1, actual 100 rows, 0.10 ms; in 411 rows)",
+   "  ORDER BY numwait DESC NULLS LAST, s_name ASC NULLS LAST  (sorted as a top-N together with the LIMIT above)",
+   "    PROJECT [s_name, count(*) AS numwait]  (est ~1, actual 411 rows, 0.00 ms)",
+   "      AGGREGATE groups=[s_name] aggregates=[count(*)]  (est ~1, actual 411 rows, 0.62 ms; in 4141 rows)",
+   "        JOIN ANTI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_suppkey))  (est ~0, actual 4141 rows, 125 ms; build 3793296 rows, 102 ms)",
+   "          JOIN SEMI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_suppkey))  (est ~79358, actual 73089 rows, 182 ms; build 6001215 rows, 159 ms)",
+   "            PROJECT [s_name, l_orderkey, l_suppkey]  (est ~79358, actual 75871 rows, 0.08 ms)",
+   "              JOIN INNER ON (o_orderkey = l_orderkey)  (est ~79358, actual 75871 rows, 23.7 ms; build 156739 rows, 5.30 ms)",
+   "                FILTER (o_orderstatus = 'F')  (est ~499817, actual 729413 rows, 7.12 ms)",
+   "                  SCAN orders [o_orderkey, o_orderstatus] prune(o_orderstatus = F)  (est ~1500000, actual 1500000 rows, 1.82 ms)",
+   "                JOIN INNER ON (s_suppkey = l_suppkey)  (est ~79358, actual 156739 rows, 53.1 ms; build 411 rows, 0.05 ms)",
+   "                  FILTER (l_receiptdate > l_commitdate)  (est ~2000405, actual 3793296 rows, 8.68 ms)",
+   "                    SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 12.9 ms)",
+   "                  JOIN INNER ON (s_nationkey = n_nationkey)  (est ~399, actual 411 rows, 0.08 ms; build 1 rows, 0.01 ms)",
+   "                    SCAN supplier [s_suppkey, s_name, s_nationkey]  (est ~10000, actual 10000 rows, 0.00 ms)",
+   "                    FILTER (n_name = 'SAUDI ARABIA')  (est ~1, actual 1 rows, 0.00 ms)",
+   "                      SCAN nation [n_nationkey, n_name] prune(n_name = SAUDI ARABIA)  (est ~25, actual 25 rows, 0.00 ms)",
+   "            SCAN lineitem [l_orderkey, l_suppkey]  (est ~6001215, actual 6001215 rows, 6.94 ms)",
+   "          FILTER (l_receiptdate > l_commitdate)  (est ~2000405, actual 3793296 rows, 13.3 ms)",
+   "            SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 18.0 ms)",
+   "Planning: 0.02 ms",
+   "Execution: 457 ms on 1 thread, 100 rows returned",
+   "(operator times are summed over threads)"
+  ]
+ },
+ "16": {
+  "wall_ms": 215.84197699999999,
+  "process_cpu_ms": 1326.031,
+  "operator_own_cpu_ms": 684.97,
+  "explain_analyze": [
+   "LIMIT 100  (est ~1, actual 100 rows, 0.13 ms; in 411 rows)",
+   "  ORDER BY numwait DESC NULLS LAST, s_name ASC NULLS LAST  (sorted as a top-N together with the LIMIT above)",
+   "    PROJECT [s_name, count(*) AS numwait]  (est ~1, actual 411 rows, 0.00 ms)",
+   "      AGGREGATE groups=[s_name] aggregates=[count(*)]  (est ~1, actual 411 rows, 2.32 ms; in 4141 rows)",
+   "        JOIN ANTI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_suppkey))  (est ~0, actual 4141 rows, 159 ms; build 3793296 rows, 117 ms)",
+   "          JOIN SEMI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_suppkey))  (est ~79358, actual 73089 rows, 192 ms; build 6001215 rows, 152 ms)",
+   "            PROJECT [s_name, l_orderkey, l_suppkey]  (est ~79358, actual 75871 rows, 0.16 ms)",
+   "              JOIN INNER ON (o_orderkey = l_orderkey)  (est ~79358, actual 75871 rows, 47.6 ms; build 156739 rows, 9.84 ms)",
+   "                FILTER (o_orderstatus = 'F')  (est ~499817, actual 729413 rows, 10.7 ms)",
+   "                  SCAN orders [o_orderkey, o_orderstatus] prune(o_orderstatus = F)  (est ~1500000, actual 1500000 rows, 4.81 ms)",
+   "                JOIN INNER ON (s_suppkey = l_suppkey)  (est ~79358, actual 156739 rows, 98.1 ms; build 411 rows, 0.08 ms)",
+   "                  FILTER (l_receiptdate > l_commitdate)  (est ~2000405, actual 3793296 rows, 15.8 ms)",
+   "                    SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 33.3 ms)",
+   "                  JOIN INNER ON (s_nationkey = n_nationkey)  (est ~399, actual 411 rows, 0.15 ms; build 1 rows, 0.01 ms)",
+   "                    SCAN supplier [s_suppkey, s_name, s_nationkey]  (est ~10000, actual 10000 rows, 0.00 ms)",
+   "                    FILTER (n_name = 'SAUDI ARABIA')  (est ~1, actual 1 rows, 0.00 ms)",
+   "                      SCAN nation [n_nationkey, n_name] prune(n_name = SAUDI ARABIA)  (est ~25, actual 25 rows, 0.00 ms)",
+   "            SCAN lineitem [l_orderkey, l_suppkey]  (est ~6001215, actual 6001215 rows, 21.5 ms)",
+   "          FILTER (l_receiptdate > l_commitdate)  (est ~2000405, actual 3793296 rows, 32.5 ms)",
+   "            SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 66.9 ms)",
+   "Planning: 0.02 ms",
+   "Execution: 190 ms on 16 threads, 100 rows returned",
+   "(operator times are summed over threads)"
+  ]
+ }
+}

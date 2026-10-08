@@ -11,6 +11,7 @@ import argparse
 import glob
 import json
 import math
+import re
 import os
 import sys
 
@@ -21,6 +22,7 @@ import common  # noqa: E402
 NUM = {}  # key -> value, written to numbers.json
 TEXT = {}  # key -> the text the report prints
 TABLES = {}
+TAUS = []  # [configuration, threads, tie band]
 
 
 def num(key, value, text=None):
@@ -65,14 +67,33 @@ def put_table(name, header, rows, align=None):
 
 # ---------------------------------------------------------------------------------- TPC-H tables
 
-def correctness(results_dir, sf):
-    """{(engine, query): status} from the verification files of this scale factor."""
+def correctness(results_dir, sf, threads):
+    """{(engine, query): status} from the verification run of this scale factor and thread count
+    (verify_sf<sf>_t<threads>.json); empty if there was none."""
     out = {}
-    for p in glob.glob(os.path.join(results_dir, f"verify_sf{sf:g}*.json")):
+    for p in glob.glob(os.path.join(results_dir, f"verify_sf{sf:g}_t{threads}.json")):
         for engine, qs in json.load(open(p)).items():
             for q, v in qs.items():
                 out[(engine, q)] = v["status"]
     return out
+
+
+def stage_tau(st, ref="duckdb"):
+    """The tie band of a configuration: the 90th percentile, over queries and engines, of the relative
+    interquartile range of the per-round ratio engine / ref. It is the measured noise of the very
+    statistic that is compared (two engines measured minutes apart in each round), taken under the
+    conditions of this campaign."""
+    spreads = []
+    for e in st.engines:
+        if e in (ref, "sqlite"):
+            continue
+        for q in st.queries:
+            ca, cb = st.cell(e, q), st.cell(ref, q)
+            if ca and cb and ca.ok and cb.ok:
+                v = [ca.round_median[r] / cb.round_median[r] for r in ca.round_median if r in cb.round_median]
+                if len(v) >= 3:
+                    spreads.append(common.iqr(v) / common.median(v))
+    return common.quantile(spreads, 0.9) if spreads else 0.1
 
 
 def tpch_stage_tables(st, name, ref, tau, bad):
@@ -96,6 +117,7 @@ def tpch_stage_tables(st, name, ref, tau, bad):
             else:
                 mark = " ✗" if bad.get((e, q), "ok") not in ("ok", "ok-tie-order") else ""
                 row.append(fmt_ms(c.median()) + mark)
+                NUM[f"ms_{name}_{e}_{q}"] = c.median()
         rows.append(row)
     common_qs = st.common_queries(engines)
     row = ["**geometric mean** (ms)"]
@@ -113,6 +135,8 @@ def tpch_stage_tables(st, name, ref, tau, bad):
                 continue
             r = st.ratio_query(e, ref, q)
             row.append(fmt_ratio(r, tau))
+            if r:
+                NUM[f"r_{name}_{e}_{q}"] = r[0]
         rows.append(row)
     row = ["**geometric mean**"]
     for e in engines:
@@ -307,6 +331,53 @@ def codebase_numbers():
     num("micro_queries", len(workloads.MICRO_QUERIES))
 
 
+def standing_one(st, key, tt):
+    """Where cdb stands against each engine of a stage: geometric-mean ratio, and how many queries it
+    wins, ties or loses (a win or loss needs the 95% interval to exclude 1 and a gap larger than the
+    tie band); and which engine is fastest on how many queries."""
+    if "cdb" not in st.engines:
+        return
+    rows = []
+    for e in st.engines:
+        if e == "cdb":
+            continue
+        qs = st.common_queries(["cdb", e])
+        if not qs:
+            continue
+        med, lo, hi = st.ratio_geomean("cdb", e, qs)
+        win = tie = loss = 0
+        for q in qs:
+            r = st.ratio_query("cdb", e, q)
+            if r is None:
+                continue
+            m, l, h = r
+            if (l <= 1.0 <= h) or abs(m - 1) < tt:
+                tie += 1
+            elif m < 1:
+                win += 1
+            else:
+                loss += 1
+        rows.append([A.NAMES[e], len(qs), f"{med:.2f} [{lo:.2f}, {hi:.2f}]", win, tie, loss])
+        NUM[f"standing_{key}_{e}_ratio"], NUM[f"standing_{key}_{e}_win"] = med, win
+        NUM[f"standing_{key}_{e}_tie"], NUM[f"standing_{key}_{e}_loss"] = tie, loss
+    if rows:
+        put_table(f"standing_{key}", ["cdb against", "Queries", "cdb time / their time (geometric mean) [95% interval]",
+                                      "cdb faster", "tie", "cdb slower"], rows)
+    counts = {e: 0 for e in st.engines}
+    for q in st.queries:
+        vals = {e: st.cell(e, q).median() for e in st.engines if st.cell(e, q) and st.cell(e, q).ok}
+        if len(vals) >= 2:
+            counts[min(vals, key=vals.get)] += 1
+    put_table(f"fastest_{key}", ["Engine", "Queries on which it is fastest"], [[A.NAMES[e], counts[e]] for e in st.engines])
+    for e in st.engines:
+        NUM[f"fastest_{key}_{e}"] = counts[e]
+
+
+def standing_tables(stages, tau):
+    for (sf, t), st in sorted(stages.items()):
+        standing_one(st, f"sf{sf:g}_t{t}", getattr(st, "tau", None) or stage_tau(st))
+
+
 def load_memory_table(res, stages):
     rows = []
     for t in (1, 16):
@@ -328,12 +399,20 @@ def load_memory_table(res, stages):
                 num("stored_ratio", 1408 / (common.median(stored) / 1048576), f"{1408 / (common.median(stored) / 1048576):.1f}")
             NUM[f"load_{e}_t{t}"] = common.median(load)
             NUM[f"rss_{e}_t{t}"] = common.median(hwm) / 1024
+    if "load_cdb_t1" in NUM and "load_cdb_t16" in NUM:
+        num("load_ratio_cdb", NUM["load_cdb_t1"] / NUM["load_cdb_t16"], f"{NUM['load_cdb_t1'] / NUM['load_cdb_t16']:.1f}")
     if rows:
         put_table("load_memory_sf1", ["Engine", "Threads", "Load, all 8 tables (s)", "Peak RSS after load (MB)",
                                       "Peak RSS after all queries (MB)", "cdb storage (MB)"], rows)
 
 
 def efficiency_table(stages):
+    for t in (1, 16):  # the effective parallelism at the small scale factor, for the discussion of 6.4
+        st = stages.get((0.1, t))
+        if st:
+            for e in st.engines:
+                qs = st.common_queries([e])
+                NUM[f"par_{e}_sf0.1_t{t}"] = sum(st.cell(e, q).cpu() for q in qs) / sum(st.cell(e, q).median() for q in qs)
     rows = []
     for t in (1, 16):
         st = stages.get((1, t))
@@ -345,6 +424,8 @@ def efficiency_table(stages):
             cpu = sum(st.cell(e, q).cpu() for q in qs)
             rows.append([A.NAMES[e], t, len(qs), f"{wall / 1000:.2f}", f"{cpu / 1000:.2f}", f"{cpu / wall:.1f}"])
             NUM[f"cpu_s_{e}_t{t}"] = cpu / 1000
+            if e == "duckdb" and f"cpu_s_cdb_t{t}" in NUM:
+                num(f"cpu_ratio_t{t}", NUM[f"cpu_s_cdb_t{t}"] / (cpu / 1000), f"{NUM[f'cpu_s_cdb_t{t}'] / (cpu / 1000):.1f}")
             NUM[f"par_{e}_t{t}"] = cpu / wall
     if rows:
         put_table("efficiency_sf1", ["Engine", "Threads", "Queries", "Sum of wall times (s)", "Sum of CPU times (s)",
@@ -365,6 +446,7 @@ def sf_scaling_table(stages):
                 qs = c if qs is None else [q for q in qs if q in c]
             g = [stages[(sf, t)].geomean(e, qs)[0] for sf in have]
             rows.append([A.NAMES[e], t] + [fmt_ms(x) for x in g] + [f"{g[-1] / g[0]:.1f}x over {have[-1] / have[0]:g}x the data"])
+            NUM[f"growth_{e}_t{t}"] = g[-1] / g[0]
     if rows:
         put_table("sf_scaling", ["Engine", "Threads"] + [f"SF{sf:g} (ms)" for sf in (0.1, 1, 3)][:len(rows[0]) - 3] + ["Growth"], rows)
 
@@ -385,8 +467,8 @@ def cold_warm_table(stages):
 
 def correctness_table(res):
     out = {}
-    for p in sorted(glob.glob(os.path.join(res, "verify_sf*.json"))):
-        name = os.path.basename(p)[len("verify_"):-5]
+    for p in sorted(glob.glob(os.path.join(res, "verify_sf*_t*.json")) + glob.glob(os.path.join(res, "check_*_t*.json"))):
+        name = os.path.basename(p).replace("verify_", "").replace("check_", "")[:-5]
         for engine, qs in json.load(open(p)).items():
             ok = sum(1 for v in qs.values() if v["status"] in ("ok", "ok-tie-order"))
             na = sum(1 for v in qs.values() if v["status"] == "n/a")
@@ -411,7 +493,11 @@ def correctness_table(res):
                 row.append("–")
         row.append("; ".join(notes) or "all answers match")
         rows.append(row)
-    put_table("correctness", ["Engine"] + [n.replace("_", " ").replace("sf", "SF") for n in names] + ["Not matching DuckDB's answer"],
+    def column_label(n):
+        wl, _, t = n.rpartition("_t")
+        wl = {"h2o-g1": "H2O groupby", "h2o-j1": "H2O join", "micro": "micro"}.get(wl, "TPC-H " + wl.replace("sf", "SF"))
+        return f"{wl}, {t} thr"
+    put_table("correctness", ["Engine"] + [column_label(n) for n in names] + ["Not matching the reference answer"],
               rows, ["l"] + ["r"] * len(names) + ["l"])
 
 
@@ -421,8 +507,13 @@ def workload_stage(res, name, plt, out, tau):
         st = A.Stage(os.path.join(res, f"{name}_t{t}.jsonl"))
         if not st.visits:
             continue
-        tau_t = tau[1 if t == 1 else 16]
+        tau_t = stage_tau(st)
+        st.tau = tau_t
+        num(f"tau_{name}_t{t}_pct", tau_t * 100, f"{tau_t * 100:.0f}")
+        TAUS.append([{"micro": "operator micro-benchmarks", "h2o-g1": "H2O-style groupby", "h2o-j1": "H2O-style join"}[name], t,
+                     f"{tau_t * 100:.0f}%"])
         qs = tpch_stage_tables(st, f"{name}_t{t}", "duckdb", tau_t, {})
+        standing_one(st, f"{name}_t{t}", tau_t)
         NUM[f"{name}_t{t}_queries"] = len(qs)
         for e in st.engines:
             if e != "duckdb":
@@ -479,6 +570,8 @@ def optimizer_section(res, plt, out):
         a, b = c[q], dk.get(q, 0)
         r = (max(a, 1) / max(b, 1))
         ratios.append(r)
+        NUM[f"r_cout_{q}"] = r
+        NUM[f"cout_{q}_cdb"], NUM[f"cout_{q}_duckdb"] = a, b
         rows.append([label(q), f"{a:,}", f"{b:,}", f"{r:.2f}" if a or b else "–"])
     rows.append(["**geometric mean**", "", "", f"**{common.geomean(ratios):.2f}**"])
     put_table("cout", ["Query", "cdb C_out (rows out of all joins)", "DuckDB C_out", "cdb / DuckDB"], rows)
@@ -521,7 +614,11 @@ def durability_section(res, plt, out):
         r = d[e]
         c = r.get("commit (durable)")
         n = r.get("commit (not durable)")
-        bulk = r.get("bulk load") or r.get("bulk load (log)")
+        bulk = r.get("bulk load")
+        if bulk is None and r.get("bulk load (log)"):
+            # cdb: the load logged and fsynced, plus the checkpoint that turns the log into the files
+            bulk = {"s": r["bulk load (log)"]["s"] + r.get("checkpoint", {}).get("s", 0)}
+            num("cdb_log_mb", r["bulk load (log)"]["log_mb"], f"{r['bulk load (log)']['log_mb']:,.0f}")
         size = (r.get("bulk load", {}).get("bytes") or r.get("checkpoint", {}).get("bytes") or 0) / 1048576
         rows.append([A.NAMES.get(e, e) if e != "chdb" else "ClickHouse (MergeTree)",
                      f"{c['mean_ms']:.2f} ms / {c['p99_ms']:.2f}" if c else "–",
@@ -529,13 +626,162 @@ def durability_section(res, plt, out):
                      f"{n['mean_ms']:.3f} ms" if n else "–",
                      f"{bulk['s']:.1f}" if bulk else "–", f"{size:,.0f}" if size else "–",
                      f"{r['reopen']['s']:.2f}" if r.get("reopen") else "–"])
+        if bulk:
+            num(f"bulk_s_{e}", bulk["s"], f"{bulk['s']:.1f}")
+        if size:
+            num(f"size_mb_{e}", size, f"{size:,.0f}")
         if c:
             num(f"commit_ms_{e}", c["mean_ms"], f"{c['mean_ms']:.2f}")
             num(f"commit_per_s_{e}", c["per_s"], f"{c['per_s']:,.0f}")
         if r.get("reopen"):
             num(f"reopen_s_{e}", r["reopen"]["s"], f"{r['reopen']['s']:.2f}")
+    if "commit_ms_cdb" in NUM and "commit_ms_sqlite" in NUM:
+        pct = (NUM["commit_ms_cdb"] / NUM["commit_ms_sqlite"] - 1) * 100
+        num("commit_vs_sqlite_pct", pct, f"{pct:.0f}")
     put_table("durability", ["Engine", "Durable commit: mean / p99", "Commits per second", "Not durable: mean",
                              "Bulk load SF1 (s)", "On disk (MB)", "Reopen + Q6 (s)"], rows)
+
+
+def bandwidth_table(res, stages_micro):
+    """The scan-bound micro-benchmarks as a share of what the memory system can deliver (membw.cpp)."""
+    p = os.path.join(res, "membw.txt")
+    if not os.path.exists(p):
+        return
+    bw = {}
+    for line in open(p):
+        parts = line.split()
+        if len(parts) == 3 and parts[0].isdigit():
+            bw[int(parts[0])] = (float(parts[1]), float(parts[2]))
+    if 1 not in bw or 16 not in bw:
+        return
+    num("membw_read_1", bw[1][0], f"{bw[1][0]:.1f}")
+    num("membw_read_16", bw[16][0], f"{bw[16][0]:.1f}")
+    if 4 in bw:
+        num("membw_read_4", bw[4][0], f"{bw[4][0]:.1f}")
+    num("membw_copy_16", bw[16][1], f"{bw[16][1]:.1f}")
+    rows = []
+    # logical bytes each query must look at: scan_sum reads v (8 B x 10M); filter_* read i (4 B) and v (8 B); scan_expr v and i
+    logical = {"scan_sum": 8e7, "scan_expr": 1.2e8, "scan_minmax": 1.2e8, "filter_10pct": 1.2e8, "filter_90pct": 1.2e8}
+    for q, nbytes in logical.items():
+        for t in (1, 16):
+            st = stages_micro.get(t)
+            if not st:
+                continue
+            row = [q, t]
+            for e in ("cdb", "duckdb", "datafusion", "chdb", "polars"):
+                c = st.cell(e, q)
+                if c and c.ok:
+                    gbs = nbytes / (c.median() / 1000) / 1e9
+                    row.append(f"{gbs:.1f} ({100 * gbs / bw[t][0]:.0f}%)")
+                    NUM[f"gbs_{e}_t{t}_{q}"] = gbs
+                else:
+                    row.append("–")
+            rows.append(row)
+    put_table("bandwidth", ["Query", "Threads"] + [A.NAMES[e].replace(" (chDB)", "") for e in ("cdb", "duckdb", "datafusion", "chdb", "polars")], rows)
+
+
+def short_function(name):
+    """`???:cdb::KeyComparator::StoredEqualsInput(...) const [path]` -> `cdb::KeyComparator::StoredEqualsInput`."""
+    import re
+    n = name.split(" [")[0]
+    n = n.split(":", 1)[1] if ":" in n and n.split(":", 1)[0] in ("???", "") or n.startswith("./") else n
+    n = n.replace("(anonymous namespace)::", "")
+    n = re.sub(r"^(void|bool|auto|unsigned long|unsigned int\*?|decltype\(auto\))\s+", "", n)
+    n = n.split("(")[0].split("<")[0]
+    return n[:64]
+
+
+def profile_section(res):
+    """Instruction counts and simulated last-level data misses of one warm execution (callgrind with a
+    cache simulation), cdb against DuckDB, and where cdb's instructions go."""
+    d = os.path.join(res, "profiles")
+    if not os.path.isdir(d):
+        return
+    def load(e, q):
+        p = os.path.join(d, f"{e}_{q}.json")
+        if not os.path.exists(p):
+            return None
+        j = json.load(open(p))
+        ev = j["events"]
+        return {"ir": j["totals"][ev.index("Ir")], "dlmr": j["totals"][ev.index("DLmr")], "funcs": j["top_functions"]}
+    order = [("topn_10", "micro: top-10 of 1M rows"), ("sort_5m", "micro: sort 1M rows"), ("join_1k", "micro: join, 1,000-row build"),
+             ("join_1m", "micro: join, 1M-row build"), ("agg_100k", "micro: 100,000 groups"), ("agg_1m", "micro: 1M groups"),
+             ("scan_count", "micro: count(*)"), ("scan_sum", "micro: sum of a column"), ("filter_90pct", "micro: filter 90%, sum"),
+             ("q1", "TPC-H Q1, SF0.1"), ("q6", "TPC-H Q6"), ("q9", "TPC-H Q9"), ("q17", "TPC-H Q17"), ("q20", "TPC-H Q20")]
+    rows, top = [], []
+    for q, label_ in order:
+        a, b = load("cdb", q), load("duckdb", q)
+        if not a:
+            continue
+        r = [label_, f"{a['ir'] / 1e6:,.0f}", f"{b['ir'] / 1e6:,.0f}" if b else "–", f"{a['ir'] / b['ir']:.1f}" if b else "–",
+             f"{a['dlmr'] / 1e3:,.0f}", f"{b['dlmr'] / 1e3:,.0f}" if b else "–"]
+        rows.append(r)
+        if b:
+            NUM[f"ir_ratio_{q}"] = a["ir"] / b["ir"]
+            NUM[f"dlmr_ratio_{q}"] = a["dlmr"] / max(1, b["dlmr"])
+        NUM[f"ir_cdb_{q}"], NUM[f"ir_duckdb_{q}"] = a["ir"], b["ir"] if b else 0
+        num(f"irm_cdb_{q}", a["ir"] / 1e6, f"{a['ir'] / 1e6:,.0f}")
+        if b:
+            num(f"irm_duckdb_{q}", b["ir"] / 1e6, f"{b['ir'] / 1e6:,.0f}")
+        fn = [f for f in a["funcs"] if f["pct"] >= 4.0][:3]
+        top.append([label_] + [f"{f['pct']:.0f}% `{short_function(f['name'])}`" for f in fn] + [""] * (3 - len(fn)))
+        for k, f in enumerate(fn):
+            NUM[f"top{k}_pct_{q}"] = f["pct"]
+    if rows:
+        put_table("profile", ["Query", "cdb instructions (M)", "DuckDB (M)", "cdb / DuckDB", "cdb simulated LL read misses (k)",
+                              "DuckDB (k)"], rows)
+        put_table("profile_top", ["Query", "Largest function of cdb", "Second", "Third"], top, ["l", "l", "l", "l"])
+
+
+def scaling_probe_section(res):
+    rows = []
+    for q in (4, 21):
+        p = os.path.join(res, f"scaling_q{q:02d}.json")
+        if not os.path.exists(p):
+            continue
+        d = json.load(open(p))
+        for t in ("1", "16"):
+            r = d[t]
+            outside = 1 - r["operator_own_cpu_ms"] / r["process_cpu_ms"]
+            rows.append([f"Q{q}", t, f"{r['wall_ms']:.0f}", f"{r['process_cpu_ms']:.0f}", f"{r['operator_own_cpu_ms']:.0f}",
+                         f"{100 * outside:.0f}%"])
+            NUM[f"scal_q{q}_t{t}_outside"] = 100 * outside
+            NUM[f"scal_q{q}_t{t}_wall"] = r["wall_ms"]
+            NUM[f"scal_q{q}_t{t}_cpu"] = r["process_cpu_ms"]
+            NUM[f"scal_q{q}_t{t}_ops"] = r["operator_own_cpu_ms"]
+            for line in r["explain_analyze"]:
+                m = re.search(r"SCAN lineitem .*actual \d+ rows, ([0-9.]+) ms", line)
+                if m:
+                    NUM[f"scal_q{q}_t{t}_scan_lineitem_ms"] = float(m.group(1))
+                m = re.search(r"build (\d+) rows", line)
+                if m:
+                    NUM[f"scal_q{q}_build_rows"] = int(m.group(1))
+                    TEXT[f"scal_q{q}_build_rows"] = f"{int(m.group(1)) / 1e6:.1f} million"
+        NUM[f"scal_q{q}_speedup"] = d["1"]["wall_ms"] / d["16"]["wall_ms"]
+        if f"scal_q{q}_t16_scan_lineitem_ms" in NUM:
+            NUM[f"scal_q{q}_scan_cpu_ratio"] = NUM[f"scal_q{q}_t16_scan_lineitem_ms"] / NUM[f"scal_q{q}_t1_scan_lineitem_ms"]
+    if rows:
+        put_table("scaling_probe", ["Query", "Threads", "Wall (ms)", "Process CPU (ms)", "CPU inside operators (ms)",
+                                    "CPU outside operators"], rows)
+
+
+def headline_table(res):
+    """One row per engine: the numbers of the summary (all ratios to DuckDB, geometric means over queries)."""
+    cols = [("sf1_t1", "TPC-H SF1, 1 thread"), ("sf1_t16", "SF1, 16 threads"), ("sf0.1_t16", "SF0.1, 16 threads"),
+            ("micro_t1", "operators, 1 thread"), ("h2o-g1_t1", "H2O groupby, 1 thread"), ("h2o-j1_t1", "H2O join, 1 thread")]
+    rows = []
+    for e in ("cdb", "duckdb", "datafusion", "chdb", "polars", "sqlite"):
+        row = [A.NAMES[e]]
+        for key, _ in cols:
+            if e == "duckdb":
+                row.append("1")
+                continue
+            v = NUM.get(f"{key}_ratio_{e}") if key.startswith("sf") else NUM.get(f"{key}_ratio_{e}")
+            row.append(f"{v:.2f}" if v is not None else "–")
+        rss = NUM.get(f"rss_{e}_t1")
+        row.append(f"{rss:,.0f}" if rss else "–")
+        rows.append(row)
+    put_table("headline", ["Engine"] + [c[1] for c in cols] + ["Peak RSS, SF1, 1 thread (MB)"], rows)
 
 
 def noise_chart(plt, res, out):
@@ -601,6 +847,14 @@ def run(args):
     noise_files = sorted(glob.glob(os.path.join(res, "noise_*.jsonl")))
     rows, tau = A.noise_summary(noise_files) if noise_files else ([], {1: 0.05, 16: 0.1})
     NUM["tau1"], NUM["tau16"] = tau[1], tau[16]
+    for t in (1, 16):
+        sp = [r["spread"] for r in rows if r["threads"] == t]
+        if sp:
+            num(f"noise_spread{t}_min", min(sp) * 100, f"{min(sp) * 100:.0f}")
+            num(f"noise_spread{t}_max", max(sp) * 100, f"{max(sp) * 100:.0f}")
+    if rows:
+        num("noise_ghz_min", min(r["freq_avg_mhz"] for r in rows) / 1000, f"{min(r['freq_avg_mhz'] for r in rows) / 1000:.1f}")
+        num("noise_ghz_max", max(r["freq_avg_mhz"] for r in rows) / 1000, f"{max(r['freq_avg_mhz'] for r in rows) / 1000:.1f}")
     if rows:
         trows = []
         for r in sorted(rows, key=lambda r: (r["threads"], r["engine"], r["query"], r["stage"])):
@@ -617,10 +871,13 @@ def run(args):
             if st.visits:
                 stages[(sf, t)] = st
     for (sf, t), st in stages.items():
-        bad = correctness(res, sf)
-        tau_t = tau[1 if t == 1 else 16]
-        qs = tpch_stage_tables(st, f"tpch_sf{sf:g}_t{t}", "duckdb", tau_t, bad)
+        bad = correctness(res, sf, t)
+        tau_t = stage_tau(st)
         key = f"sf{sf:g}_t{t}"
+        num(f"tau_{key}_pct", tau_t * 100, f"{tau_t * 100:.0f}")
+        st.tau = tau_t
+        TAUS.append([f"TPC-H SF{sf:g}", t, f"{tau_t * 100:.0f}%"])
+        qs = tpch_stage_tables(st, f"tpch_sf{sf:g}_t{t}", "duckdb", tau_t, bad)
         NUM[f"{key}_queries"] = len(qs)
         for e in st.engines:
             NUM[f"{key}_gm_{e}"] = st.geomean(e, qs)[0]
@@ -659,16 +916,23 @@ def run(args):
                 g = st.geomean(e, qs)[0]
                 base = base or g
                 row.append(f"{fmt_ms(g)} ({base / g:.1f}x)")
+                NUM[f"speedup{t}_{e}"] = base / g
             rows.append(row)
         put_table("scaling_sf1", ["Engine"] + [f"{t} thr" for t in sorted(by_t)], rows)
 
     codebase_numbers()
+    for t in (1, 16):
+        r = NUM.get(f"sf1_t{t}_ratio_sqlite")
+        c = NUM.get(f"sf1_t{t}_ratio_cdb")
+        if r and c:
+            num(f"sf1_t{t}_sqlite_over_cdb", r / c, f"{r / c:.1f}")
     num("results_date", os.path.basename(res.rstrip("/")))
     environment(res)
-    num("tau1_pct", tau[1] * 100, f"{tau[1] * 100:.0f}")
-    num("tau16_pct", tau[16] * 100, f"{tau[16] * 100:.0f}")
+    num("single_run_spread1_pct", tau[1] * 100, f"{tau[1] * 100:.0f}")
+    num("single_run_spread16_pct", tau[16] * 100, f"{tau[16] * 100:.0f}")
     num("rounds_sf1", max([len(stages[(1, t)].rounds) for t in (1, 16) if (1, t) in stages] or [0]))
     num("sf3_note", "and 3 (only if memory allowed)" if (3, 1) in stages else "(SF3 was not run: the desktop did not leave enough free memory)")
+    standing_tables(stages, tau)
     load_memory_table(res, stages)
     efficiency_table(stages)
     sf_scaling_table(stages)
@@ -677,14 +941,30 @@ def run(args):
     variants_table(res, stages)
     for name in ("micro", "h2o-g1", "h2o-j1"):
         workload_stage(res, name, plt, out, tau)
+    profile_section(res)
+    scaling_probe_section(res)
+    bandwidth_table(res, {t: A.Stage(os.path.join(res, f"micro_t{t}.jsonl")) for t in (1, 16)})
     optimizer_section(res, plt, out)
     durability_section(res, plt, out)
+    headline_table(res)
     noise_chart(plt, res, out)
     memory_chart(plt, stages, out)
+    put_table("tau", ["Configuration", "Threads", "Tie band τ"], sorted(TAUS, key=lambda r: (r[0], r[1])), ["l", "r", "r"])
     abl = os.path.join(res, "ablation_sf0.01.md")
     if os.path.exists(abl):
         TABLES["ablation"] = open(abl).read()
-    json.dump({"raw": NUM, "text": {**{k: (f"{v:,}" if isinstance(v, int) else (f"{v:.2f}" if isinstance(v, float) else str(v))) for k, v in NUM.items()}, **TEXT}},
+        num("ablation_dnf", TABLES["ablation"].count("> 45 s"))
+    def default_text(k, v):
+        if k.startswith("top") and "_pct_" in k or k.startswith("scal_") and k.endswith("_outside"):
+            return f"{v:.0f}"
+        if k.startswith(("ir_ratio_", "dlmr_ratio_", "r_cout_", "scal_")) and isinstance(v, float):
+            return f"{v:.1f}" if v >= 0.1 else f"{v:.2f}"
+        if k.startswith(("ms_", "cpu_s_", "load_", "rss_")):
+            return fmt_ms(v) if k.startswith("ms_") else (f"{v:,.0f}" if k.startswith("rss_") else f"{v:.1f}")
+        if isinstance(v, int):
+            return f"{v:,}"
+        return f"{v:.2f}" if isinstance(v, float) else str(v)
+    json.dump({"raw": NUM, "text": {**{k: default_text(k, v) for k, v in NUM.items()}, **TEXT}},
               open(os.path.join(out, "numbers.json"), "w"), indent=1, sort_keys=True)
     for name, text in TABLES.items():
         open(os.path.join(out, "tables", f"{name}.md"), "w").write(text)
