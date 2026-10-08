@@ -1,0 +1,1 @@
+SELECT count(*) FROM t WHERE i < 50000 AND v > 500.0 AND k1k < 500

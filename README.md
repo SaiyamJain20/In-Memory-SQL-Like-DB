@@ -25,6 +25,10 @@ optimizer — built to be small enough to read end to end, and verified against 
 > yet). Every number is in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) with machine, build and
 > command; see the [roadmap](docs/ROADMAP.md) and the dated log [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
+**Evaluation.** [`docs/REPORT.md`](docs/REPORT.md) is a measured comparison with DuckDB, DataFusion, ClickHouse, Polars and
+SQLite (TPC-H, operator micro-benchmarks, the H2O.ai-style groupby and join, optimizer estimates, durability), with how the engine
+works, the tools used and the noise of the machine stated; its raw data and one-command reproduction are in `bench/report/`.
+
 ## Try it
 ```bash
 cmake --preset release && cmake --build --preset release

@@ -16,5 +16,6 @@ compile_commands.json
 
 # Python tooling
 .venv/
+.venv-bench/
 venv/
 __pycache__/

@@ -1,0 +1,179 @@
+{
+ "engine": "cdb",
+ "query": "q01",
+ "sf": 0.1,
+ "events": [
+  "Ir",
+  "Dr",
+  "Dw",
+  "I1mr",
+  "D1mr",
+  "D1mw",
+  "ILmr",
+  "DLmr",
+  "DLmw"
+ ],
+ "totals": [
+  327905537,
+  104451809,
+  32424810,
+  84741,
+  2728683,
+  1459977,
+  4846,
+  189685,
+  85475
+ ],
+ "top_functions": [
+  {
+   "ir": 90834898,
+   "pct": 27.7,
+   "dlmr": 322,
+   "name": "???:cdb::KeyComparator::StoredEqualsInput(cdb::ChunkStore const&, unsigned long, unsigned long) const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-L"
+  },
+  {
+   "ir": 68694104,
+   "pct": 20.95,
+   "dlmr": 13639,
+   "name": "???:cdb::(anonymous namespace)::SumDoubleState::Update(unsigned int const*, cdb::Vector const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-Mem"
+  },
+  {
+   "ir": 40874226,
+   "pct": 12.47,
+   "dlmr": 15166,
+   "name": "???:cdb::(anonymous namespace)::AvgState<double>::Update(unsigned int const*, cdb::Vector const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-M"
+  },
+  {
+   "ir": 29798258,
+   "pct": 9.09,
+   "dlmr": 58001,
+   "name": "???:auto cdb::HashVector(cdb::Vector const&, unsigned long, unsigned long*, bool)::{lambda(auto:1)#1}::operator()<cdb::string_t>(cdb::string_t) const "
+  },
+  {
+   "ir": 20770979,
+   "pct": 6.33,
+   "dlmr": 16,
+   "name": "???:cdb::KeyIndex::FindOrInsert(cdb::DataChunk const&, unsigned long, unsigned int*, std::vector<unsigned int, std::allocator<unsigned int> >*) [/home"
+  },
+  {
+   "ir": 14315970,
+   "pct": 4.37,
+   "dlmr": 13812,
+   "name": "???:cdb::(anonymous namespace)::EvalOperator(cdb::ExprNode&, cdb::(anonymous namespace)::Input const&, cdb::Vector&)'2 [/home/saiyamjain/Desktop/Githu"
+  },
+  {
+   "ir": 10047324,
+   "pct": 3.06,
+   "dlmr": 1,
+   "name": "???:cdb::Vector::Slice(cdb::SelectionVector const&, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench/cdb_repo"
+  },
+  {
+   "ir": 9530260,
+   "pct": 2.91,
+   "dlmr": 13824,
+   "name": "???:cdb::(anonymous namespace)::EvalOperator(cdb::ExprNode&, cdb::(anonymous namespace)::Input const&, cdb::Vector&) [/home/saiyamjain/Desktop/Github/"
+  },
+  {
+   "ir": 4753076,
+   "pct": 1.45,
+   "dlmr": 13698,
+   "name": "???:void cdb::(anonymous namespace)::ArithmeticByType<cdb::(anonymous namespace)::AddOp>(cdb::PhysicalType, cdb::Vector const&, cdb::Vector const&, cd"
+  },
+  {
+   "ir": 4023840,
+   "pct": 1.23,
+   "dlmr": 7749,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<4u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-S"
+  },
+  {
+   "ir": 3956160,
+   "pct": 1.21,
+   "dlmr": 1,
+   "name": "???:cdb::kernels::(anonymous namespace)::OffsetsToScaledDoubleAvx2(unsigned long const*, unsigned long, long, double, double*) [/home/saiyamjain/Deskt"
+  },
+  {
+   "ir": 2961338,
+   "pct": 0.9,
+   "dlmr": 0,
+   "name": "???:cdb::(anonymous namespace)::CountStarState::Update(unsigned int const*, cdb::Vector const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-Mem"
+  },
+  {
+   "ir": 2380518,
+   "pct": 0.73,
+   "dlmr": 0,
+   "name": "./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_chk_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 2283840,
+   "pct": 0.7,
+   "dlmr": 23074,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<24u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-"
+  },
+  {
+   "ir": 2144880,
+   "pct": 0.65,
+   "dlmr": 11554,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<12u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-"
+  },
+  {
+   "ir": 2097360,
+   "pct": 0.64,
+   "dlmr": 5795,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<6u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-S"
+  },
+  {
+   "ir": 2009040,
+   "pct": 0.61,
+   "dlmr": 1953,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<2u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-S"
+  },
+  {
+   "ir": 2007840,
+   "pct": 0.61,
+   "dlmr": 992,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<1u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-S"
+  },
+  {
+   "ir": 1959293,
+   "pct": 0.6,
+   "dlmr": 630,
+   "name": "./malloc/./malloc/malloc.c:_int_malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 1766400,
+   "pct": 0.54,
+   "dlmr": 43,
+   "name": "???:cdb::(anonymous namespace)::DictionaryStrings::DecodeVector(unsigned long, unsigned long, cdb::ValidityMask const&, cdb::Vector&) const [/home/sai"
+  },
+  {
+   "ir": 1660753,
+   "pct": 0.51,
+   "dlmr": 6933,
+   "name": "???:cdb::kernels::(anonymous namespace)::SelectInt32Avx2(cdb::kernels::CmpOp, int const*, unsigned long, int, unsigned int*) [/home/saiyamjain/Desktop"
+  },
+  {
+   "ir": 987360,
+   "pct": 0.3,
+   "dlmr": 0,
+   "name": "???:cdb::kernels::OffsetsToInt32(unsigned long const*, unsigned long, unsigned long, int*) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/buil"
+  },
+  {
+   "ir": 955872,
+   "pct": 0.29,
+   "dlmr": 25,
+   "name": "./malloc/./malloc/malloc.c:_int_free [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 602478,
+   "pct": 0.18,
+   "dlmr": 136,
+   "name": "./malloc/./malloc/malloc.c:malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 484764,
+   "pct": 0.15,
+   "dlmr": 59,
+   "name": "./malloc/./malloc/malloc.c:free [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  }
+ ]
+}

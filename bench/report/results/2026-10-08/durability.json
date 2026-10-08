@@ -1,0 +1,117 @@
+{
+ "sf": 1.0,
+ "commits": 2000,
+ "threads": 1,
+ "probe": {
+  "cpu_s": 0.3339219600020442,
+  "mem_s": 0.013901044001007298,
+  "load1": 8.18,
+  "running": 1,
+  "mem_available_mb": 6253,
+  "freq_min": 1095.838,
+  "freq_avg": 1596.549625,
+  "freq_max": 4454.912,
+  "t": 1791419268.2559216
+ },
+ "engines": {
+  "cdb": {
+   "raw": "cdb_persist: TPC-H SF1, 1 thread(s), data on /home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/durability_scratch/cdb_persist\n\n1. commit latency, single-row INSERT\n  fsync per statement (Full)              1884 stmts/s   mean    530.9 us   p50    498.1   p99    837.1   max   16327.7\n  no fsync (Off)                         35446 stmts/s   mean     28.2 us   p50     28.2   p99     47.4   max     362.7\n  in memory                             109701 stmts/s   mean      9.1 us   p50      8.5   p99     22.0   max     339.9\n\n2. loading TPC-H SF1 with COPY\n  in memory                                8.63 s   (8661245 rows)\n  persistent, every row logged+fsynced     9.11 s   log 1041.0 MB\n\n3. CHECKPOINT\n  write checkpoint                         0.66 s   file 505.9 MB (stored data in memory: see cdb_tpch)\n\n4. reopen from the checkpoint\n  open + load all tables                   0.27 s   (8 tables, 8661245 rows, 0 log statements replayed)   vs 8.63 s to COPY the CSV files\n  Q6 on the reopened database             46.92 ms\n  peak RSS so far: 789 MB\n\n5. recovery that replays the whole log (no checkpoint)\n  open + replay 1041.0 MB of log             3.27 s   (16 statements, 78 frames, 8661245 rows)\n",
+   "commit (durable)": {
+    "per_s": 1884.0,
+    "mean_ms": 0.5308999999999999,
+    "p50_ms": 0.49810000000000004,
+    "p99_ms": 0.8371000000000001,
+    "max_ms": 16.3277
+   },
+   "commit (not durable)": {
+    "per_s": 35446.0,
+    "mean_ms": 0.0282,
+    "p50_ms": 0.0282,
+    "p99_ms": 0.0474,
+    "max_ms": 0.36269999999999997
+   },
+   "bulk load (log)": {
+    "s": 9.11,
+    "log_mb": 1041.0
+   },
+   "checkpoint": {
+    "s": 0.66,
+    "bytes": 530474598.4
+   },
+   "reopen": {
+    "s": 0.31692000000000004,
+    "open_s": 0.27
+   },
+   "recovery by log replay": {
+    "s": 3.27
+   }
+  },
+  "sqlite": {
+   "commit (durable)": {
+    "n": 2000,
+    "mean_ms": 0.4293376123823691,
+    "p50_ms": 0.48191399764618836,
+    "p99_ms": 0.7013753842329606,
+    "max_ms": 6.45832100417465,
+    "per_s": 2329.169332384039
+   },
+   "commit (not durable)": {
+    "n": 2000,
+    "mean_ms": 0.010712219373090193,
+    "p50_ms": 0.01069999416358769,
+    "p99_ms": 0.018395218867226493,
+    "max_ms": 0.0742109987186268,
+    "per_s": 93351.33693322846
+   },
+   "bulk load": {
+    "s": 38.364083414999186,
+    "bytes": 1149665280
+   },
+   "reopen": {
+    "s": 0.5807709959990461
+   }
+  },
+  "duckdb": {
+   "commit (durable)": {
+    "n": 2000,
+    "mean_ms": 1.109886495902174,
+    "p50_ms": 0.810696499684127,
+    "p99_ms": 5.727186573276412,
+    "max_ms": 259.3058340062271,
+    "per_s": 900.9930327939953
+   },
+   "bulk load": {
+    "s": 8.302823230995273,
+    "bytes": 272642048
+   },
+   "reopen": {
+    "s": 0.021504138996533584
+   }
+  },
+  "chdb": {
+   "commit (durable)": {
+    "n": 500,
+    "mean_ms": 5.167258952118573,
+    "p50_ms": 4.982078000466572,
+    "p99_ms": 15.723489975644041,
+    "max_ms": 22.687161996145733,
+    "per_s": 193.52620204760603
+   },
+   "commit (not durable)": {
+    "n": 500,
+    "mean_ms": 1.3214215801126556,
+    "p50_ms": 1.1879814992425963,
+    "p99_ms": 2.451457019342342,
+    "max_ms": 3.0862499988870695,
+    "per_s": 756.7607605702539
+   },
+   "bulk load": {
+    "s": 8.909910116999527,
+    "bytes": 807124861
+   },
+   "reopen": {
+    "s": 0.08190523400116945
+   }
+  }
+ }
+}

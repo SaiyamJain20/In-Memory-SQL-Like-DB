@@ -1,0 +1,179 @@
+{
+ "engine": "duckdb",
+ "query": "agg_100k",
+ "sf": 0.1,
+ "events": [
+  "Ir",
+  "Dr",
+  "Dw",
+  "I1mr",
+  "D1mr",
+  "D1mw",
+  "ILmr",
+  "DLmr",
+  "DLmw"
+ ],
+ "totals": [
+  112180586,
+  27665403,
+  17394536,
+  265364,
+  7181078,
+  2140217,
+  22906,
+  1168569,
+  216257
+ ],
+ "top_functions": [
+  {
+   "ir": 43046130,
+   "pct": 38.37,
+   "dlmr": 531987,
+   "name": "???:duckdb::GroupedAggregateHashTable::FindOrCreateGroupsInternal(duckdb::DataChunk&, duckdb::Vector&, duckdb::Vector&, duckdb::SelectionVector&) [/ho"
+  },
+  {
+   "ir": 13037164,
+   "pct": 11.62,
+   "dlmr": 61294,
+   "name": "???:duckdb::VectorOperations::Hash(duckdb::Vector&, duckdb::Vector&, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench"
+  },
+  {
+   "ir": 12638506,
+   "pct": 11.27,
+   "dlmr": 285753,
+   "name": "???:0x0000000002ae4550 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 9953208,
+   "pct": 8.87,
+   "dlmr": 6353,
+   "name": "???:duckdb::VectorOperations::AddInPlace(duckdb::Vector&, long, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/"
+  },
+  {
+   "ir": 8022005,
+   "pct": 7.15,
+   "dlmr": 231365,
+   "name": "???:0x0000000000e661e0 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 5011736,
+   "pct": 4.47,
+   "dlmr": 1948,
+   "name": "???:0x00000000019bbb40 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 3224732,
+   "pct": 2.87,
+   "dlmr": 10,
+   "name": "???:duckdb::RowOperations::InitializeStates(duckdb::TupleDataLayout&, duckdb::Vector&, duckdb::SelectionVector const&, unsigned long) [/home/saiyamjai"
+  },
+  {
+   "ir": 2820977,
+   "pct": 2.51,
+   "dlmr": 0,
+   "name": "./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 1528049,
+   "pct": 1.36,
+   "dlmr": 31,
+   "name": "???:0x0000000000e7c340 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 822866,
+   "pct": 0.73,
+   "dlmr": 2887,
+   "name": "???:0x0000000002009760 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 822062,
+   "pct": 0.73,
+   "dlmr": 479,
+   "name": "???:0x000000000200c0c0 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 801799,
+   "pct": 0.71,
+   "dlmr": 594,
+   "name": "???:0x0000000000e58bb0 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 793791,
+   "pct": 0.71,
+   "dlmr": 65,
+   "name": "???:duckdb::TupleDataAllocator::InitializeChunkStateInternal(duckdb::TupleDataPinState&, duckdb::TupleDataChunkState&, unsigned long, bool, bool, bool"
+  },
+  {
+   "ir": 635742,
+   "pct": 0.57,
+   "dlmr": 217,
+   "name": "???:void duckdb::PartitionedTupleData::BuildPartitionSel<true>(duckdb::PartitionedTupleDataAppendState&, duckdb::SelectionVector const&, unsigned long"
+  },
+  {
+   "ir": 602561,
+   "pct": 0.54,
+   "dlmr": 22501,
+   "name": "???:0x0000000002005620 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 601660,
+   "pct": 0.54,
+   "dlmr": 437,
+   "name": "???:0x00000000019c3120 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 526448,
+   "pct": 0.47,
+   "dlmr": 256,
+   "name": "???:0x0000000000e65e50 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 449628,
+   "pct": 0.4,
+   "dlmr": 7944,
+   "name": "./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 299988,
+   "pct": 0.27,
+   "dlmr": 0,
+   "name": "???:0x0000000000e24a80 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 296316,
+   "pct": 0.26,
+   "dlmr": 3814,
+   "name": "???:duckdb::ValidityUncompressed::AlignedScan(unsigned char*, unsigned long, duckdb::Vector&, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memor"
+  },
+  {
+   "ir": 255282,
+   "pct": 0.23,
+   "dlmr": 6,
+   "name": "???:duckdb::VectorOperations::Copy(duckdb::Vector const&, duckdb::Vector&, duckdb::SelectionVector const&, unsigned long, unsigned long, unsigned long"
+  },
+  {
+   "ir": 250000,
+   "pct": 0.22,
+   "dlmr": 172,
+   "name": "???:duckdb::TupleDataAllocator::BuildFastPath(duckdb::TupleDataSegment&, duckdb::TupleDataPinState&, duckdb::TupleDataChunkState&, unsigned long, unsi"
+  },
+  {
+   "ir": 199992,
+   "pct": 0.18,
+   "dlmr": 0,
+   "name": "???:0x00000000019b2370 [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages/_duckdb.cpython-314-x86_64-linu"
+  },
+  {
+   "ir": 183565,
+   "pct": 0.16,
+   "dlmr": 3,
+   "name": "???:duckdb::VectorCacheBuffer::ResetFromCache(duckdb::Vector&, duckdb::shared_ptr<duckdb::VectorBuffer, true> const&) [/home/saiyamjain/Desktop/Github"
+  },
+  {
+   "ir": 170202,
+   "pct": 0.15,
+   "dlmr": 2,
+   "name": "???:duckdb::Vector::Reinterpret(duckdb::Vector const&) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/.venv-bench/lib/python3.14/site-packages"
+  }
+ ]
+}

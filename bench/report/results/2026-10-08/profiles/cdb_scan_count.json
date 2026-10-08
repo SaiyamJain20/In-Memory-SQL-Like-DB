@@ -1,0 +1,125 @@
+{
+ "engine": "cdb",
+ "query": "scan_count",
+ "sf": 0.1,
+ "events": [
+  "Ir",
+  "Dr",
+  "Dw",
+  "I1mr",
+  "D1mr",
+  "D1mw",
+  "ILmr",
+  "DLmr",
+  "DLmw"
+ ],
+ "totals": [
+  14555214,
+  2170879,
+  3128765,
+  2632,
+  97851,
+  195814,
+  2433,
+  2726,
+  1292
+ ],
+ "top_functions": [
+  {
+   "ir": 5003423,
+   "pct": 34.38,
+   "dlmr": 128,
+   "name": "???:cdb::(anonymous namespace)::CountStarState::Update(unsigned int const*, cdb::Vector const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-Mem"
+  },
+  {
+   "ir": 4943520,
+   "pct": 33.96,
+   "dlmr": 2,
+   "name": "???:void cdb::(anonymous namespace)::BitpackedInts::Decode<long>(cdb::(anonymous namespace)::BitpackedInts::Meta const&, unsigned long, cdb::Vector&) "
+  },
+  {
+   "ir": 4015680,
+   "pct": 27.59,
+   "dlmr": 1985,
+   "name": "???:void cdb::(anonymous namespace)::UnpackWidth<1u>(unsigned char const*, unsigned long, unsigned long*) [/home/saiyamjain/Desktop/Github/In-Memory-S"
+  },
+  {
+   "ir": 65914,
+   "pct": 0.45,
+   "dlmr": 0,
+   "name": "./string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_chk_avx2_unaligned_erms [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 54644,
+   "pct": 0.38,
+   "dlmr": 0,
+   "name": "???:cdb::Vector::Reset() [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench/cdb_report_worker]"
+  },
+  {
+   "ir": 53790,
+   "pct": 0.37,
+   "dlmr": 0,
+   "name": "???:cdb::PhysicalHashAggregate::Sink(cdb::GlobalSinkState&, cdb::LocalSinkState&, cdb::DataChunk const&) [/home/saiyamjain/Desktop/Github/In-Memory-SQ"
+  },
+  {
+   "ir": 42054,
+   "pct": 0.29,
+   "dlmr": 8,
+   "name": "???:cdb::MorselScan::ReadVector(cdb::ScanMorsel const&, unsigned long, cdb::DataChunk&) const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/b"
+  },
+  {
+   "ir": 36534,
+   "pct": 0.25,
+   "dlmr": 2,
+   "name": "./malloc/./malloc/malloc.c:_int_free [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 34374,
+   "pct": 0.24,
+   "dlmr": 34,
+   "name": "???:cdb::ColumnSegment::Scan(unsigned long, unsigned long, cdb::Vector&) const [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/be"
+  },
+  {
+   "ir": 32913,
+   "pct": 0.23,
+   "dlmr": 8,
+   "name": "???:cdb::Executor::RunPipeline(cdb::Pipeline const&)::{lambda(unsigned long)#1}::operator()(unsigned long) const [clone .isra.0] [/home/saiyamjain/Des"
+  },
+  {
+   "ir": 27984,
+   "pct": 0.19,
+   "dlmr": 54,
+   "name": "./malloc/./malloc/malloc.c:malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 25917,
+   "pct": 0.18,
+   "dlmr": 0,
+   "name": "???:cdb::GroupTable::Sink(cdb::DataChunk const&, std::vector<cdb::Vector const*, std::allocator<cdb::Vector const*> > const&, unsigned long) [/home/sa"
+  },
+  {
+   "ir": 19680,
+   "pct": 0.14,
+   "dlmr": 127,
+   "name": "???:cdb::(anonymous namespace)::BitpackedInts::DecodeVector(unsigned long, unsigned long, cdb::ValidityMask const&, cdb::Vector&) const [/home/saiyamj"
+  },
+  {
+   "ir": 18564,
+   "pct": 0.13,
+   "dlmr": 3,
+   "name": "./malloc/./malloc/malloc.c:free [/usr/lib/x86_64-linux-gnu/libc.so.6]"
+  },
+  {
+   "ir": 17604,
+   "pct": 0.12,
+   "dlmr": 1,
+   "name": "???:cdb::AggregateState::UpdateUngrouped(cdb::Vector const*, unsigned long) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-Like-DB/build/release/bench"
+  },
+  {
+   "ir": 17383,
+   "pct": 0.12,
+   "dlmr": 0,
+   "name": "???:cdb::PhysicalTableScan::GetData(cdb::GlobalSourceState&, cdb::LocalSourceState&, cdb::DataChunk&) [/home/saiyamjain/Desktop/Github/In-Memory-SQL-L"
+  }
+ ]
+}

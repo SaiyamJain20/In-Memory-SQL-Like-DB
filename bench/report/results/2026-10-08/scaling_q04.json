@@ -1,0 +1,38 @@
+{
+ "1": {
+  "wall_ms": 144.52433000000002,
+  "process_cpu_ms": 144.4855,
+  "operator_own_cpu_ms": 135.69,
+  "explain_analyze": [
+   "ORDER BY o_orderpriority ASC NULLS LAST  (est ~5, actual 5 rows, 0.01 ms; in 5 rows)",
+   "  PROJECT [o_orderpriority, count(*) AS order_count]  (est ~5, actual 5 rows, 0.00 ms)",
+   "    AGGREGATE groups=[o_orderpriority] aggregates=[count(*)]  (est ~5, actual 5 rows, 0.83 ms; in 52523 rows)",
+   "      JOIN SEMI ON (o_orderkey = l_orderkey)  (est ~57357, actual 52523 rows, 108 ms; build 3793296 rows, 101 ms)",
+   "        FILTER ((o_orderdate >= DATE '1993-07-01') AND (o_orderdate < DATE '1993-10-01'))  (est ~57357, actual 57218 rows, 2.39 ms)",
+   "          SCAN orders [o_orderkey, o_orderdate, o_orderpriority] prune(o_orderdate >= 1993-07-01) prune(o_orderdate < 1993-10-01)  (est ~1500000, actual 1500000 rows, 2.29 ms)",
+   "        FILTER (l_commitdate < l_receiptdate)  (est ~2000405, actual 3793296 rows, 8.87 ms)",
+   "          SCAN lineitem [l_orderkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 13.3 ms)",
+   "Planning: 0.01 ms",
+   "Execution: 137 ms on 1 thread, 5 rows returned",
+   "(operator times are summed over threads)"
+  ]
+ },
+ "16": {
+  "wall_ms": 80.7069135,
+  "process_cpu_ms": 426.915,
+  "operator_own_cpu_ms": 188.93,
+  "explain_analyze": [
+   "ORDER BY o_orderpriority ASC NULLS LAST  (est ~5, actual 5 rows, 0.01 ms; in 5 rows)",
+   "  PROJECT [o_orderpriority, count(*) AS order_count]  (est ~5, actual 5 rows, 0.00 ms)",
+   "    AGGREGATE groups=[o_orderpriority] aggregates=[count(*)]  (est ~5, actual 5 rows, 1.81 ms; in 52523 rows)",
+   "      JOIN SEMI ON (o_orderkey = l_orderkey)  (est ~57357, actual 52523 rows, 117 ms; build 3793296 rows, 104 ms)",
+   "        FILTER ((o_orderdate >= DATE '1993-07-01') AND (o_orderdate < DATE '1993-10-01'))  (est ~57357, actual 57218 rows, 4.32 ms)",
+   "          SCAN orders [o_orderkey, o_orderdate, o_orderpriority] prune(o_orderdate >= 1993-07-01) prune(o_orderdate < 1993-10-01)  (est ~1500000, actual 1500000 rows, 5.29 ms)",
+   "        FILTER (l_commitdate < l_receiptdate)  (est ~2000405, actual 3793296 rows, 15.4 ms)",
+   "          SCAN lineitem [l_orderkey, l_commitdate, l_receiptdate]  (est ~6001215, actual 6001215 rows, 45.1 ms)",
+   "Planning: 0.01 ms",
+   "Execution: 67.7 ms on 16 threads, 5 rows returned",
+   "(operator times are summed over threads)"
+  ]
+ }
+}

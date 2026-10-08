@@ -1,0 +1,1 @@
+SELECT sum(v) FROM t WHERE i < 50000

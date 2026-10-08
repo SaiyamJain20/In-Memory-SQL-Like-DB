@@ -1,7 +1,8 @@
 # Benchmarks
 
 Every performance number in this repository comes from here, with the machine, build and command
-that produced it. Numbers that are not in this file are not claims.
+that produced it. Numbers that are not in this file are not claims. (The cross-engine comparison with DataFusion, ClickHouse, Polars and SQLite,
+the operator and H2O-style workloads and the profiles are in [`REPORT.md`](REPORT.md), generated from `bench/report/results/`.)
 
 ## Environment (all results below)
 | | |

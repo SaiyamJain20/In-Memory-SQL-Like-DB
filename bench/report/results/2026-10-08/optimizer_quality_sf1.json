@@ -1,0 +1,3952 @@
+{
+ "sf": 1.0,
+ "threads": 1,
+ "engines": {
+  "cdb": {
+   "plans": {
+    "q01": [
+     {
+      "op": "ORDER BY l_returnflag ASC NULLS LAST, l_linestatus ASC NULLS",
+      "kind": "OTHER",
+      "est": 6,
+      "actual": 4
+     },
+     {
+      "op": "PROJECT [l_returnflag, l_linestatus, sum(l_quantity) AS sum_",
+      "kind": "OTHER",
+      "est": 6,
+      "actual": 4
+     },
+     {
+      "op": "AGGREGATE groups=[l_returnflag, l_linestatus] aggregates=[su",
+      "kind": "AGGREGATE",
+      "est": 6,
+      "actual": 4
+     },
+     {
+      "op": "FILTER (l_shipdate <= DATE '1998-09-02')",
+      "kind": "FILTER",
+      "est": 5787395,
+      "actual": 5916591
+     },
+     {
+      "op": "SCAN lineitem [l_quantity, l_extendedprice, l_discount, l_ta",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q02": [
+     {
+      "op": "LIMIT 100",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 100
+     },
+     {
+      "op": "PROJECT [s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_add",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 460
+     },
+     {
+      "op": "FILTER (ps_supplycost = $scalar0)",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 460
+     },
+     {
+      "op": "JOIN LEFT ON (p_partkey = $scalar0_key)",
+      "kind": "JOIN",
+      "est": 1993,
+      "actual": 642
+     },
+     {
+      "op": "PROJECT [p_partkey, p_mfgr, s_name, s_address, s_phone, s_ac",
+      "kind": "OTHER",
+      "est": 1993,
+      "actual": 642
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = ps_suppkey)",
+      "kind": "JOIN",
+      "est": 1993,
+      "actual": 642
+     },
+     {
+      "op": "JOIN INNER ON (p_partkey = ps_partkey)",
+      "kind": "JOIN",
+      "est": 3178,
+      "actual": 2988
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey, ps_supplycost]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "FILTER ((p_size = 15) AND like(p_type, '%BRASS'))",
+      "kind": "FILTER",
+      "est": 795,
+      "actual": 747
+     },
+     {
+      "op": "SCAN part [p_partkey, p_mfgr, p_type, p_size] prune(p_size =",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 1993,
+      "actual": 1987
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_name, s_address, s_nationkey, s_",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "JOIN INNER ON (n_regionkey = r_regionkey)",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name, n_regionkey]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "FILTER (r_name = 'EUROPE')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN region [r_regionkey, r_name] prune(r_name = EUROPE)",
+      "kind": "SCAN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECT [#0 AS $key0, min(ps_supplycost) AS $value]",
+      "kind": "OTHER",
+      "est": 158587,
+      "actual": 117422
+     },
+     {
+      "op": "AGGREGATE groups=[ps_partkey] aggregates=[min(ps_supplycost)",
+      "kind": "AGGREGATE",
+      "est": 158587,
+      "actual": 117422
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = ps_suppkey)",
+      "kind": "JOIN",
+      "est": 158587,
+      "actual": 158960
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey, ps_supplycost]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 1993,
+      "actual": 1987
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "JOIN INNER ON (n_regionkey = r_regionkey)",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_regionkey]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "FILTER (r_name = 'EUROPE')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN region [r_regionkey, r_name] prune(r_name = EUROPE)",
+      "kind": "SCAN",
+      "est": 5,
+      "actual": 5
+     }
+    ],
+    "q03": [
+     {
+      "op": "LIMIT 10",
+      "kind": "OTHER",
+      "est": 10,
+      "actual": 10
+     },
+     {
+      "op": "PROJECT [l_orderkey, sum((l_extendedprice * (1.0 - l_discoun",
+      "kind": "OTHER",
+      "est": 462577,
+      "actual": 11620
+     },
+     {
+      "op": "AGGREGATE groups=[l_orderkey, o_orderdate, o_shippriority] a",
+      "kind": "AGGREGATE",
+      "est": 462577,
+      "actual": 11620
+     },
+     {
+      "op": "PROJECT [o_orderdate, o_shippriority, l_orderkey, l_extended",
+      "kind": "OTHER",
+      "est": 462577,
+      "actual": 30519
+     },
+     {
+      "op": "JOIN INNER ON (l_orderkey = o_orderkey)",
+      "kind": "JOIN",
+      "est": 462577,
+      "actual": 30519
+     },
+     {
+      "op": "FILTER (l_shipdate > DATE '1995-03-15')",
+      "kind": "FILTER",
+      "est": 3223931,
+      "actual": 3241776
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_extendedprice, l_discount, l_sh",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "JOIN INNER ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 219070,
+      "actual": 147126
+     },
+     {
+      "op": "FILTER (o_orderdate < DATE '1995-03-15')",
+      "kind": "FILTER",
+      "est": 728803,
+      "actual": 727305
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_orderdate, o_shipprior",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "FILTER (c_mktsegment = 'BUILDING')",
+      "kind": "FILTER",
+      "est": 29982,
+      "actual": 30142
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_mktsegment] prune(c_mktsegment =",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     }
+    ],
+    "q04": [
+     {
+      "op": "ORDER BY o_orderpriority ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECT [o_orderpriority, count(*) AS order_count]",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "AGGREGATE groups=[o_orderpriority] aggregates=[count(*)]",
+      "kind": "AGGREGATE",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "JOIN SEMI ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 57357,
+      "actual": 52523
+     },
+     {
+      "op": "FILTER ((o_orderdate >= DATE '1993-07-01') AND (o_orderdate ",
+      "kind": "FILTER",
+      "est": 57357,
+      "actual": 57218
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_orderdate, o_orderpriority] prune",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "FILTER (l_commitdate < l_receiptdate)",
+      "kind": "FILTER",
+      "est": 2000405,
+      "actual": 3793296
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_commitdate, l_receiptdate]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q05": [
+     {
+      "op": "ORDER BY revenue DESC NULLS LAST",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECT [n_name, sum((l_extendedprice * (1.0 - l_discount)))",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "AGGREGATE groups=[n_name] aggregates=[sum((l_extendedprice *",
+      "kind": "AGGREGATE",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECT [l_extendedprice, l_discount, n_name]",
+      "kind": "OTHER",
+      "est": 150000,
+      "actual": 7243
+     },
+     {
+      "op": "JOIN INNER ON ((c_custkey = o_custkey) AND (c_nationkey = s_",
+      "kind": "JOIN",
+      "est": 150000,
+      "actual": 7243
+     },
+     {
+      "op": "JOIN INNER ON (l_suppkey = s_suppkey)",
+      "kind": "JOIN",
+      "est": 177305,
+      "actual": 182183
+     },
+     {
+      "op": "JOIN INNER ON (l_orderkey = o_orderkey)",
+      "kind": "JOIN",
+      "est": 894424,
+      "actual": 910519
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_suppkey, l_extendedprice, l_dis",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "FILTER ((o_orderdate >= DATE '1994-01-01') AND (o_orderdate ",
+      "kind": "FILTER",
+      "est": 227556,
+      "actual": 227597
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_orderdate] prune(o_ord",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 1993,
+      "actual": 2003
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "JOIN INNER ON (n_regionkey = r_regionkey)",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name, n_regionkey]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "FILTER (r_name = 'ASIA')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN region [r_regionkey, r_name] prune(r_name = ASIA)",
+      "kind": "SCAN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_nationkey]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     }
+    ],
+    "q06": [
+     {
+      "op": "PROJECT [sum((l_extendedprice * l_discount)) AS revenue]",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[sum((l_extendedprice * l_dis",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "FILTER (((((l_shipdate >= DATE '1994-01-01') AND (l_shipdate",
+      "kind": "FILTER",
+      "est": 75115,
+      "actual": 114160
+     },
+     {
+      "op": "SCAN lineitem [l_quantity, l_extendedprice, l_discount, l_sh",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q07": [
+     {
+      "op": "ORDER BY supp_nation ASC NULLS LAST, cust_nation ASC NULLS L",
+      "kind": "OTHER",
+      "est": 12,
+      "actual": 4
+     },
+     {
+      "op": "PROJECT [supp_nation, cust_nation, l_year, sum(volume) AS re",
+      "kind": "OTHER",
+      "est": 12,
+      "actual": 4
+     },
+     {
+      "op": "AGGREGATE groups=[supp_nation, cust_nation, l_year] aggregat",
+      "kind": "AGGREGATE",
+      "est": 12,
+      "actual": 4
+     },
+     {
+      "op": "PROJECT [n1.n_name AS supp_nation, n2.n_name AS cust_nation,",
+      "kind": "OTHER",
+      "est": 10000,
+      "actual": 5924
+     },
+     {
+      "op": "PROJECT [l_extendedprice, l_discount, l_shipdate, n_name, n_",
+      "kind": "OTHER",
+      "est": 10000,
+      "actual": 5924
+     },
+     {
+      "op": "JOIN INNER ON ((s_suppkey = l_suppkey) AND (s_nationkey = n1",
+      "kind": "JOIN",
+      "est": 10000,
+      "actual": 5924
+     },
+     {
+      "op": "JOIN INNER ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 204480,
+      "actual": 148370
+     },
+     {
+      "op": "FILTER ((l_shipdate >= DATE '1995-01-01') AND (l_shipdate <=",
+      "kind": "FILTER",
+      "est": 1736694,
+      "actual": 1828450
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_suppkey, l_extendedprice, l_dis",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "JOIN INNER ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 179768,
+      "actual": 121324
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey]",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "JOIN INNER ON (c_nationkey = n2.n_nationkey)",
+      "kind": "JOIN",
+      "est": 11954,
+      "actual": 12008
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_nationkey]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "JOIN INNER ON (((n1.n_name = 'FRANCE') AND (n2.n_name = 'GER",
+      "kind": "JOIN",
+      "est": 2,
+      "actual": 2
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     }
+    ],
+    "q08": [
+     {
+      "op": "ORDER BY o_year ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 3,
+      "actual": 2
+     },
+     {
+      "op": "PROJECT [o_year, (sum(CASE WHEN (nation = 'BRAZIL') THEN vol",
+      "kind": "OTHER",
+      "est": 3,
+      "actual": 2
+     },
+     {
+      "op": "AGGREGATE groups=[o_year] aggregates=[sum(CASE WHEN (nation ",
+      "kind": "AGGREGATE",
+      "est": 3,
+      "actual": 2
+     },
+     {
+      "op": "PROJECT [year(o_orderdate) AS o_year, (l_extendedprice * (1.",
+      "kind": "OTHER",
+      "est": 7902,
+      "actual": 2603
+     },
+     {
+      "op": "PROJECT [l_extendedprice, l_discount, o_orderdate, n_name]",
+      "kind": "OTHER",
+      "est": 7902,
+      "actual": 2603
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n2.n_nationkey)",
+      "kind": "JOIN",
+      "est": 7902,
+      "actual": 2603
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = l_suppkey)",
+      "kind": "JOIN",
+      "est": 7926,
+      "actual": 2603
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "JOIN INNER ON (c_nationkey = n1.n_nationkey)",
+      "kind": "JOIN",
+      "est": 7926,
+      "actual": 2603
+     },
+     {
+      "op": "JOIN INNER ON (o_custkey = c_custkey)",
+      "kind": "JOIN",
+      "est": 39777,
+      "actual": 13389
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_nationkey]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "JOIN INNER ON (l_orderkey = o_orderkey)",
+      "kind": "JOIN",
+      "est": 39777,
+      "actual": 13389
+     },
+     {
+      "op": "FILTER ((o_orderdate >= DATE '1995-01-01') AND (o_orderdate ",
+      "kind": "FILTER",
+      "est": 455736,
+      "actual": 457263
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_orderdate] prune(o_ord",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "JOIN INNER ON (p_partkey = l_partkey)",
+      "kind": "JOIN",
+      "est": 39777,
+      "actual": 43693
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_partkey, l_suppkey, l_extendedp",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "FILTER (p_type = 'ECONOMY ANODIZED STEEL')",
+      "kind": "FILTER",
+      "est": 1327,
+      "actual": 1451
+     },
+     {
+      "op": "SCAN part [p_partkey, p_type] prune(p_type = ECONOMY ANODIZE",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "JOIN INNER ON (n1.n_regionkey = r_regionkey)",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_regionkey]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "FILTER (r_name = 'AMERICA')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN region [r_regionkey, r_name] prune(r_name = AMERICA)",
+      "kind": "SCAN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q09": [
+     {
+      "op": "ORDER BY nation ASC NULLS LAST, o_year DESC NULLS LAST",
+      "kind": "OTHER",
+      "est": 200,
+      "actual": 175
+     },
+     {
+      "op": "PROJECT [nation, o_year, sum(amount) AS sum_profit]",
+      "kind": "OTHER",
+      "est": 200,
+      "actual": 175
+     },
+     {
+      "op": "AGGREGATE groups=[nation, o_year] aggregates=[sum(amount)]",
+      "kind": "AGGREGATE",
+      "est": 200,
+      "actual": 175
+     },
+     {
+      "op": "PROJECT [n_name AS nation, year(o_orderdate) AS o_year, ((l_",
+      "kind": "OTHER",
+      "est": 158544,
+      "actual": 319404
+     },
+     {
+      "op": "PROJECT [l_quantity, l_extendedprice, l_discount, ps_supplyc",
+      "kind": "OTHER",
+      "est": 158544,
+      "actual": 319404
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = l_suppkey)",
+      "kind": "JOIN",
+      "est": 158544,
+      "actual": 319404
+     },
+     {
+      "op": "JOIN INNER ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 159859,
+      "actual": 319404
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_orderdate]",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "JOIN INNER ON (p_partkey = l_partkey)",
+      "kind": "JOIN",
+      "est": 159859,
+      "actual": 319404
+     },
+     {
+      "op": "JOIN INNER ON ((ps_suppkey = l_suppkey) AND (ps_partkey = l_",
+      "kind": "JOIN",
+      "est": 800000,
+      "actual": 6001215
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_partkey, l_suppkey, l_quantity,",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey, ps_supplycost]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "FILTER like(p_name, '%green%')",
+      "kind": "FILTER",
+      "est": 40000,
+      "actual": 10664
+     },
+     {
+      "op": "SCAN part [p_partkey, p_name]",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 9969,
+      "actual": 10000
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q10": [
+     {
+      "op": "LIMIT 20",
+      "kind": "OTHER",
+      "est": 20,
+      "actual": 20
+     },
+     {
+      "op": "PROJECT [c_custkey, c_name, sum((l_extendedprice * (1.0 - l_",
+      "kind": "OTHER",
+      "est": 74891,
+      "actual": 37967
+     },
+     {
+      "op": "AGGREGATE groups=[c_custkey, c_name, c_acctbal, c_phone, n_n",
+      "kind": "AGGREGATE",
+      "est": 74891,
+      "actual": 37967
+     },
+     {
+      "op": "PROJECT [c_custkey, c_name, c_address, c_phone, c_acctbal, c",
+      "kind": "OTHER",
+      "est": 74891,
+      "actual": 114705
+     },
+     {
+      "op": "JOIN INNER ON (l_orderkey = o_orderkey)",
+      "kind": "JOIN",
+      "est": 74891,
+      "actual": 114705
+     },
+     {
+      "op": "FILTER (l_returnflag = 'R')",
+      "kind": "FILTER",
+      "est": 1999672,
+      "actual": 1478870
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_extendedprice, l_discount, l_re",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "JOIN INNER ON (c_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 57181,
+      "actual": 57069
+     },
+     {
+      "op": "JOIN INNER ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 57357,
+      "actual": 57069
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_name, c_address, c_nationkey, c_",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "FILTER ((o_orderdate >= DATE '1993-10-01') AND (o_orderdate ",
+      "kind": "FILTER",
+      "est": 57357,
+      "actual": 57069
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_orderdate] prune(o_ord",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name]",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q11": [
+     {
+      "op": "ORDER BY value DESC NULLS LAST",
+      "kind": "OTHER",
+      "est": 10579,
+      "actual": 1048
+     },
+     {
+      "op": "PROJECT [ps_partkey, sum((ps_supplycost * CAST(ps_availqty A",
+      "kind": "OTHER",
+      "est": 10579,
+      "actual": 1048
+     },
+     {
+      "op": "JOIN INNER ON (sum((ps_supplycost * CAST(ps_availqty AS DOUB",
+      "kind": "JOIN",
+      "est": 10579,
+      "actual": 1048
+     },
+     {
+      "op": "AGGREGATE groups=[ps_partkey] aggregates=[sum((ps_supplycost",
+      "kind": "AGGREGATE",
+      "est": 31737,
+      "actual": 29818
+     },
+     {
+      "op": "JOIN INNER ON (ps_suppkey = s_suppkey)",
+      "kind": "JOIN",
+      "est": 31737,
+      "actual": 31680
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey, ps_availqty, ps_suppl",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 399,
+      "actual": 396
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER (n_name = 'GERMANY')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name] prune(n_name = GERMANY)",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "PROJECT [(sum((ps_supplycost * CAST(ps_availqty AS DOUBLE)))",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[sum((ps_supplycost * CAST(ps",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "JOIN INNER ON (ps_suppkey = s_suppkey)",
+      "kind": "JOIN",
+      "est": 31737,
+      "actual": 31680
+     },
+     {
+      "op": "SCAN partsupp [ps_suppkey, ps_availqty, ps_supplycost]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 399,
+      "actual": 396
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER (n_name = 'GERMANY')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name] prune(n_name = GERMANY)",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q12": [
+     {
+      "op": "ORDER BY l_shipmode ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 2,
+      "actual": 2
+     },
+     {
+      "op": "PROJECT [l_shipmode, sum(CAST(CASE WHEN ((o_orderpriority = ",
+      "kind": "OTHER",
+      "est": 2,
+      "actual": 2
+     },
+     {
+      "op": "AGGREGATE groups=[l_shipmode] aggregates=[sum(CAST(CASE WHEN",
+      "kind": "AGGREGATE",
+      "est": 2,
+      "actual": 2
+     },
+     {
+      "op": "JOIN INNER ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 27204,
+      "actual": 30988
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_orderpriority]",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "FILTER (((((l_shipmode IN ('MAIL', 'SHIP')) AND (l_commitdat",
+      "kind": "FILTER",
+      "est": 27204,
+      "actual": 30988
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_shipdate, l_commitdate, l_recei",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q13": [
+     {
+      "op": "ORDER BY custdist DESC NULLS LAST, c_count DESC NULLS LAST",
+      "kind": "OTHER",
+      "est": 99743,
+      "actual": 42
+     },
+     {
+      "op": "PROJECT [c_count, count(*) AS custdist]",
+      "kind": "OTHER",
+      "est": 99743,
+      "actual": 42
+     },
+     {
+      "op": "AGGREGATE groups=[c_count] aggregates=[count(*)]",
+      "kind": "AGGREGATE",
+      "est": 99743,
+      "actual": 42
+     },
+     {
+      "op": "PROJECT [count(o_orderkey) AS c_count]",
+      "kind": "OTHER",
+      "est": 99743,
+      "actual": 150000
+     },
+     {
+      "op": "AGGREGATE groups=[c_custkey] aggregates=[count(o_orderkey)]",
+      "kind": "AGGREGATE",
+      "est": 99743,
+      "actual": 150000
+     },
+     {
+      "op": "JOIN LEFT ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 1200000,
+      "actual": 1534302
+     },
+     {
+      "op": "SCAN customer [c_custkey]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "FILTER (NOT like(o_comment, '%special%requests%'))",
+      "kind": "FILTER",
+      "est": 1200000,
+      "actual": 1484298
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_comment]",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     }
+    ],
+    "q14": [
+     {
+      "op": "PROJECT [((100.0 * sum(CASE WHEN like(p_type, 'PROMO%') THEN",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[sum(CASE WHEN like(p_type, '",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECT [l_extendedprice, l_discount, p_type]",
+      "kind": "OTHER",
+      "est": 71273,
+      "actual": 75983
+     },
+     {
+      "op": "JOIN INNER ON (l_partkey = p_partkey)",
+      "kind": "JOIN",
+      "est": 71273,
+      "actual": 75983
+     },
+     {
+      "op": "SCAN part [p_partkey, p_type]",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "FILTER ((l_shipdate >= DATE '1995-09-01') AND (l_shipdate < ",
+      "kind": "FILTER",
+      "est": 71273,
+      "actual": 75983
+     },
+     {
+      "op": "SCAN lineitem [l_partkey, l_extendedprice, l_discount, l_shi",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q15": [
+     {
+      "op": "ORDER BY s_suppkey ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECT [s_suppkey, s_name, s_address, s_phone, total_revenu",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = supplier_no)",
+      "kind": "JOIN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_name, s_address, s_phone]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "JOIN INNER ON (total_revenue = $scalar0)",
+      "kind": "JOIN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECT [l_suppkey AS supplier_no, sum((l_extendedprice * (1",
+      "kind": "OTHER",
+      "est": 10052,
+      "actual": 10000
+     },
+     {
+      "op": "AGGREGATE groups=[l_suppkey] aggregates=[sum((l_extendedpric",
+      "kind": "AGGREGATE",
+      "est": 10052,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER ((l_shipdate >= DATE '1996-01-01') AND (l_shipdate < ",
+      "kind": "FILTER",
+      "est": 216196,
+      "actual": 225954
+     },
+     {
+      "op": "SCAN lineitem [l_suppkey, l_extendedprice, l_discount, l_shi",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "PROJECT [max(total_revenue)]",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[max(total_revenue)]",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECT [sum((l_extendedprice * (1.0 - l_discount))) AS tota",
+      "kind": "OTHER",
+      "est": 10052,
+      "actual": 10000
+     },
+     {
+      "op": "AGGREGATE groups=[l_suppkey] aggregates=[sum((l_extendedpric",
+      "kind": "AGGREGATE",
+      "est": 10052,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER ((l_shipdate >= DATE '1996-01-01') AND (l_shipdate < ",
+      "kind": "FILTER",
+      "est": 216196,
+      "actual": 225954
+     },
+     {
+      "op": "SCAN lineitem [l_suppkey, l_extendedprice, l_discount, l_shi",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q16": [
+     {
+      "op": "ORDER BY supplier_cnt DESC NULLS LAST, p_brand ASC NULLS LAS",
+      "kind": "OTHER",
+      "est": 29027,
+      "actual": 18314
+     },
+     {
+      "op": "PROJECT [p_brand, p_type, p_size, count(DISTINCT ps_suppkey)",
+      "kind": "OTHER",
+      "est": 29027,
+      "actual": 18314
+     },
+     {
+      "op": "AGGREGATE groups=[p_brand, p_type, p_size] aggregates=[count",
+      "kind": "AGGREGATE",
+      "est": 29027,
+      "actual": 18314
+     },
+     {
+      "op": "JOIN INNER ON (p_partkey = ps_partkey)",
+      "kind": "JOIN",
+      "est": 87828,
+      "actual": 118274
+     },
+     {
+      "op": "JOIN ANTI (NULL-AWARE) ON (ps_suppkey = s_suppkey)",
+      "kind": "JOIN",
+      "est": 640830,
+      "actual": 799680
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "PROJECT [s_suppkey]",
+      "kind": "OTHER",
+      "est": 2000,
+      "actual": 4
+     },
+     {
+      "op": "FILTER like(s_comment, '%Customer%Complaints%')",
+      "kind": "FILTER",
+      "est": 2000,
+      "actual": 4
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_comment]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER (((p_brand <> 'Brand#45') AND (NOT like(p_type, 'MEDI",
+      "kind": "FILTER",
+      "est": 27435,
+      "actual": 29581
+     },
+     {
+      "op": "SCAN part [p_partkey, p_brand, p_type, p_size] prune(p_brand",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     }
+    ],
+    "q17": [
+     {
+      "op": "PROJECT [(sum(l_extendedprice) / 7.0) AS avg_yearly]",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[sum(l_extendedprice)]",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "FILTER (l_quantity < $scalar0)",
+      "kind": "FILTER",
+      "est": 2066,
+      "actual": 587
+     },
+     {
+      "op": "JOIN LEFT ON (p_partkey = $scalar0_key)",
+      "kind": "JOIN",
+      "est": 6197,
+      "actual": 6088
+     },
+     {
+      "op": "JOIN INNER ON (p_partkey = l_partkey)",
+      "kind": "JOIN",
+      "est": 6197,
+      "actual": 6088
+     },
+     {
+      "op": "SCAN lineitem [l_partkey, l_quantity, l_extendedprice]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "FILTER ((p_brand = 'Brand#23') AND (p_container = 'MED BOX')",
+      "kind": "FILTER",
+      "est": 207,
+      "actual": 204
+     },
+     {
+      "op": "SCAN part [p_partkey, p_brand, p_container] prune(p_brand = ",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "PROJECT [#0 AS $key0, (0.2 * avg(l_quantity)) AS $value]",
+      "kind": "OTHER",
+      "est": 200176,
+      "actual": 200000
+     },
+     {
+      "op": "AGGREGATE groups=[l_partkey] aggregates=[avg(l_quantity)]",
+      "kind": "AGGREGATE",
+      "est": 200176,
+      "actual": 200000
+     },
+     {
+      "op": "SCAN lineitem [l_partkey, l_quantity]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q18": [
+     {
+      "op": "LIMIT 100",
+      "kind": "OTHER",
+      "est": 100,
+      "actual": 57
+     },
+     {
+      "op": "PROJECT [c_name, c_custkey, o_orderkey, o_orderdate, o_total",
+      "kind": "OTHER",
+      "est": 2000405,
+      "actual": 57
+     },
+     {
+      "op": "AGGREGATE groups=[c_name, c_custkey, o_orderkey, o_orderdate",
+      "kind": "AGGREGATE",
+      "est": 2000405,
+      "actual": 57
+     },
+     {
+      "op": "PROJECT [c_custkey, c_name, o_orderkey, o_totalprice, o_orde",
+      "kind": "OTHER",
+      "est": 2000405,
+      "actual": 399
+     },
+     {
+      "op": "JOIN INNER ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 2000405,
+      "actual": 399
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_quantity]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "PROJECT [c_custkey, c_name, o_orderkey, o_totalprice, o_orde",
+      "kind": "OTHER",
+      "est": 508936,
+      "actual": 57
+     },
+     {
+      "op": "JOIN INNER ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 508936,
+      "actual": 57
+     },
+     {
+      "op": "JOIN SEMI ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 508936,
+      "actual": 57
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_custkey, o_totalprice, o_orderdat",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "PROJECT [l_orderkey]",
+      "kind": "OTHER",
+      "est": 508936,
+      "actual": 57
+     },
+     {
+      "op": "FILTER (sum(l_quantity) > 300.0)",
+      "kind": "FILTER",
+      "est": 508936,
+      "actual": 57
+     },
+     {
+      "op": "AGGREGATE groups=[l_orderkey] aggregates=[sum(l_quantity)]",
+      "kind": "AGGREGATE",
+      "est": 1526808,
+      "actual": 1500000
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_quantity]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_name]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     }
+    ],
+    "q19": [
+     {
+      "op": "PROJECT [sum((l_extendedprice * (1.0 - l_discount))) AS reve",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[sum((l_extendedprice * (1.0 ",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "JOIN INNER ON ((p_partkey = l_partkey) AND (((((((p_brand = ",
+      "kind": "JOIN",
+      "est": 214,
+      "actual": 121
+     },
+     {
+      "op": "FILTER ((l_shipmode IN ('AIR', 'AIR REG')) AND (l_shipinstru",
+      "kind": "FILTER",
+      "est": 428083,
+      "actual": 214377
+     },
+     {
+      "op": "SCAN lineitem [l_partkey, l_quantity, l_extendedprice, l_dis",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "FILTER (p_size >= 1)",
+      "kind": "FILTER",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "SCAN part [p_partkey, p_brand, p_size, p_container] prune(p_",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     }
+    ],
+    "q20": [
+     {
+      "op": "ORDER BY s_name ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 399,
+      "actual": 186
+     },
+     {
+      "op": "PROJECT [s_name, s_address]",
+      "kind": "OTHER",
+      "est": 399,
+      "actual": 186
+     },
+     {
+      "op": "JOIN SEMI ON (s_suppkey = ps_suppkey)",
+      "kind": "JOIN",
+      "est": 399,
+      "actual": 186
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 399,
+      "actual": 412
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_name, s_address, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER (n_name = 'CANADA')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name] prune(n_name = CANADA)",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "PROJECT [ps_suppkey]",
+      "kind": "OTHER",
+      "est": 26643,
+      "actual": 5833
+     },
+     {
+      "op": "JOIN SEMI ON (ps_partkey = p_partkey)",
+      "kind": "JOIN",
+      "est": 26643,
+      "actual": 5833
+     },
+     {
+      "op": "FILTER (CAST(ps_availqty AS DOUBLE) > $scalar0)",
+      "kind": "FILTER",
+      "est": 266667,
+      "actual": 542095
+     },
+     {
+      "op": "JOIN LEFT ON ((ps_partkey = $scalar0_key) AND (ps_suppkey = ",
+      "kind": "JOIN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "SCAN partsupp [ps_partkey, ps_suppkey, ps_availqty]",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "PROJECT [#0 AS $key0, #1 AS $key1, (0.5 * sum(l_quantity)) A",
+      "kind": "OTHER",
+      "est": 867159,
+      "actual": 543210
+     },
+     {
+      "op": "AGGREGATE groups=[l_partkey, l_suppkey] aggregates=[sum(l_qu",
+      "kind": "AGGREGATE",
+      "est": 867159,
+      "actual": 543210
+     },
+     {
+      "op": "FILTER ((l_shipdate >= DATE '1994-01-01') AND (l_shipdate < ",
+      "kind": "FILTER",
+      "est": 867159,
+      "actual": 909455
+     },
+     {
+      "op": "SCAN lineitem [l_partkey, l_suppkey, l_quantity, l_shipdate]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "PROJECT [p_partkey]",
+      "kind": "OTHER",
+      "est": 20000,
+      "actual": 2127
+     },
+     {
+      "op": "FILTER like(p_name, 'forest%')",
+      "kind": "FILTER",
+      "est": 20000,
+      "actual": 2127
+     },
+     {
+      "op": "SCAN part [p_partkey, p_name]",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     }
+    ],
+    "q21": [
+     {
+      "op": "LIMIT 100",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 100
+     },
+     {
+      "op": "PROJECT [s_name, count(*) AS numwait]",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 411
+     },
+     {
+      "op": "AGGREGATE groups=[s_name] aggregates=[count(*)]",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 411
+     },
+     {
+      "op": "JOIN ANTI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 4141
+     },
+     {
+      "op": "JOIN SEMI ON ((l_orderkey = l_orderkey) AND (l_suppkey <> l_",
+      "kind": "JOIN",
+      "est": 79358,
+      "actual": 73089
+     },
+     {
+      "op": "PROJECT [s_name, l_orderkey, l_suppkey]",
+      "kind": "OTHER",
+      "est": 79358,
+      "actual": 75871
+     },
+     {
+      "op": "JOIN INNER ON (o_orderkey = l_orderkey)",
+      "kind": "JOIN",
+      "est": 79358,
+      "actual": 75871
+     },
+     {
+      "op": "FILTER (o_orderstatus = 'F')",
+      "kind": "FILTER",
+      "est": 499817,
+      "actual": 729413
+     },
+     {
+      "op": "SCAN orders [o_orderkey, o_orderstatus] prune(o_orderstatus ",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "JOIN INNER ON (s_suppkey = l_suppkey)",
+      "kind": "JOIN",
+      "est": 79358,
+      "actual": 156739
+     },
+     {
+      "op": "FILTER (l_receiptdate > l_commitdate)",
+      "kind": "FILTER",
+      "est": 2000405,
+      "actual": 3793296
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receip",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "JOIN INNER ON (s_nationkey = n_nationkey)",
+      "kind": "JOIN",
+      "est": 399,
+      "actual": 411
+     },
+     {
+      "op": "SCAN supplier [s_suppkey, s_name, s_nationkey]",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "FILTER (n_name = 'SAUDI ARABIA')",
+      "kind": "FILTER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "SCAN nation [n_nationkey, n_name] prune(n_name = SAUDI ARABI",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_suppkey]",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "FILTER (l_receiptdate > l_commitdate)",
+      "kind": "FILTER",
+      "est": 2000405,
+      "actual": 3793296
+     },
+     {
+      "op": "SCAN lineitem [l_orderkey, l_suppkey, l_commitdate, l_receip",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     }
+    ],
+    "q22": [
+     {
+      "op": "ORDER BY cntrycode ASC NULLS LAST",
+      "kind": "OTHER",
+      "est": 8376,
+      "actual": 7
+     },
+     {
+      "op": "PROJECT [cntrycode, count(*) AS numcust, sum(c_acctbal) AS t",
+      "kind": "OTHER",
+      "est": 8376,
+      "actual": 7
+     },
+     {
+      "op": "AGGREGATE groups=[cntrycode] aggregates=[count(*), sum(c_acc",
+      "kind": "AGGREGATE",
+      "est": 8376,
+      "actual": 7
+     },
+     {
+      "op": "PROJECT [substring(c_phone, 1, 2) AS cntrycode, c_acctbal]",
+      "kind": "OTHER",
+      "est": 8376,
+      "actual": 6384
+     },
+     {
+      "op": "JOIN ANTI ON (c_custkey = o_custkey)",
+      "kind": "JOIN",
+      "est": 8376,
+      "actual": 6384
+     },
+     {
+      "op": "JOIN INNER ON (c_acctbal > $scalar0)",
+      "kind": "JOIN",
+      "est": 25000,
+      "actual": 19000
+     },
+     {
+      "op": "FILTER (substring(c_phone, 1, 2) IN ('13', '31', '23', '29',",
+      "kind": "FILTER",
+      "est": 75000,
+      "actual": 42015
+     },
+     {
+      "op": "SCAN customer [c_custkey, c_phone, c_acctbal]",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "PROJECT [avg(c_acctbal)]",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "AGGREGATE groups=[] aggregates=[avg(c_acctbal)]",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "FILTER ((c_acctbal > 0.0) AND (substring(c_phone, 1, 2) IN (",
+      "kind": "FILTER",
+      "est": 68182,
+      "actual": 38120
+     },
+     {
+      "op": "SCAN customer [c_phone, c_acctbal] prune(c_acctbal > 0.0)",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     },
+     {
+      "op": "SCAN orders [o_custkey]",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     }
+    ]
+   },
+   "qerror": {
+    "AGGREGATE": {
+     "n": 29,
+     "median": 1.064357099738413,
+     "p90": 568.1142857142852,
+     "max": 35094.82456140351
+    },
+    "FILTER": {
+     "n": 44,
+     "median": 1.058545372754418,
+     "p90": 3.6815337565226067,
+     "max": 8928.701754385966
+    },
+    "JOIN": {
+     "n": 65,
+     "median": 1.139097191589472,
+     "p90": 9.05728688931298,
+     "max": 8928.701754385966
+    },
+    "OTHER": {
+     "n": 68,
+     "median": 1.5906614237298178,
+     "p90": 1196.5714285714287,
+     "max": 35094.82456140351
+    },
+    "SCAN": {
+     "n": 87,
+     "median": 1.0,
+     "p90": 1.0,
+     "max": 1.0
+    },
+    "ALL": {
+     "n": 293,
+     "median": 1.0050465226304999,
+     "p90": 14.144506681984424,
+     "max": 35094.82456140351
+    }
+   },
+   "c_out": {
+    "q01": 0,
+    "q02": 167216,
+    "q03": 177645,
+    "q04": 52523,
+    "q05": 1101953,
+    "q06": 0,
+    "q07": 287628,
+    "q08": 78285,
+    "q09": 6969427,
+    "q10": 228843,
+    "q11": 65200,
+    "q12": 30988,
+    "q13": 1534302,
+    "q14": 75983,
+    "q15": 2,
+    "q16": 917954,
+    "q17": 12176,
+    "q18": 513,
+    "q19": 121,
+    "q20": 806431,
+    "q21": 310251,
+    "q22": 25384
+   }
+  },
+  "duckdb": {
+   "plans": {
+    "q01": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 5916591
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 5916591
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 5916591
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 5916591
+     }
+    ],
+    "q02": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 3589,
+      "actual": 460
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 3589,
+      "actual": 460
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 3589,
+      "actual": 460
+     },
+     {
+      "op": "CTE",
+      "kind": "OTHER",
+      "est": 0,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1923,
+      "actual": 1987
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 7170
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "LEFT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 3589,
+      "actual": 642
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 18667,
+      "actual": 2988
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 798972
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 4445,
+      "actual": 747
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 1923,
+      "actual": 1987
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 642
+     },
+     {
+      "op": "COLUMN_DATA_SCAN",
+      "kind": "SCAN",
+      "est": 0,
+      "actual": 642
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1435,
+      "actual": 460
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 1435,
+      "actual": 460
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 2871,
+      "actual": 642
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 2871,
+      "actual": 642
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 14929,
+      "actual": 1840
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 798972
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 3555,
+      "actual": 0
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1923,
+      "actual": 1987
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 1923,
+      "actual": 1987
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 3555,
+      "actual": 460
+     }
+    ],
+    "q03": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 63909,
+      "actual": 11620
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 63909,
+      "actual": 11620
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 63909,
+      "actual": 11620
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 63910,
+      "actual": 30519
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 63910,
+      "actual": 30519
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 63910,
+      "actual": 30519
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 53426
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 79155,
+      "actual": 147126
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 727303
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 37500,
+      "actual": 30142
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 37500,
+      "actual": 30142
+     }
+    ],
+    "q04": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 60000,
+      "actual": 52523
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 60000,
+      "actual": 52523
+     },
+     {
+      "op": "RIGHT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 60000,
+      "actual": 0
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 57218
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 60000,
+      "actual": 52523
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 636919,
+      "actual": 144869
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 636919,
+      "actual": 144869
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 158586
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 1200243,
+      "actual": 158586
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 251300
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 271665,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 271665,
+      "actual": 57218
+     }
+    ],
+    "q05": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 98240,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 98240,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 98240,
+      "actual": 5
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 98240,
+      "actual": 5
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 245811,
+      "actual": 7243
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 245811,
+      "actual": 7243
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 245811,
+      "actual": 7243
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 245811,
+      "actual": 184082
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 196484
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 60888,
+      "actual": 46008
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 227597
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 28846,
+      "actual": 30183
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 94724
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     }
+    ],
+    "q06": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 114160
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 114160
+     }
+    ],
+    "q07": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47057,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47057,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47057,
+      "actual": 4
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 47057,
+      "actual": 4
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47271,
+      "actual": 5924
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47271,
+      "actual": 5924
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 47271,
+      "actual": 5924
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 47271,
+      "actual": 5924
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 47271,
+      "actual": 11723
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 232907,
+      "actual": 145703
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 132516
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 230815,
+      "actual": 145703
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 1828384
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1923,
+      "actual": 798
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 798
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 5,
+      "actual": 2
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 28846,
+      "actual": 12008
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 12008
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 25,
+      "actual": 2
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q08": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1612,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1612,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1612,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1612,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1758,
+      "actual": 2603
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1758,
+      "actual": 2603
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1758,
+      "actual": 2603
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1758,
+      "actual": 2603
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1828,
+      "actual": 2603
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 1945
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1828,
+      "actual": 2603
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 9508,
+      "actual": 13156
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 12404
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 9009,
+      "actual": 13389
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 13995
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 44641,
+      "actual": 43693
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001161
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1419,
+      "actual": 1451
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 5,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 5
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q09": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5119127,
+      "actual": 175
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5119127,
+      "actual": 175
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5119127,
+      "actual": 175
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 5119127,
+      "actual": 175
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5120507,
+      "actual": 319404
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5120507,
+      "actual": 319404
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5120507,
+      "actual": 319404
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 5120507,
+      "actual": 319404
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1269804,
+      "actual": 319404
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1258399,
+      "actual": 319404
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001200
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 40000,
+      "actual": 10664
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1500000
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 769230,
+      "actual": 800000
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 800000
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 9615,
+      "actual": 10000
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 10000
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     }
+    ],
+    "q10": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 409685,
+      "actual": 37967
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 409685,
+      "actual": 37967
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 409685,
+      "actual": 37967
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 409685,
+      "actual": 114705
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 409685,
+      "actual": 114705
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 409685,
+      "actual": 114705
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 2000405,
+      "actual": 119764
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 304442,
+      "actual": 57069
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 144230,
+      "actual": 42699
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 42699
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 25,
+      "actual": 25
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 57069
+     }
+    ],
+    "q11": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 56,
+      "actual": 1048
+     },
+     {
+      "op": "CTE",
+      "kind": "OTHER",
+      "est": 0,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 30769,
+      "actual": 31680
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 799717
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 384,
+      "actual": 396
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 396
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "NESTED_LOOP_JOIN",
+      "kind": "JOIN",
+      "est": 56,
+      "actual": 1048
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 23860,
+      "actual": 29818
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 30769,
+      "actual": 31680
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 30769,
+      "actual": 31680
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 0,
+      "actual": 31680
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 0,
+      "actual": 31680
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 30769,
+      "actual": 31680
+     }
+    ],
+    "q12": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5,
+      "actual": 2
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 5,
+      "actual": 2
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 242223,
+      "actual": 30988
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 242223,
+      "actual": 30988
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 242223,
+      "actual": 30988
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 34850
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 240048,
+      "actual": 30988
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 240048,
+      "actual": 30988
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 885773
+     }
+    ],
+    "q13": [
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 83106,
+      "actual": 42
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 124908,
+      "actual": 150000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 124908,
+      "actual": 150000
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 124908,
+      "actual": 150000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 300000,
+      "actual": 1534302
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 300000,
+      "actual": 1534302
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 300000,
+      "actual": 1484298
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 150000
+     }
+    ],
+    "q14": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1258399,
+      "actual": 75983
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1258399,
+      "actual": 75983
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 75983
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     }
+    ],
+    "q15": [
+     {
+      "op": "CTE",
+      "kind": "OTHER",
+      "est": 3,
+      "actual": 0
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 8565,
+      "actual": 10000
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 8565,
+      "actual": 10000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 225954
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 225954
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 225954
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 3,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 3,
+      "actual": 1
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 3,
+      "actual": 1
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 1
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 3,
+      "actual": 1
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 8565,
+      "actual": 10000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 8565,
+      "actual": 10000
+     },
+     {
+      "op": "CTE_SCAN",
+      "kind": "SCAN",
+      "est": 8565,
+      "actual": 10000
+     }
+    ],
+    "q16": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6718,
+      "actual": 18314
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6718,
+      "actual": 18314
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6718,
+      "actual": 18314
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 6718,
+      "actual": 18314
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6719,
+      "actual": 118274
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6719,
+      "actual": 118274
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6719,
+      "actual": 118274
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 6719,
+      "actual": 118274
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 33597,
+      "actual": 118324
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 33597,
+      "actual": 118324
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 799988
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 8000,
+      "actual": 29581
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 8000,
+      "actual": 29581
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 40000,
+      "actual": 185566
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 40000,
+      "actual": 185566
+     },
+     {
+      "op": "COLUMN_DATA_SCAN",
+      "kind": "SCAN",
+      "est": 0,
+      "actual": 8
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 2000,
+      "actual": 4
+     }
+    ],
+    "q17": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 170072,
+      "actual": 587
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 170072,
+      "actual": 587
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 170072,
+      "actual": 587
+     },
+     {
+      "op": "RIGHT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 170072,
+      "actual": 6088
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6000347
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 5406,
+      "actual": 204
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 6088
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1770301,
+      "actual": 204
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 1770301,
+      "actual": 204
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 3540602,
+      "actual": 6088
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 3540602,
+      "actual": 6088
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6000347
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 112543,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 112543,
+      "actual": 204
+     }
+    ],
+    "q18": [
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 1278218,
+      "actual": 57
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1278218,
+      "actual": 399
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 1278218,
+      "actual": 399
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 30704
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 316620,
+      "actual": 57
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 300000,
+      "actual": 57
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 7589
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 102386,
+      "actual": 57
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 102386,
+      "actual": 57
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 511934,
+      "actual": 1500000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6001215
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 150000,
+      "actual": 149999
+     }
+    ],
+    "q19": [
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 314599,
+      "actual": 121
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 314599,
+      "actual": 121
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 314599,
+      "actual": 121
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 314599,
+      "actual": 214377
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 200000,
+      "actual": 200000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 300060,
+      "actual": 214377
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 300060,
+      "actual": 214377
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500304,
+      "actual": 1500048
+     }
+    ],
+    "q20": [
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 76,
+      "actual": 186
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 160000,
+      "actual": 5833
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 160000,
+      "actual": 5833
+     },
+     {
+      "op": "RIGHT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 160000,
+      "actual": 8508
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 800000,
+      "actual": 13288
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 40000,
+      "actual": 2127
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 0,
+      "actual": 8508
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 251635,
+      "actual": 5843
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 251635,
+      "actual": 5843
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 251635,
+      "actual": 5843
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 503271,
+      "actual": 9741
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 503271,
+      "actual": 9741
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 503271,
+      "actual": 9741
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1200243,
+      "actual": 909449
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 159972,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 159972,
+      "actual": 8508
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 384,
+      "actual": 412
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 412
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     }
+    ],
+    "q21": [
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 888,
+      "actual": 411
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 931,
+      "actual": 4141
+     },
+     {
+      "op": "LEFT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 931,
+      "actual": 0
+     },
+     {
+      "op": "RIGHT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 4658,
+      "actual": 0
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 23290,
+      "actual": 75871
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 750000,
+      "actual": 77036
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 46163,
+      "actual": 156739
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 3792641
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 1200243,
+      "actual": 3792641
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6000146
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 384,
+      "actual": 411
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 10000,
+      "actual": 411
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 4658,
+      "actual": 73089
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 130266,
+      "actual": 302356
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 130266,
+      "actual": 302356
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6000971
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 22225,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 22225,
+      "actual": 75864
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 931,
+      "actual": 4141
+     },
+     {
+      "op": "COLUMN_DATA_SCAN",
+      "kind": "SCAN",
+      "est": 931,
+      "actual": 73089
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 5408,
+      "actual": 190909
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 5408,
+      "actual": 190909
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1200243,
+      "actual": 3793144
+     },
+     {
+      "op": "FILTER",
+      "kind": "FILTER",
+      "est": 1200243,
+      "actual": 3793144
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 6001215,
+      "actual": 6000971
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 4614,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 4614,
+      "actual": 73082
+     }
+    ],
+    "q22": [
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 1,
+      "actual": 7
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 2,
+      "actual": 6384
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 2,
+      "actual": 6384
+     },
+     {
+      "op": "RIGHT_DELIM_JOIN",
+      "kind": "JOIN",
+      "est": 2,
+      "actual": 0
+     },
+     {
+      "op": "NESTED_LOOP_JOIN",
+      "kind": "JOIN",
+      "est": 13,
+      "actual": 19000
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 30000,
+      "actual": 19000
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 1,
+      "actual": 1
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 30000,
+      "actual": 38120
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 30000,
+      "actual": 38120
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 2,
+      "actual": 6384
+     },
+     {
+      "op": "PROJECTION",
+      "kind": "OTHER",
+      "est": 120,
+      "actual": 190069
+     },
+     {
+      "op": "HASH_JOIN",
+      "kind": "JOIN",
+      "est": 120,
+      "actual": 190069
+     },
+     {
+      "op": "TABLE_SCAN",
+      "kind": "SCAN",
+      "est": 1500000,
+      "actual": 1499995
+     },
+     {
+      "op": "DELIM_SCAN",
+      "kind": "SCAN",
+      "est": 12,
+      "actual": 0
+     },
+     {
+      "op": "HASH_GROUP_BY",
+      "kind": "AGGREGATE",
+      "est": 12,
+      "actual": 19000
+     }
+    ]
+   },
+   "qerror": {
+    "AGGREGATE": {
+     "n": 26,
+     "median": 7.364130434782609,
+     "p90": 15706.125,
+     "max": 29252.154285714285
+    },
+    "FILTER": {
+     "n": 16,
+     "median": 7.77432821120097,
+     "p90": 1042.9882243940344,
+     "max": 2599.99173553719
+    },
+    "JOIN": {
+     "n": 76,
+     "median": 3.458600164465213,
+     "p90": 2387.9541666666664,
+     "max": 60000.0
+    },
+    "OTHER": {
+     "n": 114,
+     "median": 5.311890915850129,
+     "p90": 7035.62842031551,
+     "max": 31680.0
+    },
+    "SCAN": {
+     "n": 96,
+     "median": 1.5812476802410993,
+     "p90": 196.55417479769852,
+     "max": 271665.0
+    },
+    "ALL": {
+     "n": 328,
+     "median": 4.447905477980666,
+     "p90": 3192.0,
+     "max": 271665.0
+    }
+   },
+   "c_out": {
+    "q01": 0,
+    "q02": 8746,
+    "q03": 177645,
+    "q04": 197392,
+    "q05": 267521,
+    "q06": 0,
+    "q07": 315935,
+    "q08": 78052,
+    "q09": 1768212,
+    "q10": 214473,
+    "q11": 33124,
+    "q12": 30988,
+    "q13": 1534302,
+    "q14": 75983,
+    "q15": 2,
+    "q16": 422214,
+    "q17": 18264,
+    "q18": 513,
+    "q19": 214377,
+    "q20": 27355,
+    "q21": 803516,
+    "q22": 215453
+   }
+  }
+ }
+}
