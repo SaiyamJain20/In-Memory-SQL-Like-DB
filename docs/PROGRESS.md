@@ -753,3 +753,5 @@ DuckDB's 4.45, with the caveat that its estimator was tuned on these queries). I
 counters (`perf` is not installable without root), so profiles are instruction counts and a simulated cache; PostgreSQL not compared (no root);
 H2O-style data re-created, not the original generator; defaults, not tuning (ClickHouse in particular); Polars queries are DataFrame code, not SQL;
 the author built one of the systems (mitigations listed). None of the inefficiencies was fixed: they are the next measured targets.
+
+**CI (GitHub Actions, run 37710719403)** - all jobs green (format, gcc-13 and clang-18 x debug and release, asan, tsan, the libFuzzer smoke job) on the commit with the report and the harness; the commit after it adds only this line.
